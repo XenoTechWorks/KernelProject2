@@ -230,20 +230,6 @@ WINAPI DWORD k32_GetCurrentDirectoryA(DWORD size, LPSTR buf) {
 
 WINAPI DWORD k32_GetTempPathA(DWORD size, LPSTR buf) { return copy_out("C:\\tmp\\", size, buf); }
 
-WINAPI DWORD k32_GetModuleFileNameA(HMODULE module, LPSTR buf, DWORD size) {
-    if (module && module != process::image_base) {
-        set_last_error(ERROR_INVALID_HANDLE);
-        return 0;
-    }
-    std::string path = process::module_path;
-    if (size == 0) return 0;
-    size_t n = path.size() < size ? path.size() : size - 1;
-    memcpy(buf, path.c_str(), n);
-    buf[n] = 0;
-    if (n < path.size()) set_last_error(ERROR_INSUFFICIENT_BUFFER);
-    return static_cast<DWORD>(n);
-}
-
 WINAPI DWORD k32_GetFullPathNameA(LPCSTR name, DWORD size, LPSTR buf, LPSTR *file_part) {
     std::string path = unix_path(name);
     if (!path.starts_with('/')) {
@@ -305,7 +291,7 @@ const Export exports[] = {
     EXPORT(CloseHandle), EXPORT(CreateDirectoryA), EXPORT(CreateFileA), EXPORT(DeleteFileA), EXPORT(FindClose),
     EXPORT(FindFirstFileA), EXPORT(FindNextFileA), EXPORT(FlushFileBuffers), EXPORT(GetCurrentDirectoryA),
     EXPORT(GetFileAttributesA), EXPORT(GetFileSize), EXPORT(GetFileSizeEx), EXPORT(GetFileType),
-    EXPORT(GetFullPathNameA), EXPORT(GetModuleFileNameA), EXPORT(GetStdHandle), EXPORT(GetTempPathA),
+    EXPORT(GetFullPathNameA), EXPORT(GetStdHandle), EXPORT(GetTempPathA),
     EXPORT(MoveFileA), EXPORT(MoveFileExA), EXPORT(ReadFile), EXPORT(RemoveDirectoryA),
     EXPORT(SetCurrentDirectoryA), EXPORT(SetEndOfFile), EXPORT(SetFilePointer), EXPORT(SetFilePointerEx),
     EXPORT(WriteConsoleA), EXPORT(WriteFile),

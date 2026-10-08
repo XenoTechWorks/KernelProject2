@@ -185,8 +185,6 @@ WINAPI LPSTR k32_GetCommandLineA() { return const_cast<LPSTR>(process::command_l
 WINAPI DWORD k32_GetCurrentProcessId() { return static_cast<DWORD>(getpid()); }
 WINAPI DWORD k32_GetCurrentThreadId() { return static_cast<DWORD>(syscall(SYS_gettid)); }
 WINAPI HANDLE k32_GetCurrentProcess() { return reinterpret_cast<HANDLE>(-1); }
-WINAPI HMODULE k32_GetModuleHandleA(LPCSTR name) { return name ? nullptr : process::image_base; }
-WINAPI HMODULE k32_GetModuleHandleW(LPCWSTR name) { return name ? nullptr : process::image_base; }
 
 WINAPI DWORD k32_GetTickCount() {
     timespec t;
@@ -218,7 +216,7 @@ namespace {
 const Export exports[] = {
     EXPORT(ExitProcess), EXPORT(GetCommandLineA),
     EXPORT(GetCurrentProcess), EXPORT(GetCurrentProcessId), EXPORT(GetCurrentThreadId), EXPORT(GetLastError),
-    EXPORT(GetModuleHandleA), EXPORT(GetModuleHandleW), EXPORT(GetSystemTimeAsFileTime),
+    EXPORT(GetSystemTimeAsFileTime),
     EXPORT(GetTickCount), EXPORT(IsDBCSLeadByteEx), EXPORT(MultiByteToWideChar),
     EXPORT(QueryPerformanceCounter), EXPORT(QueryPerformanceFrequency), EXPORT(SetLastError),
     EXPORT(SetUnhandledExceptionFilter), EXPORT(Sleep), EXPORT(TlsAlloc), EXPORT(TlsFree), EXPORT(TlsGetValue),

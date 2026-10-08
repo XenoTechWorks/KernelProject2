@@ -63,6 +63,9 @@ for program in hello winapi files threads; do
     x86_64-w64-mingw32-gcc -O2 -o "$stage/bin/$program.exe" "$root/tests/windows/$program.c"
     x86_64-w64-mingw32-gcc -O2 -specs="$ucrt_specs" -D_UCRT -o "$stage/bin/$program-ucrt.exe" "$root/tests/windows/$program.c"
 done
+# A DLL and a program that uses it (linked, and through LoadLibrary).
+x86_64-w64-mingw32-gcc -O2 -shared -o "$stage/bin/mathlib.dll" -Wl,--out-implib,"$out/libmathlib.a" "$root/tests/windows/mathlib.c"
+x86_64-w64-mingw32-gcc -O2 -o "$stage/bin/dlltest.exe" "$root/tests/windows/dlltest.c" -L"$out" -lmathlib
 
 # Unmodified Linux programs built from their own sources (see README: "Real Linux programs").
 # git straight from Ubuntu, with the template files `git init` copies.

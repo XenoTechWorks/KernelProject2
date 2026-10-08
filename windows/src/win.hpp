@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #define WINAPI __attribute__((ms_abi))
 
@@ -50,7 +51,7 @@ extern const BuiltinDll ucrt_dll;  // also answers for api-ms-win-crt-*.dll
 
 // The image's thread-local storage template (its .tls directory), copied for every thread.
 struct TlsTemplate {
-    bool present;
+    void *image;
     uint64_t start, end, callbacks;
     uint32_t zero_fill;
 };
@@ -63,8 +64,7 @@ extern char **envp;
 extern void *image_base;
 extern size_t image_size;
 extern const char *command_line;
-extern const char *module_path;  // the .exe, as an absolute Windows path
-extern TlsTemplate tls;
+extern std::vector<TlsTemplate> tls;  // one per image with a .tls section, by slot
 [[noreturn]] void exit(int code);
 }  // namespace process
 
@@ -89,6 +89,8 @@ constexpr DWORD DLL_THREAD_ATTACH = 2;
 // Sets up a TEB (and the shared PEB) for the calling thread, points gs at it, gives the thread its
 // copy of the image's TLS variables, and runs the TLS callbacks with `reason`.
 void attach_thread(DWORD reason);
+// Gives the calling thread its copy of TLS slot `index` (an image loaded after it started).
+void add_tls_slot(uint32_t index);
 uint8_t *current();
 }  // namespace teb
 

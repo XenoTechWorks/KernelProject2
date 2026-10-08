@@ -9,7 +9,7 @@
 #include "win.hpp"
 
 namespace process {
-TlsTemplate tls;
+std::vector<TlsTemplate> tls;
 }
 
 namespace {
@@ -18,6 +18,12 @@ thread_local uint8_t *this_teb;
 uint8_t *the_peb;
 
 void put(uint8_t *block, size_t at, uint64_t value) { memcpy(block + at, &value, 8); }
+
+void *copy_template(const TlsTemplate &tls) {
+    auto *block = static_cast<uint8_t *>(calloc(1, tls.end - tls.start + tls.zero_fill + 16));
+    memcpy(block, reinterpret_cast<void *>(tls.start), tls.end - tls.start);
+    return block;
+}
 }  // namespace
 
 void teb::attach_thread(DWORD reason) {
@@ -38,21 +44,22 @@ void teb::attach_thread(DWORD reason) {
     put(t, THREAD_ID, static_cast<uint64_t>(syscall(SYS_gettid)));
     put(t, PEB, reinterpret_cast<uint64_t>(the_peb));
 
-    // This thread's copy of the program's thread-local variables.
-    const TlsTemplate &tls = process::tls;
-    if (tls.present) {
-        auto **array = static_cast<void **>(calloc(1, sizeof(void *)));
-        auto *block = static_cast<uint8_t *>(calloc(1, tls.end - tls.start + tls.zero_fill + 16));
-        memcpy(block, reinterpret_cast<void *>(tls.start), tls.end - tls.start);
-        array[0] = block;
-        put(t, TLS_POINTER, reinterpret_cast<uint64_t>(array));
-    }
+    // This thread's copies of every image's thread-local variables, one slot each.
+    auto **array = static_cast<void **>(calloc(64, sizeof(void *)));
+    for (size_t i = 0; i < process::tls.size() && i < 64; i++) array[i] = copy_template(process::tls[i]);
+    put(t, TLS_POINTER, reinterpret_cast<uint64_t>(array));
     syscall(SYS_arch_prctl, ARCH_SET_GS, t);
 
-    if (tls.present) {
-        using TlsCallback = void(WINAPI *)(void *, DWORD, void *);
-        for (auto *cb = reinterpret_cast<TlsCallback *>(tls.callbacks); cb && *cb; cb++) (*cb)(process::image_base, reason, nullptr);
-    }
+    using TlsCallback = void(WINAPI *)(void *, DWORD, void *);
+    for (const TlsTemplate &tls : process::tls)
+        for (auto *cb = reinterpret_cast<TlsCallback *>(tls.callbacks); cb && *cb; cb++) (*cb)(tls.image, reason, nullptr);
+}
+
+void teb::add_tls_slot(uint32_t index) {
+    if (index >= 64 || !this_teb) return;
+    void **array;
+    memcpy(&array, this_teb + TLS_POINTER, 8);
+    array[index] = copy_template(process::tls[index]);
 }
 
 uint8_t *teb::current() { return this_teb; }
