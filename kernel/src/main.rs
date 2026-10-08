@@ -8,10 +8,12 @@ extern crate alloc;
 
 mod arch;
 mod console;
+mod font;
 mod fs;
 mod keyboard;
 mod mm;
 mod proc;
+mod smbios;
 mod sys;
 mod time;
 mod tty;
@@ -19,7 +21,7 @@ mod tty;
 use arch::{gdt, idt, irq, serial};
 use core::fmt::Write;
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
-use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ModulesRequest};
+use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ModulesRequest, SmbiosRequest};
 
 // What we ask Limine for. It fills in the responses before jumping to kmain.
 #[used]
@@ -40,6 +42,9 @@ static FRAMEBUFFER: FramebufferRequest = FramebufferRequest::new();
 #[used]
 #[unsafe(link_section = ".limine_requests")]
 static MODULES: ModulesRequest = ModulesRequest::new();
+#[used]
+#[unsafe(link_section = ".limine_requests")]
+static SMBIOS: SmbiosRequest = SmbiosRequest::new();
 #[used]
 #[unsafe(link_section = ".limine_requests_end")]
 static REQUESTS_END: RequestsEndMarker = RequestsEndMarker::new();
@@ -104,9 +109,18 @@ extern "C" fn kmain() -> ! {
     announce(&alloc::format!("\x1b[1;36mKernelProject2\x1b[0m {VERSION}\n"));
 
     time::init();
+    arch::cpuid::mark_boot();
     tty::init();
     proc::init();
     fs::init_devices();
+    let dmi = match SMBIOS.response() {
+        Some(r) => smbios::read(r.entry_32 as *const u8, r.entry_64 as *const u8),
+        None => smbios::Dmi::default(),
+    };
+    if let Some((_, name)) = dmi.fields.iter().find(|(n, _)| *n == "product_name") {
+        log!("machine: {name}");
+    }
+    fs::sysfs::init(&dmi);
     match MODULES.response().and_then(|r| r.modules().iter().find(|m| m.cmdline() == "initramfs").copied()) {
         Some(module) => {
             let count = fs::cpio::unpack(module.data());

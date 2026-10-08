@@ -4,6 +4,8 @@
 
 pub mod cpio;
 pub mod pipe;
+pub mod procfs;
+pub mod sysfs;
 
 use crate::sys::errno::*;
 use alloc::collections::BTreeMap;
@@ -129,6 +131,15 @@ fn lookup_depth(path: &str, follow: bool, depth: u32) -> Result<Arc<Node>, Errno
     let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
     let mut node = root().clone();
     for (i, part) in parts.iter().enumerate() {
+        // /proc is made up fresh each time it's looked at.
+        if i == 0 && *part == "proc" {
+            let fresh = procfs::build();
+            if parts.len() == 1 {
+                return Ok(fresh);
+            }
+            node = fresh;
+            continue;
+        }
         let next = match &node.kind {
             Kind::Dir(entries) => entries.lock().get(*part).cloned().ok_or(ENOENT)?,
             _ => return Err(ENOTDIR),

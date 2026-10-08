@@ -1,6 +1,7 @@
 //! x86-64 specifics.
 
 pub mod cpu;
+pub mod cpuid;
 pub mod gdt;
 pub mod idt;
 pub mod irq;

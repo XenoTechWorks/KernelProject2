@@ -15,6 +15,7 @@ use crate::sys::errno::*;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::arch::{asm, global_asm};
 use core::cell::UnsafeCell;
 use fd::FdTable;
@@ -72,6 +73,8 @@ pub struct Process {
     pub name: String,
     pub exe: String,
     pub cwd: String,
+    /// The arguments it was started with, NUL-separated (/proc/<pid>/cmdline).
+    pub cmdline: Vec<u8>,
     pub umask: u32,
     pub space: Option<AddressSpace>,
     pub fds: FdTable,
@@ -137,6 +140,15 @@ pub fn init() {
 }
 
 /// The running process. Only valid while running on its behalf (in a system call or interrupt).
+fn cmdline_of(args: &[String]) -> Vec<u8> {
+    args.iter().flat_map(|a| a.bytes().chain(core::iter::once(0))).collect()
+}
+
+/// The running process's pid, if a process is running.
+pub fn current_pid() -> Option<u32> {
+    sched().current
+}
+
 pub fn current() -> &'static mut Process {
     let s = sched();
     let pid = s.current.expect("no current process");
@@ -201,6 +213,7 @@ fn blank_process(pid: u32) -> Box<Process> {
         name: String::new(),
         exe: String::new(),
         cwd: String::from("/"),
+        cmdline: Vec::new(),
         umask: 0o022,
         space: None,
         fds: FdTable::default(),
@@ -235,6 +248,7 @@ pub fn spawn_init(path: &str) -> Result<(), Errno> {
     let image = elf::load(path, &args, &env)?;
     p.name = elf::short_name(path);
     p.exe = String::from(path);
+    p.cmdline = cmdline_of(&args);
     p.brk_start = image.brk;
     p.brk = image.brk;
     p.space = Some(image.space);
@@ -372,6 +386,7 @@ pub fn fork(frame: &TrapFrame, flags: u64, new_sp: u64, parent_tid: u64, child_t
     child.sid = parent.sid;
     child.name = parent.name.clone();
     child.exe = parent.exe.clone();
+    child.cmdline = parent.cmdline.clone();
     child.cwd = parent.cwd.clone();
     child.umask = parent.umask;
     child.fds = parent.fds.clone();
@@ -424,6 +439,7 @@ pub fn exec(frame: &mut TrapFrame, path: &str, args: &[String], env: &[String]) 
     p.space = Some(image.space);
     p.name = elf::short_name(args.first().map_or(path, |a| a.as_str()));
     p.exe = image.path;
+    p.cmdline = cmdline_of(args);
     p.brk_start = image.brk;
     p.brk = image.brk;
     p.mmap_next = MMAP_TOP;

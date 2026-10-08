@@ -1,0 +1,173 @@
+//! /proc: files whose contents are made up when they're opened, describing the system and every
+//! process in the formats Linux uses (programs like fastfetch, ps and top parse them).
+
+use super::{Kind, Node};
+use crate::proc::{self, State};
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use spin::Mutex;
+
+fn file(text: impl Into<Vec<u8>>) -> Arc<Node> {
+    Node::file(text.into(), 0o444)
+}
+
+fn link(target: impl Into<String>) -> Arc<Node> {
+    Node::new(Kind::Symlink(target.into()), 0o777)
+}
+
+fn dir(entries: Vec<(String, Arc<Node>)>) -> Arc<Node> {
+    let node = Node::new(Kind::Dir(Mutex::new(BTreeMap::new())), 0o555);
+    if let Kind::Dir(map) = &node.kind {
+        map.lock().extend(entries);
+    }
+    node
+}
+
+fn meminfo() -> String {
+    let (free, total) = crate::mm::frame::stats();
+    let (free, total) = (free * 4, total * 4);
+    let mut s = String::new();
+    for (name, kb) in [
+        ("MemTotal", total),
+        ("MemFree", free),
+        ("MemAvailable", free),
+        ("Buffers", 0),
+        ("Cached", 0),
+        ("SwapCached", 0),
+        ("Active", total - free),
+        ("Inactive", 0),
+        ("SwapTotal", 0),
+        ("SwapFree", 0),
+        ("Shmem", 0),
+        ("SReclaimable", 0),
+    ] {
+        s += &format!("{:<16}{:>8} kB\n", format!("{name}:"), kb);
+    }
+    s
+}
+
+fn cpuinfo() -> String {
+    let cpu = crate::arch::cpuid::info();
+    let mhz = crate::arch::cpuid::tsc_mhz();
+    format!(
+        "processor\t: 0\nvendor_id\t: {}\ncpu family\t: {}\nmodel\t\t: {}\nmodel name\t: {}\nstepping\t: {}\n\
+         cpu MHz\t\t: {mhz}.000\nphysical id\t: 0\nsiblings\t: 1\ncore id\t\t: 0\ncpu cores\t: 1\n\
+         flags\t\t: {}\nbogomips\t: {}.00\naddress sizes\t: 48 bits physical, 48 bits virtual\n\n",
+        cpu.vendor,
+        cpu.family,
+        cpu.model,
+        cpu.brand,
+        cpu.stepping,
+        cpu.flags.join(" "),
+        mhz * 2,
+    )
+}
+
+fn uptime() -> String {
+    let (secs, nanos) = crate::time::monotonic();
+    format!("{secs}.{:02} {secs}.{:02}\n", nanos / 10_000_000, nanos / 10_000_000)
+}
+
+fn stat() -> String {
+    let ticks = crate::arch::irq::ticks();
+    let boot = crate::time::realtime().0 - crate::time::monotonic().0;
+    let count = proc::all().count();
+    format!(
+        "cpu  0 0 0 {ticks} 0 0 0 0 0 0\ncpu0 0 0 0 {ticks} 0 0 0 0 0 0\nintr 0\nctxt 0\nbtime {boot}\n\
+         processes {count}\nprocs_running 1\nprocs_blocked 0\n"
+    )
+}
+
+const MOUNTS: &str = "rootfs / tmpfs rw 0 0\nproc /proc proc rw,nosuid,nodev,noexec 0 0\n\
+                      sysfs /sys sysfs rw,nosuid,nodev,noexec 0 0\ndevtmpfs /dev devtmpfs rw 0 0\n";
+
+fn state_letter(state: State) -> char {
+    match state {
+        State::Runnable => 'R',
+        State::Sleeping => 'S',
+        State::Zombie(_) => 'Z',
+    }
+}
+
+fn process_dir(p: &proc::Process) -> Arc<Node> {
+    let state = state_letter(p.state);
+    let tty = if p.sid == 1 || p.ppid != 0 { 0x501 } else { 0 }; // /dev/console (5, 1)
+    let stat = format!(
+        "{} ({}) {state} {} {} {} {tty} {} 0 0 0 0 0 0 0 0 0 20 0 1 0 {} 0 0\n",
+        p.pid,
+        p.name,
+        p.ppid,
+        p.pgid,
+        p.sid,
+        crate::tty::foreground(),
+        p.start_ticks,
+    );
+    let status = format!(
+        "Name:\t{}\nState:\t{state}\nTgid:\t{pid}\nPid:\t{pid}\nPPid:\t{}\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nThreads:\t1\n",
+        p.name,
+        p.ppid,
+        pid = p.pid,
+    );
+    let fds = p
+        .fds
+        .iter()
+        .map(|(n, file)| (n.to_string(), link(file.path.clone())))
+        .collect();
+    dir(alloc::vec![
+        ("stat".into(), file(stat)),
+        ("status".into(), file(status)),
+        ("comm".into(), file(format!("{}\n", p.name))),
+        ("cmdline".into(), file(p.cmdline.clone())),
+        ("environ".into(), file(Vec::new())),
+        ("maps".into(), file(Vec::new())),
+        ("mounts".into(), file(MOUNTS)),
+        ("exe".into(), link(p.exe.clone())),
+        ("cwd".into(), link(p.cwd.clone())),
+        ("root".into(), link("/")),
+        ("fd".into(), dir(fds)),
+    ])
+}
+
+/// The whole /proc tree as it is right now.
+pub fn build() -> Arc<Node> {
+    let mut entries: Vec<(String, Arc<Node>)> = alloc::vec![
+        ("meminfo".into(), file(meminfo())),
+        ("cpuinfo".into(), file(cpuinfo())),
+        ("uptime".into(), file(uptime())),
+        ("stat".into(), file(stat())),
+        ("loadavg".into(), file(format!("0.00 0.00 0.00 1/{} 0\n", proc::all().count()))),
+        ("version".into(), file(format!("Linux version 6.12.0-kp2 (KernelProject2 {}) #1\n", crate::VERSION))),
+        ("mounts".into(), file(MOUNTS)),
+        ("swaps".into(), file("Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n")),
+        ("filesystems".into(), file("nodev\ttmpfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\n")),
+        ("cmdline".into(), file("\n")),
+        (
+            "sys".into(),
+            dir(alloc::vec![
+                (
+                    "kernel".into(),
+                    dir(alloc::vec![
+                        ("hostname".into(), file("kernelproject2\n")),
+                        ("ostype".into(), file("Linux\n")),
+                        ("osrelease".into(), file("6.12.0-kp2\n")),
+                    ])
+                ),
+                (
+                    "vm".into(),
+                    dir(alloc::vec![("overcommit_memory".into(), file("0\n")), ("nr_hugepages".into(), file("0\n"))])
+                ),
+            ])
+        ),
+    ];
+    if let Some(pid) = proc::current_pid() {
+        entries.push(("self".into(), link(pid.to_string())));
+        entries.push(("thread-self".into(), link(format!("{pid}/task/{pid}"))));
+    }
+    for p in proc::all() {
+        entries.push((p.pid.to_string(), process_dir(p)));
+    }
+    dir(entries)
+}

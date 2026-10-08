@@ -22,8 +22,25 @@ kernel answers those calls the way Linux does, the program can't tell the differ
 - About 90 Linux system calls (see `kernel/src/sys/mod.rs`). Missing ones return `ENOSYS` and are
   logged once on the serial port, which shows what a new program needs next.
 
+- `/proc` (meminfo, cpuinfo, uptime, stat, mounts, and each process's stat, status, cmdline, exe, fd)
+  and the parts of `/sys` programs read today, including the machine's real identity from SMBIOS.
+- The screen uses the Spleen 8x16 font with UTF-8, 160x50 characters at 1280x800.
+
 The proof: `hello-static` and `hello-dynamic` are ordinary C programs built by gcc against glibc and
-copied in unchanged, and they run.
+copied in unchanged, and they run. So does **fastfetch**, built from its own unchanged source.
+
+## Real Linux programs
+
+Programs built on the build machine can be copied in unchanged; `build.sh` brings their shared
+libraries along (`add_host_program`). fastfetch is picked up automatically when it's built here:
+
+```sh
+sudo apt install cmake make gcc g++
+git clone --depth=1 --branch=2.69.0 https://github.com/fastfetch-cli/fastfetch.git ~/src/fastfetch
+cmake -S ~/src/fastfetch -B ~/src/fastfetch/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF
+cmake --build ~/src/fastfetch/build -j8
+./build.sh
+```
 
 ## The command line
 
@@ -76,21 +93,22 @@ tests/smoke.sh        # boot, type commands, check the answers
 
 Roughly in order; each step is checked by running a real program.
 
-1. **More of Linux for real tools**: `/proc` (meminfo, cpuinfo, self/exe, per-process files),
-   `/sys` basics, signal handlers (`rt_sigaction` + delivery + `rt_sigreturn`), `socketpair` and
+1. **More of Linux for real tools**: signal handlers (`rt_sigaction` + delivery + `rt_sigreturn`), `socketpair` and
    Unix sockets, `eventfd`, `epoll`.
 2. **Threads**: `clone(CLONE_VM | CLONE_THREAD)`, real futexes, per-thread TLS. git and most modern
    programs use threads.
 3. **Disks**: a virtio or AHCI driver and a real file system (ext2 first), so programs and files
    persist and don't all live in the boot archive.
-4. **Run the targets**: fastfetch, then git, then BusyBox or coreutils as a compatibility test.
+4. **Run the targets**: fastfetch runs; next git, then BusyBox or coreutils as a compatibility test.
 5. **Windows programs**: our own Windows layer (C++). A PE loader for `.exe` files and the Windows
    system DLLs (`kernel32`, `ntdll`, ...) implemented on top of the kernel, the same idea as Wine but
    built into the system.
-6. Later: more CPUs (APIC/IOAPIC), networking, a nicer 8x16 font, a real login.
+6. Later: more CPUs (APIC/IOAPIC), networking, a real login, and running make/gcc/cmake on the system itself.
 
 ## Licenses of what's used
 
 - [Limine](https://codeberg.org/Limine/Limine) (bootloader, BSD-2-Clause) is downloaded at build time.
-- Rust crates: `limine`, `spin`, `linked_list_allocator`, `font8x8` (MIT/Apache-2.0).
+- Rust crates: `limine`, `spin`, `linked_list_allocator` (MIT/Apache-2.0).
+- The console font is [Spleen](https://github.com/fcambus/spleen) 8x16 (BSD-2-Clause, `kernel/src/font-LICENSE`),
+  converted by `tools/bdf2rs.py`.
 - The test programs link against glibc (LGPL) from the build machine.

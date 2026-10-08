@@ -39,11 +39,23 @@ ln -sf kpsh "$stage/bin/sh"
 step "Linux test programs (built with gcc, copied in unchanged)"
 gcc -O2 -static -o "$stage/bin/hello-static" "$root/tests/hello.c"
 gcc -O2 -o "$stage/bin/hello-dynamic" "$root/tests/hello.c"
-# The dynamic one needs the same loader and C library it was built against.
-for lib in /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/libc.so.6; do
-    mkdir -p "$stage$(dirname "$lib")"
-    cp -L "$lib" "$stage$lib"
-done
+# Copies a Linux program from this machine, unchanged, with the shared libraries it needs.
+add_host_program() {
+    local program="$1"
+    [[ "$(dirname "$program")" == "$stage/bin" ]] || cp -L "$program" "$stage/bin/"
+    ldd "$program" | grep -o '/[^ ]*' | while read -r lib; do
+        mkdir -p "$stage$(dirname "$lib")"
+        cp -L "$lib" "$stage$lib"
+    done
+}
+add_host_program "$stage/bin/hello-dynamic"
+
+# Unmodified Linux programs built from their own sources (see README: "Real Linux programs").
+fastfetch="${FASTFETCH:-$HOME/src/fastfetch/build/fastfetch}"
+if [[ -x "$fastfetch" ]]; then
+    step "fastfetch ($fastfetch)"
+    add_host_program "$fastfetch"
+fi
 
 step "boot archive"
 rm -f "$out/initramfs.cpio"

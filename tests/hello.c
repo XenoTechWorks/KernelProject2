@@ -10,7 +10,7 @@ int main(int argc, char **argv) {
     struct utsname u;
     uname(&u);
     char cwd[256];
-    getcwd(cwd, sizeof cwd);
+    if (!getcwd(cwd, sizeof cwd)) strcpy(cwd, "?");
     char *buf = malloc(1 << 20); /* exercise brk/mmap */
     memset(buf, 'x', 1 << 20);
     printf("Hello from glibc! Running on %s %s (%s), pid %d, in %s\n", u.sysname, u.release, u.machine, getpid(), cwd);

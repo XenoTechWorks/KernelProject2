@@ -1,14 +1,12 @@
-//! Text console on the boot framebuffer. Understands the common VT100/xterm escape sequences
-//! (cursor movement, clearing, 16 colors), which is what Linux command line programs print.
+//! Text console on the boot framebuffer. Understands UTF-8 and the common VT100/xterm escape
+//! sequences (cursor movement, clearing, 16 colors), which is what Linux command line programs print.
 
 use alloc::vec;
 use alloc::vec::Vec;
-use font8x8::legacy::BASIC_LEGACY;
 use spin::Mutex;
 
-const SCALE: usize = 2;
-const CELL_W: usize = 8 * SCALE;
-const CELL_H: usize = 8 * SCALE;
+const CELL_W: usize = 8;
+const CELL_H: usize = 16;
 
 // The standard 16 terminal colors (a calm palette, close to modern terminal defaults).
 const PALETTE: [u32; 16] = [
@@ -20,12 +18,12 @@ const DEFAULT_BG: u8 = 0;
 
 #[derive(Clone, Copy)]
 struct Cell {
-    ch: u8,
+    ch: u32,
     fg: u8,
     bg: u8,
 }
 
-const BLANK: Cell = Cell { ch: b' ', fg: DEFAULT_FG, bg: DEFAULT_BG };
+const BLANK: Cell = Cell { ch: ' ' as u32, fg: DEFAULT_FG, bg: DEFAULT_BG };
 
 enum Escape {
     None,
@@ -46,6 +44,8 @@ pub struct Console {
     bold: bool,
     escape: Escape,
     saved: (usize, usize),
+    /// A UTF-8 character in progress: (bytes still expected, bits so far).
+    utf8: (u8, u32),
 }
 
 unsafe impl Send for Console {}
@@ -71,6 +71,7 @@ pub fn init(fb: &limine::framebuffer::Framebuffer) {
         bold: false,
         escape: Escape::None,
         saved: (0, 0),
+        utf8: (0, 0),
     };
     console.redraw();
     *CONSOLE.lock() = Some(console);
@@ -107,7 +108,7 @@ impl Console {
 
     fn feed(&mut self, b: u8) {
         match core::mem::replace(&mut self.escape, Escape::None) {
-            Escape::None => self.plain(b),
+            Escape::None => self.utf8(b),
             Escape::Esc => match b {
                 b'[' => self.escape = Escape::Csi { params: [0; 8], count: 0, private: false },
                 b'7' => self.saved = (self.x, self.y),
@@ -143,7 +144,30 @@ impl Console {
         }
     }
 
-    fn plain(&mut self, b: u8) {
+    fn utf8(&mut self, b: u8) {
+        let (left, acc) = self.utf8;
+        if left > 0 && b & 0xC0 == 0x80 {
+            let acc = acc << 6 | (b & 0x3F) as u32;
+            self.utf8 = if left == 1 { (0, 0) } else { (left - 1, acc) };
+            if left == 1 {
+                self.plain(acc);
+            }
+            return;
+        }
+        self.utf8 = (0, 0);
+        match b {
+            0xC0..=0xDF => self.utf8 = (1, (b & 0x1F) as u32),
+            0xE0..=0xEF => self.utf8 = (2, (b & 0x0F) as u32),
+            0xF0..=0xF7 => self.utf8 = (3, (b & 0x07) as u32),
+            0x80..=0xFF => self.plain(0xFFFD),
+            _ => self.plain(b as u32),
+        }
+    }
+
+    fn plain(&mut self, c: u32) {
+        let Ok(b) = u8::try_from(c) else {
+            return self.printable(c);
+        };
         match b {
             0x1b => self.escape = Escape::Esc,
             b'\n' => self.newline(),
@@ -156,16 +180,18 @@ impl Console {
                 }
             }
             0x07 => {}
-            b if b >= 0x20 => {
-                if self.x >= self.cols {
-                    self.newline();
-                }
-                let fg = if self.bold && self.fg < 8 { self.fg + 8 } else { self.fg };
-                self.put(self.x, self.y, Cell { ch: b, fg, bg: self.bg });
-                self.x += 1;
-            }
+            b if b >= 0x20 => self.printable(b as u32),
             _ => {}
         }
+    }
+
+    fn printable(&mut self, c: u32) {
+        if self.x >= self.cols {
+            self.newline();
+        }
+        let fg = if self.bold && self.fg < 8 { self.fg + 8 } else { self.fg };
+        self.put(self.x, self.y, Cell { ch: c, fg, bg: self.bg });
+        self.x += 1;
     }
 
     fn csi(&mut self, command: u8, params: &[u16]) {
@@ -306,20 +332,14 @@ impl Console {
         self.paint(x, y, cell.ch, PALETTE[cell.fg as usize], PALETTE[cell.bg as usize], false);
     }
 
-    fn paint(&mut self, x: usize, y: usize, ch: u8, fg: u32, bg: u32, cursor: bool) {
-        let glyph = BASIC_LEGACY.get(ch as usize).copied().unwrap_or([0; 8]);
-        for gy in 0..8 {
-            let bits = glyph[gy];
-            for sy in 0..SCALE {
-                let py = y * CELL_H + gy * SCALE + sy;
-                let row = unsafe { self.fb.add(py * self.pitch + x * CELL_W) };
-                let underline = cursor && gy == 7;
-                for gx in 0..8 {
-                    let on = bits >> gx & 1 == 1 || underline;
-                    for sx in 0..SCALE {
-                        unsafe { row.add(gx * SCALE + sx).write_volatile(if on { fg } else { bg }) };
-                    }
-                }
+    fn paint(&mut self, x: usize, y: usize, ch: u32, fg: u32, bg: u32, cursor: bool) {
+        let glyph = crate::font::glyph(ch).or_else(|| crate::font::glyph('?' as u32)).unwrap();
+        for (gy, &bits) in glyph.iter().enumerate() {
+            let row = unsafe { self.fb.add((y * CELL_H + gy) * self.pitch + x * CELL_W) };
+            let underline = cursor && gy >= CELL_H - 2;
+            for gx in 0..CELL_W {
+                let on = bits >> gx & 1 == 1 || underline;
+                unsafe { row.add(gx).write_volatile(if on { fg } else { bg }) };
             }
         }
     }

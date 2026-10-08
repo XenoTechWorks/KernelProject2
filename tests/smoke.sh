@@ -21,6 +21,9 @@ checks=(
     "rm -r /tmp/a; ls /tmp => x"
     "nosuchcommand; echo status \$? => status 127"
     "false || echo fallback => fallback"
+    "cat /proc/meminfo => MemTotal:"
+    "ls /proc/self/ => cmdline"
+    "fastfetch => Kernel: Linux 6.12.0-kp2"
 )
 
 screenshot=0
