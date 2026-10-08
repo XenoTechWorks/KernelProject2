@@ -49,6 +49,21 @@ cmake --build ~/src/fastfetch/build -j8
 ./build.sh
 ```
 
+## Windows programs
+
+`hello.exe` and `winapi.exe` are real Windows programs, built with mingw-w64 (the GCC Windows
+toolchain), and they run when you type their names. The Windows layer (`windows/`, C++) works like
+Windows' own loader plus our own versions of the system DLLs, the same idea as Wine:
+
+- the kernel sees a file starting with `MZ` and runs it through `/bin/winload`, the way it runs a
+  `#!` script through its interpreter;
+- `winload` maps the `.exe`, applies relocations, links its imports to our built-in `kernel32.dll`
+  and `msvcrt.dll` (written in C++ with the Microsoft calling convention), sets up thread-local
+  storage, the TEB and PEB (through the `gs` register, as on Windows), and jumps to its entry point;
+- a function a program needs but we don't have yet stops it with a message naming the function.
+
+`winload` is an ordinary Linux program, so it runs on Linux (WSL) too: handy for testing.
+
 ## The command line
 
 The same layout as Linux:
@@ -75,6 +90,7 @@ kernel/          the kernel (Rust)
   src/tty.rs       terminal line discipline
   src/console.rs   text console on the screen
 user/src/        init, the shell and the commands (Zig)
+windows/src/     the Windows layer: PE loader, kernel32, msvcrt (C++)
 rootfs/          files copied into the root file system (/etc ...)
 disk/            what a new disk starts with (out/disk.img is made from it once)
 tests/           C test programs, smoke.sh (boot test), persist.sh (two boots, one disk), session.sh
@@ -86,7 +102,7 @@ In Linux (WSL Ubuntu 24.04 works):
 
 ```sh
 # once: tools
-sudo apt install qemu-system-x86 xorriso cpio gcc
+sudo apt install qemu-system-x86 xorriso cpio gcc g++ gcc-mingw-w64-x86-64
 rustup toolchain install nightly --component rust-src --target x86_64-unknown-none
 # Zig 0.17 in ~/tools/zig-x86_64-linux-0.17.0 (or set ZIG=/path/to/zig)
 git clone --depth=1 --branch=v11.2.1-binary https://codeberg.org/Limine/Limine.git ~/tools/limine
@@ -108,9 +124,9 @@ Roughly in order; each step is checked by running a real program.
 2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
    archive), interrupt-driven I/O, and AHCI for real PCs.
 3. **Run the targets**: fastfetch and git run; next then BusyBox or coreutils as a compatibility test.
-4. **Windows programs**: our own Windows layer (C++). A PE loader for `.exe` files and the Windows
-   system DLLs (`kernel32`, `ntdll`, ...) implemented on top of the kernel, the same idea as Wine but
-   built into the system.
+4. **More Windows**: console programs run. Next: files (CreateFile and friends), threads
+   (CreateThread), loading .dll files, the UCRT runtime newer compilers use, then windows and
+   graphics.
 5. Later: more CPUs (APIC/IOAPIC), networking, a real login, and running make/gcc/cmake on the system itself.
 
 ## Licenses of what's used

@@ -52,6 +52,12 @@ add_host_program "$stage/bin/hello-dynamic"
 gcc -O2 -o "$stage/bin/signal-test" "$root/tests/signals.c"
 gcc -O2 -pthread -o "$stage/bin/thread-test" "$root/tests/threads.c"
 
+step "Windows layer (winload) and Windows test programs"
+g++ -std=c++20 -O2 -static -fno-exceptions -fno-rtti -Wall -Wextra -o "$stage/bin/winload" "$root"/windows/src/*.cpp
+for program in hello winapi; do
+    x86_64-w64-mingw32-gcc -O2 -o "$stage/bin/$program.exe" "$root/tests/windows/$program.c"
+done
+
 # Unmodified Linux programs built from their own sources (see README: "Real Linux programs").
 # git straight from Ubuntu, with the template files `git init` copies.
 step "git (/usr/bin/git)"

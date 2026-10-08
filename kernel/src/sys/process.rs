@@ -157,8 +157,10 @@ pub fn getresid(a: [u64; 6]) -> SysResult {
 }
 
 pub fn arch_prctl(code: u32, addr: u64) -> SysResult {
+    const ARCH_SET_GS: u32 = 0x1001;
     const ARCH_SET_FS: u32 = 0x1002;
     const ARCH_GET_FS: u32 = 0x1003;
+    const ARCH_GET_GS: u32 = 0x1004;
     let p = proc::current();
     match code {
         ARCH_SET_FS => {
@@ -168,6 +170,18 @@ pub fn arch_prctl(code: u32, addr: u64) -> SysResult {
         }
         ARCH_GET_FS => {
             user::write_struct(p.space(), addr, &p.fs_base)?;
+            Ok(0)
+        }
+        ARCH_SET_GS => {
+            if addr >= crate::mm::paging::USER_END {
+                return Err(EPERM);
+            }
+            p.gs_base = addr;
+            unsafe { crate::arch::cpu::wrmsr(crate::arch::cpu::MSR_GS_BASE, addr) };
+            Ok(0)
+        }
+        ARCH_GET_GS => {
+            user::write_struct(p.space(), addr, &p.gs_base)?;
             Ok(0)
         }
         _ => Err(EINVAL),

@@ -118,6 +118,8 @@ pub struct Process {
     pub files: Arc<Shared<Files>>,
     pub handlers: Arc<Shared<Handlers>>,
     pub fs_base: u64,
+    /// The gs segment base. Linux programs rarely set it; Windows programs keep their TEB there.
+    pub gs_base: u64,
     pub clear_child_tid: u64,
     pub sigmask: u64,
     /// Signals sent but not acted on yet (bit n-1 for signal n).
@@ -284,6 +286,7 @@ fn new_task(pid: u32, mem: Arc<Shared<Memory>>, files: Arc<Shared<Files>>, handl
         files,
         handlers,
         fs_base: 0,
+        gs_base: 0,
         clear_child_tid: 0,
         sigmask: 0,
         pending: 0,
@@ -350,6 +353,7 @@ pub fn run() -> ! {
         unsafe {
             idt::KERNEL_STACK_TOP = top;
             cpu::wrmsr(cpu::MSR_FS_BASE, p.fs_base);
+            cpu::wrmsr(cpu::MSR_GS_BASE, p.gs_base);
             asm!("fxrstor [{}]", in(reg) &*p.fpu);
         }
         let ctx = p.ctx_rsp;
@@ -522,6 +526,7 @@ pub fn fork(frame: &TrapFrame, flags: u64, new_sp: u64, parent_tid: u64, child_t
     child.exe = parent.exe.clone();
     child.cmdline = parent.cmdline.clone();
     child.fs_base = if flags & CLONE_SETTLS != 0 { tls } else { parent.fs_base };
+    child.gs_base = parent.gs_base;
     child.sigmask = parent.sigmask;
     unsafe { asm!("fxsave [{}]", in(reg) &mut *child.fpu) };
 
@@ -599,6 +604,8 @@ pub fn exec(frame: &mut TrapFrame, path: &str, args: &[String], env: &[String]) 
     p.exe = exe;
     p.cmdline = cmdline_of(args);
     p.fs_base = 0;
+    p.gs_base = 0;
+    unsafe { cpu::wrmsr(cpu::MSR_GS_BASE, 0) };
     p.clear_child_tid = 0;
     unsafe { cpu::wrmsr(cpu::MSR_FS_BASE, 0) };
     *p.fpu = unsafe { (*(&raw const INITIAL_FPU)).clone() };

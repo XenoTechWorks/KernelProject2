@@ -34,6 +34,9 @@ checks=(
     "fastfetch => Kernel: Linux 6.12.0-kp2"
     "signal-test => signals: 7/7 passed"
     "thread-test => threads: 6/6 passed"
+    "hello.exe one => Hello from Windows! 2 argument(s)"
+    "winapi.exe => winapi: 9/9 passed"
+    "winapi.exe > /dev/null; echo windows exit \$? => windows exit 0"
     "mkdir /root/r && cd /root/r && git init -q && echo hi > f && git add f && git commit -qm one && git log --oneline => one"
 )
 

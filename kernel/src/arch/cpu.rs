@@ -29,6 +29,7 @@ pub const MSR_STAR: u32 = 0xC000_0081;
 pub const MSR_LSTAR: u32 = 0xC000_0082;
 pub const MSR_FMASK: u32 = 0xC000_0084;
 pub const MSR_FS_BASE: u32 = 0xC000_0100;
+pub const MSR_GS_BASE: u32 = 0xC000_0101;
 
 pub fn read_cr2() -> u64 {
     let value: u64;

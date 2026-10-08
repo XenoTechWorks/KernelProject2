@@ -22,6 +22,9 @@ pub struct Image {
 const PROGRAM_BASE: u64 = 0x0000_5555_5560_0000; // for position-independent executables
 const INTERP_BASE: u64 = 0x0000_7fff_f7a0_0000;
 
+/// Runs Windows programs (windows/ in the source tree).
+const WINDOWS_LOADER: &str = "/bin/winload";
+
 const PT_LOAD: u32 = 1;
 const PT_INTERP: u32 = 3;
 const PT_PHDR: u32 = 6;
@@ -150,6 +153,17 @@ pub fn load(path: &str, args: &[String], env: &[String]) -> Result<Image, Errno>
 fn load_depth(path: &str, args: &[String], env: &[String], depth: u32) -> Result<Image, Errno> {
     let node = read_file(path)?;
     let data = node.read_all()?;
+
+    // Windows programs ("MZ" executables) run through the Windows layer, like a script through
+    // its interpreter: `winload program.exe arguments...`.
+    if data.starts_with(b"MZ") {
+        if depth > 0 {
+            return Err(ENOEXEC);
+        }
+        let mut new_args = alloc::vec![String::from(WINDOWS_LOADER), String::from(path)];
+        new_args.extend(args.iter().skip(1).cloned());
+        return load_depth(WINDOWS_LOADER, &new_args, env, depth + 1);
+    }
 
     // "#!/bin/sh -e" scripts run their interpreter with the script's path as an argument.
     if data.starts_with(b"#!") {
