@@ -6,8 +6,16 @@
 set -uo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+# A throwaway copy of the disk, so tests start from the same state and leave the real one alone.
+disk=()
+scratch=""
+if [[ -f "$root/out/disk.img" ]]; then
+    scratch="$(mktemp --suffix=.img)"
+    cp "$root/out/disk.img" "$scratch"
+    disk=(-drive "file=$scratch,if=none,id=home,format=raw" -device virtio-blk-pci,drive=home,disable-legacy=on)
+fi
 log="$(mktemp)"
-trap 'rm -f "$log"' EXIT
+trap 'rm -f "$log" "$scratch"' EXIT
 
 # command typed => text that must appear in the output
 checks=(
@@ -43,7 +51,7 @@ screenshot=0
         printf 'screendump %s -f png\n' "$root/out/screen.png" >&3
         sleep 2
     fi
-) | timeout 40 qemu-system-x86_64 -M q35 -m 1G -cdrom "$root/out/kernelproject2.iso" -serial stdio \
+) | timeout 40 qemu-system-x86_64 -M q35 -m 1G -cdrom "$root/out/kernelproject2.iso" -serial stdio "${disk[@]}" \
     -display none -no-reboot -monitor tcp:127.0.0.1:4555,server,nowait 2>/dev/null |
     sed 's/\x1b\[[0-9;]*m//g' >"$log"
 

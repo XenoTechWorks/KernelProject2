@@ -2,7 +2,7 @@
 //! interpreter such as /lib64/ld-linux-x86-64.so.2) and `#!` scripts. The starting stack (argc, argv,
 //! environment, auxiliary vector) is laid out exactly as Linux does it, so unmodified programs start.
 
-use crate::fs::{self, Kind};
+use crate::fs::{self, Type};
 use crate::mm::paging::{AddressSpace, NO_EXECUTE, USER, WRITABLE};
 use crate::mm::PAGE_SIZE;
 use crate::mm::user::poke;
@@ -44,12 +44,7 @@ pub fn short_name(path: &str) -> String {
 /// The contents of an executable file, checking it exists and is a regular file.
 fn read_file(path: &str) -> Result<Arc<fs::Node>, Errno> {
     let node = fs::lookup(path, true)?;
-    match node.kind {
-        Kind::File(_) => {}
-        Kind::Dir(_) => return Err(EACCES),
-        _ => return Err(EACCES),
-    }
-    if *node.mode.lock() & 0o111 == 0 {
+    if node.kind_of() != Type::File || node.mode_bits() & 0o111 == 0 {
         return Err(EACCES);
     }
     Ok(node)
@@ -154,8 +149,7 @@ pub fn load(path: &str, args: &[String], env: &[String]) -> Result<Image, Errno>
 
 fn load_depth(path: &str, args: &[String], env: &[String], depth: u32) -> Result<Image, Errno> {
     let node = read_file(path)?;
-    let Kind::File(contents) = &node.kind else { return Err(EACCES) };
-    let data = contents.lock().clone();
+    let data = node.read_all()?;
 
     // "#!/bin/sh -e" scripts run their interpreter with the script's path as an argument.
     if data.starts_with(b"#!") {
@@ -182,8 +176,10 @@ fn load_depth(path: &str, args: &[String], env: &[String], depth: u32) -> Result
     let mut interp_base = 0;
     if let Some(interp_path) = &program.interp {
         let interp_node = fs::lookup(interp_path, true).map_err(|_| ENOENT)?;
-        let Kind::File(interp_data) = &interp_node.kind else { return Err(ENOEXEC) };
-        let interp_data = interp_data.lock().clone();
+        if interp_node.kind_of() != Type::File {
+            return Err(ENOEXEC);
+        }
+        let interp_data = interp_node.read_all()?;
         let interp = load_segments(&mut space, &interp_data, INTERP_BASE)?;
         if interp.interp.is_some() {
             return Err(ELIBBAD);

@@ -18,8 +18,10 @@ kernel answers those calls the way Linux does, the program can't tell the differ
   stack that grows on demand.
 - Programs: static Linux binaries, static-PIE, and **dynamically linked** ones through their own
   `ld-linux-x86-64.so.2` and `libc.so.6`. `#!` scripts too.
-- Files: an in-memory file system (like tmpfs) filled from a Linux-style initramfs (`cpio`), plus
-  `/dev/null`, `/dev/zero`, `/dev/urandom` and `/dev/tty`. Pipes.
+- Files: a VFS layer like Linux's, with an in-memory file system (like tmpfs) filled from a
+  Linux-style initramfs (`cpio`), **ext2 on a virtio disk** (read and write, mounted at `/root`, so
+  your home folder survives reboots), `/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/tty` and pipes.
+  The disk is made by the real `mkfs.ext2`, and Linux's `e2fsck` checks it stays consistent.
 - Terminal: Linux's line discipline (editing, echo, Ctrl+C/D/U/W, raw mode via `termios`) on the
   screen and on the serial port. The screen understands the usual escape codes and 16 colors.
 - About 90 Linux system calls (see `kernel/src/sys/mod.rs`). Missing ones return `ENOSYS` and are
@@ -66,14 +68,16 @@ Linux. That keeps them honest: if one works on Linux but not here, the kernel is
 kernel/          the kernel (Rust)
   src/arch/        x86-64: GDT, interrupts, syscall entry, PIC/timer, serial
   src/mm/          physical pages, page tables, kernel heap, safe access to user memory
-  src/fs/          the file tree, the initramfs reader, pipes
+  src/fs/          the VFS, ext2, /proc, /sys, the initramfs reader, pipes
+  src/drivers/     PCI and the virtio disk
   src/proc/        processes, scheduler, fork/exec/wait, the ELF loader
   src/sys/         the Linux system calls
   src/tty.rs       terminal line discipline
   src/console.rs   text console on the screen
 user/src/        init, the shell and the commands (Zig)
 rootfs/          files copied into the root file system (/etc ...)
-tests/           hello.c (the unchanged Linux program) and smoke.sh (boot test)
+disk/            what a new disk starts with (out/disk.img is made from it once)
+tests/           C test programs, smoke.sh (boot test), persist.sh (two boots, one disk), session.sh
 ```
 
 ## Building and running
@@ -92,6 +96,7 @@ make -C ~/tools/limine
 ./run.sh              # boot it in a QEMU window (serial log in this terminal)
 ./run.sh --text       # no window: use the shell right here, over the serial port
 tests/smoke.sh        # boot, type commands, check the answers
+tests/persist.sh      # save files and a git repo, reboot, find them again
 ```
 
 ## Roadmap
@@ -100,8 +105,8 @@ Roughly in order; each step is checked by running a real program.
 
 1. **More of Linux for real tools**: real interval timers (`setitimer`/`alarm` are accepted but
    don't fire yet), `socketpair` and Unix sockets, `eventfd`, `epoll`.
-2. **Disks**: a virtio or AHCI driver and a real file system (ext2 first), so programs and files
-   persist and don't all live in the boot archive.
+2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
+   archive), interrupt-driven I/O, and AHCI for real PCs.
 3. **Run the targets**: fastfetch and git run; next then BusyBox or coreutils as a compatibility test.
 4. **Windows programs**: our own Windows layer (C++). A PE loader for `.exe` files and the Windows
    system DLLs (`kernel32`, `ntdll`, ...) implemented on top of the kernel, the same idea as Wine but

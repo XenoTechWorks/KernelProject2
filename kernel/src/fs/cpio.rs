@@ -37,7 +37,7 @@ pub fn unpack(archive: &[u8]) -> usize {
         let node = match mode & S_IFMT_MASK {
             S_IFDIR => {
                 let dir = super::mkdir_p(&path);
-                *dir.mode.lock() = mode & 0o7777;
+                let _ = dir.set_mode(mode);
                 count += 1;
                 continue;
             }

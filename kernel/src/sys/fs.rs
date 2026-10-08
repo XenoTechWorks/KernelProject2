@@ -2,7 +2,7 @@
 
 use super::SysResult;
 use super::errno::*;
-use crate::fs::{self, Device, Kind, Node, pipe};
+use crate::fs::{self, Device, New, Node, Type, pipe};
 use crate::mm::user;
 use crate::proc::{self, fd::Handle, fd::OpenFile};
 use alloc::string::String;
@@ -60,21 +60,18 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
         return Err(EBADF);
     }
     match &file.handle {
-        Handle::Node(node) => match &node.kind {
-            Kind::File(data) => {
-                let data = data.lock();
+        Handle::Node(node) => match node.kind_of() {
+            Type::File => {
                 let mut offset = file.offset.lock();
-                let pos = at.unwrap_or(*offset) as usize;
-                let n = data.len().saturating_sub(pos).min(buf.len());
-                buf[..n].copy_from_slice(&data[pos..pos + n]);
+                let n = node.read_at(at.unwrap_or(*offset), buf)?;
                 if at.is_none() {
                     *offset += n as u64;
                 }
                 Ok(n as u64)
             }
-            Kind::Dir(_) => Err(EISDIR),
-            Kind::Symlink(_) => Err(EINVAL),
-            Kind::Device(Device::Tty) => loop {
+            Type::Dir => Err(EISDIR),
+            Type::Symlink => Err(EINVAL),
+            Type::Device(Device::Tty) => loop {
                 if let Some(n) = crate::tty::try_read(buf) {
                     return Ok(n as u64);
                 }
@@ -83,12 +80,12 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
                 }
                 proc::sleep()?;
             },
-            Kind::Device(Device::Null) => Ok(0),
-            Kind::Device(Device::Zero) => {
+            Type::Device(Device::Null) => Ok(0),
+            Type::Device(Device::Zero) => {
                 buf.fill(0);
                 Ok(buf.len() as u64)
             }
-            Kind::Device(Device::Random) => {
+            Type::Device(Device::Random) => {
                 super::misc::fill_random(buf);
                 Ok(buf.len() as u64)
             }
@@ -123,32 +120,27 @@ fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
         return Err(EBADF);
     }
     match &file.handle {
-        Handle::Node(node) => match &node.kind {
-            Kind::File(contents) => {
-                let mut contents = contents.lock();
+        Handle::Node(node) => match node.kind_of() {
+            Type::File => {
                 let mut offset = file.offset.lock();
                 let pos = match at {
-                    Some(at) => at as usize,
-                    None if *file.flags.lock() & O_APPEND != 0 => contents.len(),
-                    None => *offset as usize,
+                    Some(at) => at,
+                    None if *file.flags.lock() & O_APPEND != 0 => node.size(),
+                    None => *offset,
                 };
-                if contents.len() < pos + data.len() {
-                    contents.resize(pos + data.len(), 0);
-                }
-                contents[pos..pos + data.len()].copy_from_slice(data);
+                let n = node.write_at(pos, data)?;
                 if at.is_none() {
-                    *offset = (pos + data.len()) as u64;
+                    *offset = pos + n as u64;
                 }
-                node.touch();
-                Ok(data.len() as u64)
+                Ok(n as u64)
             }
-            Kind::Dir(_) => Err(EISDIR),
-            Kind::Symlink(_) => Err(EINVAL),
-            Kind::Device(Device::Tty) => {
+            Type::Dir => Err(EISDIR),
+            Type::Symlink => Err(EINVAL),
+            Type::Device(Device::Tty) => {
                 crate::tty::write(data);
                 Ok(data.len() as u64)
             }
-            Kind::Device(_) => Ok(data.len() as u64),
+            Type::Device(_) => Ok(data.len() as u64),
         },
         Handle::PipeWrite(pipe) => {
             let mut written = 0;
@@ -195,7 +187,7 @@ pub fn write(fd: i32, buf: u64, len: usize) -> SysResult {
 
 pub fn pread(fd: i32, buf: u64, len: usize, offset: u64) -> SysResult {
     let file = proc::current().files().fds.get(fd)?;
-    if !matches!(&file.handle, Handle::Node(n) if matches!(n.kind, Kind::File(_))) {
+    if !matches!(&file.handle, Handle::Node(n) if n.kind_of() == Type::File) {
         return Err(ESPIPE);
     }
     let mut tmp = vec![0u8; len.min(1 << 20)];
@@ -207,7 +199,7 @@ pub fn pread(fd: i32, buf: u64, len: usize, offset: u64) -> SysResult {
 pub fn pwrite(fd: i32, buf: u64, len: usize, offset: u64) -> SysResult {
     let p = proc::current();
     let file = p.files().fds.get(fd)?;
-    if !matches!(&file.handle, Handle::Node(n) if matches!(n.kind, Kind::File(_))) {
+    if !matches!(&file.handle, Handle::Node(n) if n.kind_of() == Type::File) {
         return Err(ESPIPE);
     }
     let data = user::read_vec(p.space(), buf, len.min(1 << 24))?;
@@ -267,9 +259,7 @@ pub fn open_path(path: &str, flags: u32, mode: u32) -> SysResult {
         }
         Err(ENOENT) if flags & O_CREAT != 0 => {
             let (dir, name) = fs::parent_of(path)?;
-            let node = Node::file(Vec::new(), mode & !p.files().umask);
-            fs::link(&dir, &name, node.clone())?;
-            node
+            dir.create(&name, New::File(mode & 0o7777 & !p.files().umask))?
         }
         Err(e) => return Err(e),
     };
@@ -280,14 +270,11 @@ pub fn open_path(path: &str, flags: u32, mode: u32) -> SysResult {
         if node.is_dir() && flags & O_ACCMODE != 0 {
             return Err(EISDIR);
         }
-        if matches!(node.kind, Kind::Symlink(_)) {
+        if node.kind_of() == Type::Symlink {
             return Err(ELOOP);
         }
-        if flags & O_TRUNC != 0 && flags & O_ACCMODE != 0 {
-            if let Kind::File(data) = &node.kind {
-                data.lock().clear();
-                node.touch();
-            }
+        if flags & O_TRUNC != 0 && flags & O_ACCMODE != 0 && node.kind_of() == Type::File {
+            node.truncate(0)?;
         }
     }
     let kept = flags & !(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | O_CLOEXEC);
@@ -322,7 +309,7 @@ pub fn dup3(old: i32, new: i32, flags: u32, is_dup2: bool) -> SysResult {
 pub fn lseek(fd: i32, offset: i64, whence: u32) -> SysResult {
     let file = proc::current().files().fds.get(fd)?;
     let Handle::Node(node) = &file.handle else { return Err(ESPIPE) };
-    if matches!(node.kind, Kind::Device(_)) {
+    if matches!(node.kind_of(), Type::Device(_)) {
         return Ok(0);
     }
     let mut pos = file.offset.lock();
@@ -363,11 +350,11 @@ struct Stat {
 
 fn rdev(node: &Node) -> u64 {
     let makedev = |major: u64, minor: u64| (major << 8) | minor;
-    match node.kind {
-        Kind::Device(Device::Tty) => makedev(5, 1),
-        Kind::Device(Device::Null) => makedev(1, 3),
-        Kind::Device(Device::Zero) => makedev(1, 5),
-        Kind::Device(Device::Random) => makedev(1, 9),
+    match node.kind_of() {
+        Type::Device(Device::Tty) => makedev(5, 1),
+        Type::Device(Device::Null) => makedev(1, 3),
+        Type::Device(Device::Zero) => makedev(1, 5),
+        Type::Device(Device::Random) => makedev(1, 9),
         _ => 0,
     }
 }
@@ -376,11 +363,11 @@ fn stat_of(handle: &Handle) -> Stat {
     match handle {
         Handle::Node(node) => {
             let size = node.size() as i64;
-            let mtime = node.mtime.load(core::sync::atomic::Ordering::Relaxed) as i64;
+            let mtime = node.mtime() as i64;
             Stat {
-                dev: 1,
-                ino: node.ino,
-                nlink: if node.is_dir() { 2 } else { 1 },
+                dev: node.dev(),
+                ino: node.inode_number(),
+                nlink: node.nlink(),
                 mode: node.st_mode(),
                 rdev: rdev(node),
                 size,
@@ -456,17 +443,7 @@ pub fn getdents64(fd: i32, buf: u64, len: usize) -> SysResult {
     let p = proc::current();
     let file = p.files().fds.get(fd)?;
     let Handle::Node(node) = &file.handle else { return Err(ENOTDIR) };
-    let Kind::Dir(entries) = &node.kind else { return Err(ENOTDIR) };
-    let mut list: Vec<(String, u64, u8)> = vec![(".".into(), node.ino, 4), ("..".into(), node.ino, 4)];
-    for (name, child) in entries.lock().iter() {
-        let kind = match child.kind {
-            Kind::Dir(_) => 4,
-            Kind::File(_) => 8,
-            Kind::Symlink(_) => 10,
-            Kind::Device(_) => 2,
-        };
-        list.push((name.clone(), child.ino, kind));
-    }
+    let list = node.list()?;
     let mut pos = file.offset.lock();
     let mut out = Vec::new();
     while (*pos as usize) < list.len() {
@@ -522,7 +499,7 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
         }
         _ => {}
     }
-    let is_tty = matches!(&file.handle, Handle::Node(n) if matches!(n.kind, Kind::Device(Device::Tty)));
+    let is_tty = matches!(&file.handle, Handle::Node(n) if n.kind_of() == Type::Device(Device::Tty));
     if !is_tty {
         return Err(ENOTTY);
     }
@@ -617,30 +594,14 @@ pub fn fchdir(fd: i32) -> SysResult {
 pub fn mkdirat(dirfd: i32, path_ptr: u64, mode: u32) -> SysResult {
     let path = resolve(dirfd, path_ptr)?;
     let (dir, name) = fs::parent_of(&path)?;
-    let node = Node::dir();
-    *node.mode.lock() = mode & 0o7777 & !proc::current().files().umask;
-    fs::link(&dir, &name, node)?;
+    dir.create(&name, New::Dir(mode & 0o7777 & !proc::current().files().umask))?;
     Ok(0)
 }
 
 pub fn unlinkat(dirfd: i32, path_ptr: u64, flags: u32) -> SysResult {
     let path = resolve(dirfd, path_ptr)?;
     let (dir, name) = fs::parent_of(&path)?;
-    let Kind::Dir(entries) = &dir.kind else { return Err(ENOTDIR) };
-    let mut entries = entries.lock();
-    let node = entries.get(&name).ok_or(ENOENT)?;
-    match (&node.kind, flags & AT_REMOVEDIR != 0) {
-        (Kind::Dir(children), true) => {
-            if !children.lock().is_empty() {
-                return Err(ENOTEMPTY);
-            }
-        }
-        (Kind::Dir(_), false) => return Err(EISDIR),
-        (_, true) => return Err(ENOTDIR),
-        _ => {}
-    }
-    entries.remove(&name);
-    dir.touch();
+    dir.remove(&name, flags & AT_REMOVEDIR != 0)?;
     Ok(0)
 }
 
@@ -652,19 +613,7 @@ pub fn renameat(olddir: i32, old_ptr: u64, newdir: i32, new_ptr: u64) -> SysResu
     }
     let (odir, oname) = fs::parent_of(&old)?;
     let (ndir, nname) = fs::parent_of(&new)?;
-    let (Kind::Dir(oentries), Kind::Dir(nentries)) = (&odir.kind, &ndir.kind) else { return Err(ENOTDIR) };
-    let node = oentries.lock().remove(&oname).ok_or(ENOENT)?;
-    if let Some(existing) = nentries.lock().get(&nname) {
-        if let Kind::Dir(c) = &existing.kind {
-            if !c.lock().is_empty() {
-                oentries.lock().insert(oname, node);
-                return Err(ENOTEMPTY);
-            }
-        }
-    }
-    nentries.lock().insert(nname, node);
-    odir.touch();
-    ndir.touch();
+    fs::rename(&odir, &oname, &ndir, &nname)?;
     Ok(0)
 }
 
@@ -678,7 +627,7 @@ pub fn linkat(olddir: i32, old_ptr: u64, newdir: i32, new_ptr: u64, flags: u32) 
         return Err(EPERM);
     }
     let (dir, name) = fs::parent_of(&new)?;
-    fs::link(&dir, &name, node)?;
+    dir.add_link(&name, &node)?;
     Ok(0)
 }
 
@@ -686,14 +635,13 @@ pub fn symlinkat(target_ptr: u64, dirfd: i32, path_ptr: u64) -> SysResult {
     let target = user::read_cstr(proc::current().space(), target_ptr, 4096)?;
     let path = resolve(dirfd, path_ptr)?;
     let (dir, name) = fs::parent_of(&path)?;
-    fs::link(&dir, &name, Node::new(Kind::Symlink(target), 0o777))?;
+    dir.create(&name, New::Symlink(&target))?;
     Ok(0)
 }
 
 pub fn readlinkat(dirfd: i32, path_ptr: u64, buf: u64, size: usize) -> SysResult {
     let path = resolve(dirfd, path_ptr)?;
-    let node = fs::lookup(&path, false)?;
-    let Kind::Symlink(target) = &node.kind else { return Err(EINVAL) };
+    let target = fs::lookup(&path, false)?.readlink()?;
     let n = target.len().min(size);
     user::write(proc::current().space(), buf, &target.as_bytes()[..n])?;
     Ok(n as u64)
@@ -702,7 +650,7 @@ pub fn readlinkat(dirfd: i32, path_ptr: u64, buf: u64, size: usize) -> SysResult
 pub fn faccessat(dirfd: i32, path_ptr: u64, mode: u32) -> SysResult {
     let path = resolve(dirfd, path_ptr)?;
     let node = fs::lookup(&path, true)?;
-    if mode & 1 != 0 && !node.is_dir() && *node.mode.lock() & 0o111 == 0 {
+    if mode & 1 != 0 && !node.is_dir() && node.mode_bits() & 0o111 == 0 {
         return Err(EACCES);
     }
     Ok(0)
@@ -717,20 +665,13 @@ pub fn chmod(n: u64, a: [u64; 6]) -> SysResult {
         },
         _ => (fs::lookup(&resolve(a[0] as i32, a[1])?, true)?, a[2]),
     };
-    *node.mode.lock() = mode as u32 & 0o7777;
+    node.set_mode(mode as u32 & 0o7777)?;
     Ok(0)
 }
 
 fn truncate_node(node: &Node, len: u64) -> SysResult {
-    match &node.kind {
-        Kind::File(data) => {
-            data.lock().resize(len as usize, 0);
-            node.touch();
-            Ok(0)
-        }
-        Kind::Dir(_) => Err(EISDIR),
-        _ => Err(EINVAL),
-    }
+    node.truncate(len)?;
+    Ok(0)
 }
 
 pub fn truncate_path(path_ptr: u64, len: u64) -> SysResult {
@@ -777,8 +718,8 @@ const POLLNVAL: i16 = 0x20;
 fn readiness(fd: i32) -> i16 {
     let Ok(file) = proc::current().files().fds.get(fd) else { return POLLNVAL };
     match &file.handle {
-        Handle::Node(n) => match n.kind {
-            Kind::Device(Device::Tty) => POLLOUT | if crate::tty::available() > 0 { POLLIN } else { 0 },
+        Handle::Node(n) => match n.kind_of() {
+            Type::Device(Device::Tty) => POLLOUT | if crate::tty::available() > 0 { POLLIN } else { 0 },
             _ => POLLIN | POLLOUT,
         },
         Handle::PipeRead(pipe) => {
@@ -887,18 +828,40 @@ pub fn select(n: usize, readfds: u64, writefds: u64, _exceptfds: u64, timeout: u
     Ok(count)
 }
 
-pub fn statfs(out: u64) -> SysResult {
-    let (free, total) = crate::mm::frame::stats();
+pub fn statfs_path(path_ptr: u64, out: u64) -> SysResult {
+    let node = fs::lookup(&resolve(AT_FDCWD, path_ptr)?, true)?;
+    statfs(&node, out)
+}
+
+pub fn fstatfs(fd: i32, out: u64) -> SysResult {
+    match &proc::current().files().fds.get(fd)?.handle {
+        Handle::Node(node) => statfs(node, out),
+        _ => statfs(fs::root(), out),
+    }
+}
+
+/// `struct statfs` for the file system a node is on: the disk's numbers for ext2, memory otherwise.
+fn statfs(node: &Node, out: u64) -> SysResult {
+    let (magic, block, total, free) = match &node.kind {
+        fs::Kind::Ext2(disk, _) => {
+            let (total, free, block) = disk.usage();
+            (0xEF53, block, total, free)
+        }
+        _ => {
+            let (free, total) = crate::mm::frame::stats();
+            (0x0102_1994, 4096, total, free) // TMPFS_MAGIC
+        }
+    };
     let mut buf = [0u64; 15];
-    buf[0] = 0x0102_1994; // TMPFS_MAGIC
-    buf[1] = 4096;
+    buf[0] = magic;
+    buf[1] = block;
     buf[2] = total;
     buf[3] = free;
     buf[4] = free;
     buf[5] = 1 << 20;
     buf[6] = 1 << 20;
     buf[8] = 255; // name length
-    buf[9] = 4096;
+    buf[9] = block;
     user::write_struct(proc::current().space(), out, &buf)?;
     Ok(0)
 }

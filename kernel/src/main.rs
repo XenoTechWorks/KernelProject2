@@ -8,6 +8,7 @@ extern crate alloc;
 
 mod arch;
 mod console;
+mod drivers;
 mod font;
 mod fs;
 mod keyboard;
@@ -128,6 +129,9 @@ extern "C" fn kmain() -> ! {
         }
         None => log!("no initramfs module"),
     }
+    // Home lives on the disk when there is one, so what you make there survives a reboot.
+    drivers::virtio_blk::init();
+    fs::mount_disk("/root");
     irq::init();
 
     // The same order Linux tries.

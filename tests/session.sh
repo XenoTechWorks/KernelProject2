@@ -7,6 +7,15 @@
 set -uo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+# A throwaway copy of the disk, so tests start from the same state and leave the real one alone.
+disk=()
+scratch=""
+if [[ -f "$root/out/disk.img" ]]; then
+    scratch="$(mktemp --suffix=.img)"
+    cp "$root/out/disk.img" "$scratch"
+    disk=(-drive "file=$scratch,if=none,id=home,format=raw" -device virtio-blk-pci,drive=home,disable-legacy=on)
+fi
+trap 'rm -f "$scratch"' EXIT
 wait="${WAIT:-3}"
 total=$((10 + $# * wait))
 (
@@ -15,5 +24,5 @@ total=$((10 + $# * wait))
         printf '%s\r' "$cmd"
         sleep "$wait"
     done
-) | timeout "$total" qemu-system-x86_64 -M q35 -m 1G -cdrom "$root/out/kernelproject2.iso" -serial stdio \
+) | timeout "$total" qemu-system-x86_64 -M q35 -m 1G -cdrom "$root/out/kernelproject2.iso" -serial stdio "${disk[@]}" \
     -display none -no-reboot 2>/dev/null | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g'

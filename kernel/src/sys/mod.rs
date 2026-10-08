@@ -109,8 +109,8 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         127 => process::rt_sigpending(a[0]),
         130 => crate::proc::signal::suspend(crate::mm::user::read_u64(crate::proc::current().space(), a[0])?),
         131 => Ok(0), // sigaltstack
-        137 => fs::statfs(a[1]),
-        138 => fs::statfs(a[1]),
+        137 => fs::statfs_path(a[0], a[1]),
+        138 => fs::fstatfs(a[0] as i32, a[1]),
         157 => Ok(0), // prctl: accept and ignore (PR_SET_NAME etc.)
         158 => process::arch_prctl(a[0] as u32, a[1]),
         160 => Ok(0), // setrlimit

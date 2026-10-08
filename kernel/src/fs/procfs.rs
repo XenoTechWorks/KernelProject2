@@ -84,6 +84,15 @@ fn stat() -> String {
 const MOUNTS: &str = "rootfs / tmpfs rw 0 0\nproc /proc proc rw,nosuid,nodev,noexec 0 0\n\
                       sysfs /sys sysfs rw,nosuid,nodev,noexec 0 0\ndevtmpfs /dev devtmpfs rw 0 0\n";
 
+fn mounts() -> String {
+    let mut s = String::from(MOUNTS);
+    if let Some((path, _)) = super::DISK_MOUNT.get() {
+        s += &format!("/dev/vda {path} ext2 rw,relatime 0 0
+");
+    }
+    s
+}
+
 fn state_letter(state: State) -> char {
     match state {
         State::Runnable => 'R',
@@ -124,7 +133,7 @@ fn process_dir(p: &proc::Process) -> Arc<Node> {
         ("cmdline".into(), file(p.cmdline.clone())),
         ("environ".into(), file(Vec::new())),
         ("maps".into(), file(Vec::new())),
-        ("mounts".into(), file(MOUNTS)),
+        ("mounts".into(), file(mounts())),
         ("exe".into(), link(p.exe.clone())),
         ("cwd".into(), link(p.files().cwd.clone())),
         ("root".into(), link("/")),
@@ -141,7 +150,7 @@ pub fn build() -> Arc<Node> {
         ("stat".into(), file(stat())),
         ("loadavg".into(), file(format!("0.00 0.00 0.00 1/{} 0\n", proc::all().count()))),
         ("version".into(), file(format!("Linux version 6.12.0-kp2 (KernelProject2 {}) #1\n", crate::VERSION))),
-        ("mounts".into(), file(MOUNTS)),
+        ("mounts".into(), file(mounts())),
         ("swaps".into(), file("Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n")),
         ("filesystems".into(), file("nodev\ttmpfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\n")),
         ("cmdline".into(), file("\n")),

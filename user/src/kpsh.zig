@@ -196,7 +196,7 @@ fn tokenize(line: []const u8) ParseError!void {
 
         // A word: everything up to an unquoted space or operator.
         const start = pool_len;
-        if (c == '~' and (i + 1 == line.len or line[i + 1] == '/' or line[i + 1] == ' ')) {
+        if (c == '~' and (i + 1 == line.len or std.mem.indexOfScalar(u8, "/ \t\r\n;|&<>", line[i + 1]) != null)) {
             try pushStr(getVar("HOME") orelse "/");
             i += 1;
         }

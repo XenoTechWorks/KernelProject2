@@ -5,7 +5,7 @@ use super::errno::*;
 use crate::mm::PAGE_SIZE;
 use crate::mm::paging::{NO_EXECUTE, USER, USER_END, WRITABLE};
 use crate::proc::{self, fd::Handle};
-use crate::fs::Kind;
+use crate::fs::Type;
 
 const MAP_FIXED: u32 = 0x10;
 const MAP_ANONYMOUS: u32 = 0x20;
@@ -54,14 +54,16 @@ pub fn mmap(addr: u64, len: u64, prot: u32, flags: u32, fd: i32, offset: u64) ->
     let file_data = if flags & MAP_ANONYMOUS == 0 {
         let file = p.files().fds.get(fd)?;
         let Handle::Node(node) = &file.handle else { return Err(EACCES) };
-        match &node.kind {
-            Kind::File(data) => {
-                let data = data.lock();
-                let start = (offset as usize).min(data.len());
-                let end = (offset as usize).saturating_add(len as usize).min(data.len());
-                Some(data[start..end].to_vec())
+        match node.kind_of() {
+            Type::File => {
+                let size = node.size();
+                let want = len.min(size.saturating_sub(offset));
+                let mut data = alloc::vec![0u8; want as usize];
+                let n = node.read_at(offset, &mut data)?;
+                data.truncate(n);
+                Some(data)
             }
-            Kind::Device(_) => None, // /dev/zero
+            Type::Device(_) => None, // /dev/zero
             _ => return Err(EACCES),
         }
     } else {

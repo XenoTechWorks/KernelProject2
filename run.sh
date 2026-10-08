@@ -12,5 +12,9 @@ if [[ "${1:-}" == "--text" ]]; then
     display=(-display none)
     shift
 fi
+disk=()
+if [[ -f "$root/out/disk.img" ]]; then
+    disk=(-drive "file=$root/out/disk.img,if=none,id=home,format=raw" -device virtio-blk-pci,drive=home,disable-legacy=on)
+fi
 exec qemu-system-x86_64 -M q35 -m 1G -cdrom "$root/out/kernelproject2.iso" \
-    -serial stdio -no-reboot "${display[@]}" "$@"
+    -serial stdio -no-reboot "${display[@]}" "${disk[@]}" "$@"

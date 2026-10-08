@@ -72,6 +72,14 @@ chmod 700 "$stage/root"
 chmod 1777 "$stage/tmp" 2>/dev/null || true
 (cd "$stage" && find . -mindepth 1 | LC_ALL=C sort | cpio --quiet -o -H newc -R 0:0 > "$out/initramfs.cpio")
 
+step "disk"
+# The disk keeps what's saved in /root between boots, so it's only made when missing
+# (delete out/disk.img to start over).
+if [[ ! -f "$out/disk.img" ]]; then
+    mkfs.ext2 -q -L home -d "$root/disk" "$out/disk.img" 256M
+    echo "    made out/disk.img (256 MiB ext2)"
+fi
+
 step "ISO"
 iso="$out/iso"
 rm -rf "$iso"
