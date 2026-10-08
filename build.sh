@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Builds everything into out/kernelproject2.iso. Run inside Linux (WSL Ubuntu 24.04 works).
+#
+#   ./build.sh          build the kernel, the programs, the boot archive and the ISO
+#
+# Needs: Rust nightly (rustup), Zig 0.17, gcc, cpio, xorriso, and Limine's binaries (see README).
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")" && pwd)"
+out="$root/out"
+# The root filesystem is put together on a Linux filesystem: a Windows drive (/mnt/c in WSL) can't
+# keep Unix permissions, and every file would end up rwxrwxrwx.
+stage="${KP2_STAGE:-$HOME/.cache/kernelproject2/root}"
+zig="${ZIG:-$HOME/tools/zig-x86_64-linux-0.17.0/zig}"
+limine="${LIMINE_DIR:-$HOME/tools/limine}"
+
+step() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
+
+step "kernel"
+(cd "$root/kernel" && cargo build --release --quiet)
+kernel="$root/kernel/target/x86_64-unknown-none/release/kernel"
+
+step "programs"
+rm -rf "$stage"
+mkdir -p "$stage/bin" "$stage/sbin" "$out"
+cp -r "$root/rootfs/." "$stage/"
+find "$stage" -type d -exec chmod 755 {} +
+find "$stage" -type f -exec chmod 644 {} +
+for program in init kpsh ls cat echo uname fileops; do
+    dest="$stage/bin/$program"
+    [[ $program == init ]] && dest="$stage/sbin/init"
+    "$zig" build-exe "$root/user/src/$program.zig" -target x86_64-linux-none -O ReleaseSmall -fstrip \
+        -fsingle-threaded --name "$program" -femit-bin="$dest" --cache-dir "$root/user/.zig-cache" \
+        --global-cache-dir "$HOME/.cache/zig"
+done
+for name in mkdir rm touch clear; do ln -sf fileops "$stage/bin/$name"; done
+ln -sf kpsh "$stage/bin/sh"
+
+step "Linux test programs (built with gcc, copied in unchanged)"
+gcc -O2 -static -o "$stage/bin/hello-static" "$root/tests/hello.c"
+gcc -O2 -o "$stage/bin/hello-dynamic" "$root/tests/hello.c"
+# The dynamic one needs the same loader and C library it was built against.
+for lib in /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/libc.so.6; do
+    mkdir -p "$stage$(dirname "$lib")"
+    cp -L "$lib" "$stage$lib"
+done
+
+step "boot archive"
+rm -f "$out/initramfs.cpio"
+chmod 755 "$stage"/bin/* "$stage"/sbin/*
+chmod 700 "$stage/root"
+chmod 1777 "$stage/tmp" 2>/dev/null || true
+(cd "$stage" && find . -mindepth 1 | LC_ALL=C sort | cpio --quiet -o -H newc -R 0:0 > "$out/initramfs.cpio")
+
+step "ISO"
+iso="$out/iso"
+rm -rf "$iso"
+mkdir -p "$iso/boot/limine" "$iso/EFI/BOOT"
+cp "$kernel" "$iso/boot/kernel"
+cp "$out/initramfs.cpio" "$iso/boot/initramfs.cpio"
+cp "$root/limine.conf" "$limine/limine-bios.sys" "$limine/limine-bios-cd.bin" "$limine/limine-uefi-cd.bin" "$iso/boot/limine/"
+cp "$limine/BOOTX64.EFI" "$iso/EFI/BOOT/"
+xorriso -as mkisofs -quiet -R -r -J -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 \
+    -boot-info-table -hfsplus -apm-block-size 2048 --efi-boot boot/limine/limine-uefi-cd.bin \
+    -efi-boot-part --efi-boot-image --protective-msdos-label "$iso" -o "$out/kernelproject2.iso" 2>/dev/null
+"$limine/limine" bios-install "$out/kernelproject2.iso" 2>/dev/null
+
+step "done: $out/kernelproject2.iso ($(du -h "$out/kernelproject2.iso" | cut -f1))"

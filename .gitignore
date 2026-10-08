@@ -1,0 +1,4 @@
+/kernel/target/
+/user/.zig-cache/
+/user/zig-out/
+/out/

@@ -1,0 +1,5 @@
+
+  Welcome to KernelProject2.
+  Type `help` for the shell, `ls /bin` for the commands.
+  `hello-static` and `hello-dynamic` are ordinary Linux programs built with gcc.
+

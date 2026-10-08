@@ -1,0 +1,5 @@
+# The limine crate uses an unstable feature (ptr_metadata), so the kernel builds on nightly.
+[toolchain]
+channel = "nightly"
+components = ["rust-src"]
+targets = ["x86_64-unknown-none"]
