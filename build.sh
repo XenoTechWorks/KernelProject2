@@ -66,6 +66,12 @@ done
 # A DLL and a program that uses it (linked, and through LoadLibrary).
 x86_64-w64-mingw32-gcc -O2 -shared -o "$stage/bin/mathlib.dll" -Wl,--out-implib,"$out/libmathlib.a" "$root/tests/windows/mathlib.c"
 x86_64-w64-mingw32-gcc -O2 -o "$stage/bin/dlltest.exe" "$root/tests/windows/dlltest.c" -L"$out" -lmathlib
+# C++ (iostream, containers, exceptions): once with the C++ runtime built in, once using mingw's own
+# libstdc++-6.dll and libgcc_s_seh-1.dll, copied in unchanged.
+x86_64-w64-mingw32-g++ -O2 -static-libgcc -static-libstdc++ -o "$stage/bin/cpp.exe" "$root/tests/windows/cpp.cpp"
+x86_64-w64-mingw32-g++ -O2 -o "$stage/bin/cpp-dll.exe" "$root/tests/windows/cpp.cpp"
+mingw_dlls="$(dirname "$(x86_64-w64-mingw32-g++ -print-file-name=libstdc++-6.dll)")"
+cp "$mingw_dlls/libstdc++-6.dll" "$mingw_dlls/libgcc_s_seh-1.dll" "$stage/bin/"
 
 # Unmodified Linux programs built from their own sources (see README: "Real Linux programs").
 # git straight from Ubuntu, with the template files `git init` copies.

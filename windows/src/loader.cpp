@@ -43,7 +43,8 @@ std::string dll_name(const char *name) {
     return n;
 }
 
-const BuiltinDll *const builtins[] = {&kernel32_dll, &kernel32_files_dll, &kernel32_threads_dll, &kernel32_loader_dll, &msvcrt_dll};
+const BuiltinDll *const builtins[] = {&kernel32_dll, &kernel32_files_dll, &kernel32_threads_dll, &kernel32_loader_dll,
+                                      &kernel32_seh_dll, &msvcrt_dll};
 
 bool is_ucrt(const std::string &name) { return name.starts_with("api-ms-win-crt-") || name == "ucrtbase.dll"; }
 

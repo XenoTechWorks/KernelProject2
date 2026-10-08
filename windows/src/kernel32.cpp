@@ -2,6 +2,8 @@
 // Each function follows the documented Windows behaviour, built on the Linux calls underneath.
 
 #include <cerrno>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <sys/mman.h>
@@ -46,7 +48,6 @@ WINAPI void k32_Sleep(DWORD ms) {
     nanosleep(&t, nullptr);
 }
 
-WINAPI void *k32_SetUnhandledExceptionFilter(void *) { return nullptr; }
 
 // Thread-local slots (TlsAlloc and friends), stored in the TEB like on Windows.
 WINAPI DWORD k32_TlsAlloc() {
@@ -179,6 +180,33 @@ WINAPI int k32_WideCharToMultiByte(UINT, DWORD, LPCWSTR in, int in_len, LPSTR ou
     return n;
 }
 
+// FormatMessageA: the text for an error number (FORMAT_MESSAGE_FROM_SYSTEM), into the caller's
+// buffer or a new one (FORMAT_MESSAGE_ALLOCATE_BUFFER, freed with LocalFree).
+WINAPI DWORD k32_FormatMessageA(DWORD flags, const void *, DWORD id, DWORD, LPSTR buf, DWORD size, void *) {
+    const char *known = id == 0 ? "The operation completed successfully." : id == 2 ? "The system cannot find the file specified." :
+                        id == 3 ? "The system cannot find the path specified." : id == 5 ? "Access is denied." :
+                        id == 6 ? "The handle is invalid." : id == 8 ? "Not enough memory resources are available." :
+                        id == 87 ? "The parameter is incorrect." : nullptr;
+    char text[96];
+    if (known) snprintf(text, sizeof text, "%s\r\n", known);
+    else snprintf(text, sizeof text, "Error %u.\r\n", id);
+    size_t len = strlen(text);
+    if (flags & 0x100) {  // FORMAT_MESSAGE_ALLOCATE_BUFFER: `buf` is where to store the pointer
+        char *copy = static_cast<char *>(malloc(len + 1));
+        memcpy(copy, text, len + 1);
+        *reinterpret_cast<char **>(buf) = copy;
+        return static_cast<DWORD>(len);
+    }
+    if (len + 1 > size) return 0;
+    memcpy(buf, text, len + 1);
+    return static_cast<DWORD>(len);
+}
+WINAPI void *k32_LocalFree(void *p) {
+    free(p);
+    return nullptr;
+}
+WINAPI void *k32_LocalAlloc(UINT flags, SIZE_T size) { return flags & 0x40 ? calloc(1, size) : malloc(size); }
+
 // Process basics.
 WINAPI void k32_ExitProcess(UINT code) { process::exit(static_cast<int>(code)); }
 WINAPI LPSTR k32_GetCommandLineA() { return const_cast<LPSTR>(process::command_line); }
@@ -214,12 +242,12 @@ WINAPI void k32_GetSystemTimeAsFileTime(uint64_t *out) {
 
 namespace {
 const Export exports[] = {
-    EXPORT(ExitProcess), EXPORT(GetCommandLineA),
+    EXPORT(ExitProcess), EXPORT(FormatMessageA), EXPORT(LocalAlloc), EXPORT(LocalFree), EXPORT(GetCommandLineA),
     EXPORT(GetCurrentProcess), EXPORT(GetCurrentProcessId), EXPORT(GetCurrentThreadId), EXPORT(GetLastError),
     EXPORT(GetSystemTimeAsFileTime),
     EXPORT(GetTickCount), EXPORT(IsDBCSLeadByteEx), EXPORT(MultiByteToWideChar),
     EXPORT(QueryPerformanceCounter), EXPORT(QueryPerformanceFrequency), EXPORT(SetLastError),
-    EXPORT(SetUnhandledExceptionFilter), EXPORT(Sleep), EXPORT(TlsAlloc), EXPORT(TlsFree), EXPORT(TlsGetValue),
+    EXPORT(Sleep), EXPORT(TlsAlloc), EXPORT(TlsFree), EXPORT(TlsGetValue),
     EXPORT(TlsSetValue), EXPORT(VirtualAlloc), EXPORT(VirtualFree),
     EXPORT(VirtualProtect), EXPORT(VirtualQuery), EXPORT(WideCharToMultiByte), };
 }  // namespace

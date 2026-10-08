@@ -222,6 +222,33 @@ WINAPI BOOL k32_GetExitCodeThread(HANDLE h, DWORD *code) {
 
 WINAPI HANDLE k32_GetCurrentThread() { return reinterpret_cast<HANDLE>(-2); }
 
+WINAPI DWORD k32_GetThreadId(HANDLE h) {
+    if (h == reinterpret_cast<HANDLE>(-2)) return static_cast<DWORD>(current_tid());
+    auto *t = handles::get_as<ThreadObject>(h, Object::Kind::Thread);
+    return t ? t->id : 0;
+}
+
+// Condition variables: the Windows one is a single pointer; it holds a pthread condition kept aside.
+static pthread_cond_t *condition_of(void **cv) {
+    if (!*cv) {
+        static pthread_mutex_t guard = PTHREAD_MUTEX_INITIALIZER;
+        pthread_mutex_lock(&guard);
+        if (!*cv) {
+            auto *c = static_cast<pthread_cond_t *>(malloc(sizeof(pthread_cond_t)));
+            pthread_condattr_t attr;
+            pthread_condattr_init(&attr);
+            pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+            pthread_cond_init(c, &attr);
+            *cv = c;
+        }
+        pthread_mutex_unlock(&guard);
+    }
+    return static_cast<pthread_cond_t *>(*cv);
+}
+WINAPI void k32_InitializeConditionVariable(void **cv) { *cv = nullptr; }
+WINAPI void k32_WakeConditionVariable(void **cv) { pthread_cond_signal(condition_of(cv)); }
+WINAPI void k32_WakeAllConditionVariable(void **cv) { pthread_cond_broadcast(condition_of(cv)); }
+
 WINAPI DWORD k32_WaitForMultipleObjects(DWORD count, const HANDLE *list, BOOL all, DWORD ms) {
     return wait_for(count, list, all, ms);
 }
@@ -298,6 +325,27 @@ WINAPI void k32_LeaveCriticalSection(CriticalSection *cs) {
     pthread_mutex_unlock(mutex_of(cs));
 }
 
+// Releases the critical section while sleeping, takes it again before returning.
+WINAPI BOOL k32_SleepConditionVariableCS(void **cv, CriticalSection *cs, DWORD ms) {
+    int saved = cs->recursion_count;
+    cs->recursion_count = 0;
+    cs->owning_thread = nullptr;
+    int r;
+    if (ms == INFINITE) {
+        r = pthread_cond_wait(condition_of(cv), mutex_of(cs));
+    } else {
+        timespec deadline = deadline_after(ms);
+        r = pthread_cond_timedwait(condition_of(cv), mutex_of(cs), &deadline);
+    }
+    cs->recursion_count = saved;
+    cs->owning_thread = reinterpret_cast<HANDLE>(current_tid());
+    if (r != 0) {
+        set_last_error(1460);  // ERROR_TIMEOUT
+        return 0;
+    }
+    return 1;
+}
+
 }  // extern "C"
 
 #define EXPORT(name) {#name, reinterpret_cast<void *>(&k32_##name)}
@@ -306,7 +354,9 @@ namespace {
 const Export exports[] = {
     EXPORT(CreateEventA), EXPORT(CreateEventW), EXPORT(CreateMutexA), EXPORT(CreateMutexW), EXPORT(CreateThread),
     EXPORT(DeleteCriticalSection), EXPORT(EnterCriticalSection), EXPORT(ExitThread), EXPORT(GetCurrentThread),
-    EXPORT(GetExitCodeThread), EXPORT(InitializeCriticalSection), EXPORT(InitializeCriticalSectionAndSpinCount),
+    EXPORT(GetExitCodeThread), EXPORT(GetThreadId), EXPORT(InitializeConditionVariable), EXPORT(InitializeCriticalSection),
+    EXPORT(InitializeCriticalSectionAndSpinCount), EXPORT(SleepConditionVariableCS), EXPORT(WakeAllConditionVariable),
+    EXPORT(WakeConditionVariable),
     EXPORT(LeaveCriticalSection), EXPORT(ReleaseMutex), EXPORT(ResetEvent), EXPORT(ResumeThread), EXPORT(SetEvent),
     EXPORT(TryEnterCriticalSection), EXPORT(WaitForMultipleObjects), EXPORT(WaitForSingleObject),
     EXPORT(WaitForSingleObjectEx),

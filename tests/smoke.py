@@ -37,6 +37,8 @@ CHECKS = [
     ("files-ucrt.exe", "files: 16/16 passed"),
     ("threads-ucrt.exe", "winthreads: 9/9 passed"),
     ("dlltest.exe", "dlls: 10/10 passed"),
+    ("cpp.exe", "cpp: 7/7 passed"),
+    ("cpp-dll.exe", "cpp: 7/7 passed"),
     ("mkdir /root/r && cd /root/r && git init -q && echo hi > f && git add f && git commit -qm one && git log --oneline", "one"),
 ]
 

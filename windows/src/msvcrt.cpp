@@ -15,12 +15,16 @@
 #include <ctime>
 #include <fcntl.h>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
 #include "win.hpp"
 
 using ms_va_list = __builtin_ms_va_list;
+
+// seh.cpp
+extern "C" WINAPI int crt___C_specific_handler(void *, void *, void *, void *);
 
 namespace {
 
@@ -421,6 +425,130 @@ WINAPI void crt___setusermatherr(void *) {}
 WINAPI void crt__lock(int) {}
 WINAPI void crt__unlock(int) {}
 
+// ── more stdio, low-level I/O, strings and wide characters (what libstdc++ uses) ───────────────
+
+namespace {
+// One character pushed back with ungetc, per descriptor.
+int pushed_back[64];
+bool has_pushed_back[64];
+}  // namespace
+
+WINAPI int crt_putc(int c, WinFile *f) { return crt_fputc(c, f); }
+WINAPI int crt_getc(WinFile *f) {
+    int fd = fd_of(f);
+    if (fd >= 0 && fd < 64 && has_pushed_back[fd]) {
+        has_pushed_back[fd] = false;
+        return pushed_back[fd];
+    }
+    return crt_fgetc(f);
+}
+WINAPI int crt_ungetc(int c, WinFile *f) {
+    int fd = fd_of(f);
+    if (c < 0 || fd < 0 || fd >= 64) return -1;
+    pushed_back[fd] = c & 0xFF;
+    has_pushed_back[fd] = true;
+    return c & 0xFF;
+}
+WINAPI int crt_setvbuf(WinFile *, char *, int, size_t) { return 0; }  // output isn't buffered here
+WINAPI char *crt_setlocale(int, const char *locale) {
+    static char c_locale[] = "C";
+    return !locale || !*locale || strcmp(locale, "C") == 0 ? c_locale : nullptr;
+}
+WINAPI int crt__fileno(WinFile *f) { return fd_of(f); }
+WINAPI WinFile *crt__fdopen(int fd, const char *) { return new WinFile{nullptr, 0, nullptr, 0, fd, 0, 0, nullptr}; }
+WINAPI int crt__write(int fd, const void *data, unsigned size) { return static_cast<int>(write(fd, data, size)); }
+WINAPI int crt__read(int fd, void *data, unsigned size) { return static_cast<int>(read(fd, data, size)); }
+WINAPI int64_t crt__lseeki64(int fd, int64_t offset, int whence) { return lseek(fd, offset, whence); }
+WINAPI int64_t crt__filelengthi64(int fd) {
+    struct stat st;
+    return fstat(fd, &st) == 0 ? st.st_size : -1;
+}
+// Microsoft's struct _stat64.
+struct WinStat64 {
+    uint32_t dev;
+    uint16_t ino, mode;
+    int16_t nlink, uid, gid, pad0;
+    uint32_t rdev, pad1;
+    int64_t size, atime, mtime, ctime;
+};
+static_assert(sizeof(WinStat64) == 56);
+WINAPI int crt__fstat64(int fd, WinStat64 *out) {
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        win_errno = errno;
+        return -1;
+    }
+    uint16_t mode = S_ISDIR(st.st_mode) ? 0x4000 : S_ISCHR(st.st_mode) || S_ISFIFO(st.st_mode) ? 0x2000 : 0x8000;
+    mode |= 0x100 | (st.st_mode & S_IWUSR ? 0x80 : 0) | (st.st_mode & S_IXUSR ? 0x40 : 0);
+    *out = WinStat64{static_cast<uint32_t>(st.st_dev), static_cast<uint16_t>(st.st_ino), mode, static_cast<int16_t>(st.st_nlink),
+                     0, 0, 0, static_cast<uint32_t>(st.st_rdev), 0, st.st_size, st.st_atime, st.st_mtime, st.st_ctime};
+    return 0;
+}
+WINAPI int crt_fgetpos(WinFile *f, int64_t *pos) {
+    *pos = lseek(fd_of(f), 0, SEEK_CUR);
+    return *pos < 0 ? -1 : 0;
+}
+WINAPI int crt_fsetpos(WinFile *f, const int64_t *pos) { return lseek(fd_of(f), *pos, SEEK_SET) < 0 ? -1 : 0; }
+WINAPI int crt_fseek(WinFile *f, long offset, int whence) { return lseek(fd_of(f), offset, whence) < 0 ? -1 : 0; }
+WINAPI long crt_ftell(WinFile *f) { return static_cast<long>(lseek(fd_of(f), 0, SEEK_CUR)); }
+
+WINAPI void *crt_memchr(const void *s, int c, size_t n) { return const_cast<void *>(memchr(s, c, n)); }
+WINAPI unsigned long crt_strtoul(const char *s, char **end, int base) { return static_cast<uint32_t>(strtoul(s, end, base)); }
+WINAPI int crt_strcoll(const char *a, const char *b) { return strcmp(a, b); }
+WINAPI size_t crt_strxfrm(char *d, const char *s, size_t n) {
+    size_t len = strlen(s);
+    if (n) strncpy(d, s, n);
+    return len;
+}
+WINAPI size_t crt_strftime(char *out, size_t size, const char *fmt, const struct tm *t) { return strftime(out, size, fmt, t); }
+
+// Wide characters are UTF-16 code units (wchar_t is 2 bytes on Windows).
+WINAPI uint16_t crt_towlower(uint16_t c) { return c < 0x80 ? static_cast<uint16_t>(tolower(c)) : c; }
+WINAPI uint16_t crt_towupper(uint16_t c) { return c < 0x80 ? static_cast<uint16_t>(toupper(c)) : c; }
+WINAPI int crt_iswctype(uint16_t c, uint16_t type) {
+    if (c >= 0x80) return type & 0x0103;  // _UPPER|_LOWER|_ALPHA-ish: treat as a letter
+    int r = 0;
+    if (isupper(c)) r |= 0x1;
+    if (islower(c)) r |= 0x2;
+    if (isdigit(c)) r |= 0x4;
+    if (isspace(c)) r |= 0x8;
+    if (ispunct(c)) r |= 0x10;
+    if (iscntrl(c)) r |= 0x20;
+    if (c == ' ') r |= 0x40;
+    if (isxdigit(c)) r |= 0x80;
+    if (isalpha(c)) r |= 0x100;
+    return r & type;
+}
+WINAPI uint16_t crt_getwc(WinFile *f) {
+    int c = crt_getc(f);
+    return c < 0 ? 0xFFFF : static_cast<uint16_t>(c);
+}
+WINAPI uint16_t crt_putwc(uint16_t c, WinFile *f) {
+    char16_t text[2] = {c, 0};
+    std::string s = utf16_to_utf8(text, 1);
+    return write_all(fd_of(f), s.data(), s.size()) ? c : 0xFFFF;
+}
+WINAPI uint16_t crt_ungetwc(uint16_t c, WinFile *f) { return crt_ungetc(c, f) < 0 ? 0xFFFF : c; }
+WINAPI int crt_wcscoll(const char16_t *a, const char16_t *b) {
+    while (*a && *a == *b) a++, b++;
+    return *a - *b;
+}
+WINAPI size_t crt_wcsxfrm(char16_t *d, const char16_t *s, size_t n) {
+    size_t len = crt_wcslen(s);
+    for (size_t i = 0; i < n && i <= len; i++) d[i] = s[i];
+    return len;
+}
+WINAPI size_t crt_wcsftime(char16_t *out, size_t size, const char16_t *fmt, const struct tm *t) {
+    char narrow[256];
+    size_t n = strftime(narrow, sizeof narrow, utf16_to_utf8(fmt, -1).c_str(), t);
+    if (n >= size) return 0;
+    for (size_t i = 0; i <= n; i++) out[i] = static_cast<unsigned char>(narrow[i]);
+    return n;
+}
+WINAPI WinFile *crt__wfopen(const char16_t *path, const char16_t *mode) {
+    return crt_fopen(utf16_to_utf8(path, -1).c_str(), utf16_to_utf8(mode, -1).c_str());
+}
+
 // Runs the C/C++ initializer functions the compiler collected between two addresses.
 WINAPI void crt__initterm(Callback *begin, Callback *end) {
     for (Callback *f = begin; f < end; f++)
@@ -455,8 +583,6 @@ WINAPI void crt__amsg_exit(int code) {
     write_all(2, s.data(), s.size());
     process::exit(255);
 }
-// Structured exception handling: nothing to unwind yet, so keep searching (ExceptionContinueSearch).
-WINAPI int crt___C_specific_handler(void *, void *, void *, void *) { return 1; }
 
 }  // extern "C"
 
@@ -481,6 +607,11 @@ const Export exports[] = {
     {"_snprintf", reinterpret_cast<void *>(&crt_snprintf)}, {"_vsnprintf", reinterpret_cast<void *>(&crt_vsnprintf)},
     {"_time64", reinterpret_cast<void *>(&crt_time64)}, {"time", reinterpret_cast<void *>(&crt_time64)},
     {"_strdup", reinterpret_cast<void *>(&crt_strdup)},
+    EXPORT(putc), EXPORT(getc), EXPORT(ungetc), EXPORT(setvbuf), EXPORT(setlocale), EXPORT(_fileno), EXPORT(_fdopen),
+    EXPORT(_write), EXPORT(_read), EXPORT(_lseeki64), EXPORT(_filelengthi64), EXPORT(_fstat64), EXPORT(fgetpos),
+    EXPORT(fsetpos), EXPORT(fseek), EXPORT(ftell), EXPORT(memchr), EXPORT(strtoul), EXPORT(strcoll), EXPORT(strxfrm),
+    EXPORT(strftime), EXPORT(towlower), EXPORT(towupper), EXPORT(iswctype), EXPORT(getwc), EXPORT(putwc),
+    EXPORT(ungetwc), EXPORT(wcscoll), EXPORT(wcsxfrm), EXPORT(wcsftime), EXPORT(_wfopen),
 };
 }  // namespace
 

@@ -57,7 +57,9 @@ runtime, files and directories (`CreateFile`, `FindFirstFile`, ...), threads (`C
 events, mutexes, critical sections, waiting) and thread-local storage. Each is built twice: against
 `msvcrt.dll` and against the UCRT (`ucrtbase.dll` and its `api-ms-win-crt-*` names), the runtime
 Visual Studio programs use; both run. `dlltest.exe` uses its own DLL (`mathlib.dll`), both linked at build
-time and through `LoadLibrary`/`GetProcAddress`. The Windows layer (`windows/`, C++) works like
+time and through `LoadLibrary`/`GetProcAddress`. `cpp.exe` is C++ (iostream, containers, exceptions thrown
+through several functions with destructors running), and `cpp-dll.exe` is the same program using
+mingw's own `libstdc++-6.dll` and `libgcc_s_seh-1.dll`. The Windows layer (`windows/`, C++) works like
 Windows' own loader plus our own versions of the system DLLs, the same idea as Wine:
 
 - the kernel sees a file starting with `MZ` and runs it through `/bin/winload`, the way it runs a
@@ -67,6 +69,10 @@ Windows' own loader plus our own versions of the system DLLs, the same idea as W
   `msvcrt.dll` and `ucrtbase.dll` (written in C++ with the Microsoft calling convention), sets up
   thread-local storage per image, the TEB and PEB (through the `gs` register, as on Windows), runs
   each DLL's `DllMain`, and jumps to the entry point;
+- exceptions work the Windows x64 way (`seh.cpp`): `RaiseException` walks the stack with each
+  function's unwind tables (`.pdata`/`.xdata`) calling exception handlers, and `RtlUnwindEx` unwinds
+  to the catching frame. C++ `throw` and C `__try`/`__except` are built on it.
+  `WINLOAD_SEH_DEBUG=1` prints every frame the walks visit;
 - a function a program needs but we don't have yet stops it with a message naming the function.
 
 `winload` is an ordinary Linux program, so it runs on Linux (WSL) too: handy for testing.
@@ -131,7 +137,8 @@ Roughly in order; each step is checked by running a real program.
 2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
    archive), interrupt-driven I/O, and AHCI for real PCs.
 3. **Run the targets**: fastfetch and git run; next then BusyBox or coreutils as a compatibility test.
-4. **More Windows**: console programs with files and threads run. Next: C++ exceptions (SEH unwinding), then windows and graphics.
+4. **More Windows**: console programs with files, threads, DLLs and C++ exceptions run. Next:
+   real-world console programs and what they ask for (SEH unwinding), then windows and graphics.
 5. Later: more CPUs (APIC/IOAPIC), networking, a real login, and running make/gcc/cmake on the system itself.
 
 ## Licenses of what's used

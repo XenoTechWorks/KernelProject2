@@ -46,6 +46,7 @@ struct BuiltinDll {
 extern const BuiltinDll kernel32_dll;
 extern const BuiltinDll kernel32_files_dll;
 extern const BuiltinDll kernel32_threads_dll;
+extern const BuiltinDll kernel32_seh_dll;
 extern const BuiltinDll msvcrt_dll;
 extern const BuiltinDll ucrt_dll;  // also answers for api-ms-win-crt-*.dll
 
