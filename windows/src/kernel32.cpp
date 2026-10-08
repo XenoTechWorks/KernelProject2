@@ -18,8 +18,6 @@ constexpr DWORD PAGE_READWRITE = 0x04;
 constexpr DWORD PAGE_EXECUTE = 0x10;
 constexpr DWORD PAGE_EXECUTE_READ = 0x20;
 constexpr DWORD PAGE_EXECUTE_READWRITE = 0x40;
-constexpr DWORD ERROR_INVALID_PARAMETER = 87;
-constexpr DWORD ERROR_INSUFFICIENT_BUFFER = 122;
 
 int to_linux_protection(DWORD p) {
     switch (p & 0xFF) {
@@ -35,21 +33,6 @@ int to_linux_protection(DWORD p) {
 // Images are mapped read/write/execute (see main.cpp); remember what each page was changed to.
 DWORD current_protection = PAGE_EXECUTE_READWRITE;
 
-// The three standard handles, as GetStdHandle returns them.
-HANDLE handle_for_fd(int fd) { return reinterpret_cast<HANDLE>(static_cast<uintptr_t>(fd + 1) * 4); }
-int fd_for_handle(HANDLE h) { return static_cast<int>(reinterpret_cast<uintptr_t>(h) / 4) - 1; }
-
-// Critical sections: one thread per Windows program for now, so entering never has to wait. The
-// count still matters for recursion checks some programs do.
-struct CriticalSection {
-    void *debug_info;
-    LONG lock_count;
-    LONG recursion_count;
-    HANDLE owning_thread;
-    HANDLE lock_semaphore;
-    uintptr_t spin_count;
-};
-
 }  // namespace
 
 extern "C" {
@@ -57,12 +40,6 @@ extern "C" {
 WINAPI DWORD k32_GetLastError() { return *reinterpret_cast<DWORD *>(teb::current() + teb::LAST_ERROR); }
 WINAPI void k32_SetLastError(DWORD e) { set_last_error(e); }
 
-WINAPI void k32_InitializeCriticalSection(CriticalSection *cs) { memset(cs, 0, sizeof *cs); cs->lock_count = -1; }
-WINAPI BOOL k32_InitializeCriticalSectionAndSpinCount(CriticalSection *cs, DWORD) { k32_InitializeCriticalSection(cs); return 1; }
-WINAPI void k32_DeleteCriticalSection(CriticalSection *) {}
-WINAPI void k32_EnterCriticalSection(CriticalSection *cs) { cs->lock_count++; cs->recursion_count++; }
-WINAPI void k32_LeaveCriticalSection(CriticalSection *cs) { cs->lock_count--; cs->recursion_count--; }
-WINAPI BOOL k32_TryEnterCriticalSection(CriticalSection *cs) { k32_EnterCriticalSection(cs); return 1; }
 
 WINAPI void k32_Sleep(DWORD ms) {
     timespec t{static_cast<time_t>(ms / 1000), static_cast<long>(ms % 1000) * 1000000};
@@ -202,30 +179,7 @@ WINAPI int k32_WideCharToMultiByte(UINT, DWORD, LPCWSTR in, int in_len, LPSTR ou
     return n;
 }
 
-// Console and process basics.
-WINAPI HANDLE k32_GetStdHandle(DWORD which) {
-    switch (which) {
-        case static_cast<DWORD>(-10): return handle_for_fd(0);
-        case static_cast<DWORD>(-11): return handle_for_fd(1);
-        case static_cast<DWORD>(-12): return handle_for_fd(2);
-        default: return reinterpret_cast<HANDLE>(-1);
-    }
-}
-
-WINAPI BOOL k32_WriteFile(HANDLE h, const void *data, DWORD size, DWORD *written, void *) {
-    ssize_t n = write(fd_for_handle(h), data, size);
-    if (written) *written = n < 0 ? 0 : static_cast<DWORD>(n);
-    return n >= 0;
-}
-WINAPI BOOL k32_WriteConsoleA(HANDLE h, const void *data, DWORD size, DWORD *written, void *) {
-    return k32_WriteFile(h, data, size, written, nullptr);
-}
-WINAPI BOOL k32_ReadFile(HANDLE h, void *data, DWORD size, DWORD *got, void *) {
-    ssize_t n = read(fd_for_handle(h), data, size);
-    if (got) *got = n < 0 ? 0 : static_cast<DWORD>(n);
-    return n >= 0;
-}
-
+// Process basics.
 WINAPI void k32_ExitProcess(UINT code) { process::exit(static_cast<int>(code)); }
 WINAPI LPSTR k32_GetCommandLineA() { return const_cast<LPSTR>(process::command_line); }
 WINAPI DWORD k32_GetCurrentProcessId() { return static_cast<DWORD>(getpid()); }
@@ -262,16 +216,14 @@ WINAPI void k32_GetSystemTimeAsFileTime(uint64_t *out) {
 
 namespace {
 const Export exports[] = {
-    EXPORT(DeleteCriticalSection), EXPORT(EnterCriticalSection), EXPORT(ExitProcess), EXPORT(GetCommandLineA),
+    EXPORT(ExitProcess), EXPORT(GetCommandLineA),
     EXPORT(GetCurrentProcess), EXPORT(GetCurrentProcessId), EXPORT(GetCurrentThreadId), EXPORT(GetLastError),
-    EXPORT(GetModuleHandleA), EXPORT(GetModuleHandleW), EXPORT(GetStdHandle), EXPORT(GetSystemTimeAsFileTime),
-    EXPORT(GetTickCount), EXPORT(InitializeCriticalSection), EXPORT(InitializeCriticalSectionAndSpinCount),
-    EXPORT(IsDBCSLeadByteEx), EXPORT(LeaveCriticalSection), EXPORT(MultiByteToWideChar),
-    EXPORT(QueryPerformanceCounter), EXPORT(QueryPerformanceFrequency), EXPORT(ReadFile), EXPORT(SetLastError),
+    EXPORT(GetModuleHandleA), EXPORT(GetModuleHandleW), EXPORT(GetSystemTimeAsFileTime),
+    EXPORT(GetTickCount), EXPORT(IsDBCSLeadByteEx), EXPORT(MultiByteToWideChar),
+    EXPORT(QueryPerformanceCounter), EXPORT(QueryPerformanceFrequency), EXPORT(SetLastError),
     EXPORT(SetUnhandledExceptionFilter), EXPORT(Sleep), EXPORT(TlsAlloc), EXPORT(TlsFree), EXPORT(TlsGetValue),
-    EXPORT(TlsSetValue), EXPORT(TryEnterCriticalSection), EXPORT(VirtualAlloc), EXPORT(VirtualFree),
-    EXPORT(VirtualProtect), EXPORT(VirtualQuery), EXPORT(WideCharToMultiByte), EXPORT(WriteConsoleA), EXPORT(WriteFile),
-};
+    EXPORT(TlsSetValue), EXPORT(VirtualAlloc), EXPORT(VirtualFree),
+    EXPORT(VirtualProtect), EXPORT(VirtualQuery), EXPORT(WideCharToMultiByte), };
 }  // namespace
 
 const BuiltinDll kernel32_dll{"kernel32.dll", exports, sizeof exports / sizeof exports[0]};

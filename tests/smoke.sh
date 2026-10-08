@@ -36,6 +36,8 @@ checks=(
     "thread-test => threads: 6/6 passed"
     "hello.exe one => Hello from Windows! 2 argument(s)"
     "winapi.exe => winapi: 9/9 passed"
+    "files.exe => files: 16/16 passed"
+    "threads.exe => winthreads: 9/9 passed"
     "winapi.exe > /dev/null; echo windows exit \$? => windows exit 0"
     "mkdir /root/r && cd /root/r && git init -q && echo hi > f && git add f && git commit -qm one && git log --oneline => one"
 )

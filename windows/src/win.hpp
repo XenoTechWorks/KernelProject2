@@ -40,9 +40,19 @@ struct BuiltinDll {
     size_t count;
 };
 
-// The built-in DLLs (kernel32.cpp, msvcrt.cpp, ...).
+// The built-in DLLs. kernel32 comes in parts (kernel32.cpp, files.cpp, threads.cpp), each listing
+// its own functions under the same DLL name.
 extern const BuiltinDll kernel32_dll;
+extern const BuiltinDll kernel32_files_dll;
+extern const BuiltinDll kernel32_threads_dll;
 extern const BuiltinDll msvcrt_dll;
+
+// The image's thread-local storage template (its .tls directory), copied for every thread.
+struct TlsTemplate {
+    bool present;
+    uint64_t start, end, callbacks;
+    uint32_t zero_fill;
+};
 
 // Process-wide facts the DLLs need.
 namespace process {
@@ -52,6 +62,8 @@ extern char **envp;
 extern void *image_base;
 extern size_t image_size;
 extern const char *command_line;
+extern const char *module_path;  // the .exe, as an absolute Windows path
+extern TlsTemplate tls;
 [[noreturn]] void exit(int code);
 }  // namespace process
 
@@ -70,11 +82,36 @@ constexpr size_t LAST_ERROR = 0x68;
 constexpr size_t TLS_SLOTS = 0x1480;  // 64 TlsAlloc slots
 constexpr size_t SIZE = 0x2000;
 
-// Sets up the TEB and PEB for the current thread and points gs at the TEB.
-void init(void *image_base, void **tls_array);
+constexpr DWORD DLL_PROCESS_ATTACH = 1;
+constexpr DWORD DLL_THREAD_ATTACH = 2;
+
+// Sets up a TEB (and the shared PEB) for the calling thread, points gs at it, gives the thread its
+// copy of the image's TLS variables, and runs the TLS callbacks with `reason`.
+void attach_thread(DWORD reason);
 uint8_t *current();
 }  // namespace teb
 
 inline void set_last_error(DWORD error) {
     *reinterpret_cast<DWORD *>(teb::current() + teb::LAST_ERROR) = error;
 }
+
+// Windows error codes the layer sets.
+constexpr DWORD ERROR_FILE_NOT_FOUND = 2;
+constexpr DWORD ERROR_PATH_NOT_FOUND = 3;
+constexpr DWORD ERROR_ACCESS_DENIED = 5;
+constexpr DWORD ERROR_INVALID_HANDLE = 6;
+constexpr DWORD ERROR_NOT_ENOUGH_MEMORY = 8;
+constexpr DWORD ERROR_NO_MORE_FILES = 18;
+constexpr DWORD ERROR_FILE_EXISTS = 80;
+constexpr DWORD ERROR_INVALID_PARAMETER = 87;
+constexpr DWORD ERROR_INSUFFICIENT_BUFFER = 122;
+constexpr DWORD ERROR_DIR_NOT_EMPTY = 145;
+constexpr DWORD ERROR_ALREADY_EXISTS = 183;
+
+// The Windows error for a Linux errno (sets it as the last error too).
+DWORD set_error_from_errno(int e);
+
+// Paths: Windows "C:\dirile" (any drive letter) to "/dir/file", and back as "C:\dirile".
+#include <string>
+std::string unix_path(const char *windows_path);
+std::string windows_path(const std::string &unix_path);

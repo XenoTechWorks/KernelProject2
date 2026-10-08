@@ -29,6 +29,7 @@ char **envp;
 void *image_base;
 size_t image_size;
 const char *command_line;
+const char *module_path;
 }  // namespace process
 
 namespace {
@@ -44,7 +45,7 @@ template <typename T> T read(const uint8_t *p, size_t at) {
     return v;
 }
 
-const BuiltinDll *const dlls[] = {&kernel32_dll, &msvcrt_dll};
+const BuiltinDll *const dlls[] = {&kernel32_dll, &kernel32_files_dll, &kernel32_threads_dll, &msvcrt_dll};
 
 void *find_export(const char *dll, const char *name) {
     for (const BuiltinDll *d : dlls) {
@@ -186,6 +187,8 @@ int main(int argc, char **argv, char **envp) {
     process::image_base = base;
     process::image_size = image_size;
     process::command_line = strdup(quote_command_line(argc - 1, argv + 1).c_str());
+    char *absolute = realpath(argv[1], nullptr);
+    process::module_path = strdup(windows_path(absolute ? absolute : argv[1]).c_str());
 
     // 2. Imports.
     if (auto [rva, size] = directory(1); rva) {
@@ -212,24 +215,15 @@ int main(int argc, char **argv, char **envp) {
         }
     }
 
-    // 3. Thread-local storage: one block, copied from the image's template.
-    static void *tls_array[1];
-    auto [tls_rva, tls_size] = directory(9);
-    teb::init(base, tls_array);
-    if (tls_rva) {
-        uint64_t start = read<uint64_t>(base, tls_rva);
-        uint64_t end = read<uint64_t>(base, tls_rva + 8);
-        uint64_t index_address = read<uint64_t>(base, tls_rva + 16);
-        uint64_t callbacks = read<uint64_t>(base, tls_rva + 24);
-        uint32_t zero_fill = read<uint32_t>(base, tls_rva + 32);
-        uint8_t *block = static_cast<uint8_t *>(calloc(1, end - start + zero_fill + 16));
-        memcpy(block, reinterpret_cast<void *>(start), end - start);
-        tls_array[0] = block;
-        if (index_address) *reinterpret_cast<uint32_t *>(index_address) = 0;
-        using TlsCallback = void(WINAPI *)(void *, DWORD, void *);
-        for (auto *cb = reinterpret_cast<TlsCallback *>(callbacks); cb && *cb; cb++)
-            (*cb)(base, 1 /* DLL_PROCESS_ATTACH */, nullptr);
+    // 3. Thread-local storage: remember the image's template (every thread gets a copy), then set up
+    //    this thread's TEB and run the TLS callbacks.
+    if (auto [tls_rva, tls_size] = directory(9); tls_rva) {
+        process::tls = {true, read<uint64_t>(base, tls_rva), read<uint64_t>(base, tls_rva + 8),
+                        read<uint64_t>(base, tls_rva + 24), read<uint32_t>(base, tls_rva + 32)};
+        if (uint64_t index_address = read<uint64_t>(base, tls_rva + 16))
+            *reinterpret_cast<uint32_t *>(index_address) = 0;
     }
+    teb::attach_thread(teb::DLL_PROCESS_ATTACH);
 
     // 4. Run it. A console program's entry point takes nothing and returns the exit code.
     using Entry = int(WINAPI *)();

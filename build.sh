@@ -54,7 +54,7 @@ gcc -O2 -pthread -o "$stage/bin/thread-test" "$root/tests/threads.c"
 
 step "Windows layer (winload) and Windows test programs"
 g++ -std=c++20 -O2 -static -fno-exceptions -fno-rtti -Wall -Wextra -o "$stage/bin/winload" "$root"/windows/src/*.cpp
-for program in hello winapi; do
+for program in hello winapi files threads; do
     x86_64-w64-mingw32-gcc -O2 -o "$stage/bin/$program.exe" "$root/tests/windows/$program.c"
 done
 

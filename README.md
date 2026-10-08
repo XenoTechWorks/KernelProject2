@@ -51,8 +51,10 @@ cmake --build ~/src/fastfetch/build -j8
 
 ## Windows programs
 
-`hello.exe` and `winapi.exe` are real Windows programs, built with mingw-w64 (the GCC Windows
-toolchain), and they run when you type their names. The Windows layer (`windows/`, C++) works like
+`hello.exe`, `winapi.exe`, `files.exe` and `threads.exe` are real Windows programs, built with
+mingw-w64 (the GCC Windows toolchain), and they run when you type their names. They cover the C
+runtime, files and directories (`CreateFile`, `FindFirstFile`, ...), threads (`CreateThread`,
+events, mutexes, critical sections, waiting) and thread-local storage. The Windows layer (`windows/`, C++) works like
 Windows' own loader plus our own versions of the system DLLs, the same idea as Wine:
 
 - the kernel sees a file starting with `MZ` and runs it through `/bin/winload`, the way it runs a
@@ -124,9 +126,8 @@ Roughly in order; each step is checked by running a real program.
 2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
    archive), interrupt-driven I/O, and AHCI for real PCs.
 3. **Run the targets**: fastfetch and git run; next then BusyBox or coreutils as a compatibility test.
-4. **More Windows**: console programs run. Next: files (CreateFile and friends), threads
-   (CreateThread), loading .dll files, the UCRT runtime newer compilers use, then windows and
-   graphics.
+4. **More Windows**: console programs with files and threads run. Next: loading .dll files, the
+   UCRT runtime newer compilers use, C++ exceptions (SEH unwinding), then windows and graphics.
 5. Later: more CPUs (APIC/IOAPIC), networking, a real login, and running make/gcc/cmake on the system itself.
 
 ## Licenses of what's used
