@@ -38,20 +38,26 @@ pub fn kill(pid: i64, sig: usize) -> SysResult {
     }
     let me = proc::current();
     match pid {
-        p if p > 0 => {
-            let target = proc::get(p as u32).ok_or(ESRCH)?;
-            proc::signal(target, sig);
-        }
+        p if p > 0 => proc::signal_process(p as u32, sig)?,
         0 => proc::signal_group(me.pgid, sig),
         -1 => {
-            for target in proc::all() {
-                if target.pid != 1 {
-                    proc::signal(target, sig);
-                }
+            let all: alloc::vec::Vec<u32> = proc::processes().filter(|t| t.tgid != 1).map(|t| t.tgid).collect();
+            for tgid in all {
+                let _ = proc::signal_process(tgid, sig);
             }
         }
         p => proc::signal_group((-p) as u32, sig),
     }
+    Ok(0)
+}
+
+/// tkill / tgkill: a signal for one thread.
+pub fn tkill(tid: u32, sig: usize) -> SysResult {
+    if sig > 64 {
+        return Err(EINVAL);
+    }
+    let target = proc::get(tid).ok_or(ESRCH)?;
+    proc::signal::send(target, sig);
     Ok(0)
 }
 
@@ -61,14 +67,14 @@ pub fn rt_sigaction(sig: usize, act: u64, old: u64) -> SysResult {
     }
     let p = proc::current();
     if old != 0 {
-        user::write_struct(p.space(), old, &p.sigactions[sig])?;
+        user::write_struct(p.space(), old, &p.handlers()[sig])?;
     }
     if act != 0 {
         if sig == proc::SIGKILL || sig == proc::SIGSTOP {
             return Err(EINVAL);
         }
         let action: SigAction = user::read_struct(p.space(), act)?;
-        p.sigactions[sig] = action;
+        p.handlers()[sig] = action;
     }
     Ok(0)
 }
@@ -103,34 +109,40 @@ pub fn sched_yield() -> SysResult {
 
 pub fn umask(mask: u32) -> SysResult {
     let p = proc::current();
-    let old = p.umask;
-    p.umask = mask & 0o777;
+    let old = p.files().umask;
+    p.files().umask = mask & 0o777;
     Ok(old as u64)
 }
 
+// Process groups and sessions belong to the whole process, so every thread is updated.
+
 pub fn setpgid(pid: u32, pgid: u32) -> SysResult {
-    let me = proc::current();
-    let pid = if pid == 0 { me.pid } else { pid };
-    let target = proc::get(pid).ok_or(ESRCH)?;
-    target.pgid = if pgid == 0 { pid } else { pgid };
+    let pid = if pid == 0 { proc::current().tgid } else { pid };
+    proc::get(pid).ok_or(ESRCH)?;
+    let pgid = if pgid == 0 { pid } else { pgid };
+    for t in proc::threads(pid) {
+        t.pgid = pgid;
+    }
     Ok(0)
 }
 
 pub fn getpgid(pid: u32) -> SysResult {
-    let pid = if pid == 0 { proc::current().pid } else { pid };
+    let pid = if pid == 0 { proc::current().tgid } else { pid };
     Ok(proc::get(pid).ok_or(ESRCH)?.pgid as u64)
 }
 
 pub fn getsid(pid: u32) -> SysResult {
-    let pid = if pid == 0 { proc::current().pid } else { pid };
+    let pid = if pid == 0 { proc::current().tgid } else { pid };
     Ok(proc::get(pid).ok_or(ESRCH)?.sid as u64)
 }
 
 pub fn setsid() -> SysResult {
-    let p = proc::current();
-    p.sid = p.pid;
-    p.pgid = p.pid;
-    Ok(p.pid as u64)
+    let tgid = proc::current().tgid;
+    for t in proc::threads(tgid) {
+        t.sid = tgid;
+        t.pgid = tgid;
+    }
+    Ok(tgid as u64)
 }
 
 /// getresuid / getresgid: everyone is root for now.

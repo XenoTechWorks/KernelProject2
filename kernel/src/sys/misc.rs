@@ -149,18 +149,6 @@ pub fn times(out: u64) -> SysResult {
     Ok(crate::arch::irq::ticks())
 }
 
-/// Futexes matter once there are threads; with one thread per process nobody else can wake a waiter.
-pub fn futex(addr: u64, op: u32, val: u32) -> SysResult {
-    match op & 0x7f {
-        0 | 9 => {
-            let current: u32 = user::read_struct(proc::current().space(), addr)?;
-            if current != val { Err(EAGAIN) } else { Err(110) } // ETIMEDOUT
-        }
-        1 | 10 => Ok(0),
-        _ => Err(ENOSYS),
-    }
-}
-
 /// getitimer / setitimer: reports "no timer set" in the old-value struct.
 pub fn itimer(old: u64) -> SysResult {
     if old != 0 {

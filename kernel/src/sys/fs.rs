@@ -38,7 +38,7 @@ fn resolve_str(dirfd: i32, path: &str) -> Result<String, Errno> {
     if path.starts_with('/') {
         return Ok(fs::normalize("/", path));
     }
-    let base = if dirfd == AT_FDCWD { p.cwd.clone() } else { p.fds.get(dirfd)?.path.clone() };
+    let base = if dirfd == AT_FDCWD { p.files().cwd.clone() } else { p.files().fds.get(dirfd)?.path.clone() };
     Ok(fs::normalize(&base, path))
 }
 
@@ -154,7 +154,7 @@ fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
             let mut written = 0;
             while written < data.len() {
                 if *pipe.readers.lock() == 0 {
-                    proc::signal(proc::current(), proc::SIGPIPE);
+                    proc::signal::send(proc::current(), proc::SIGPIPE);
                     return if written > 0 { Ok(written as u64) } else { Err(EPIPE) };
                 }
                 {
@@ -179,7 +179,7 @@ fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
 }
 
 pub fn read(fd: i32, buf: u64, len: usize) -> SysResult {
-    let file = proc::current().fds.get(fd)?;
+    let file = proc::current().files().fds.get(fd)?;
     let mut tmp = vec![0u8; len.min(1 << 20)];
     let n = read_file(&file, &mut tmp, None)? as usize;
     user::write(proc::current().space(), buf, &tmp[..n])?;
@@ -188,13 +188,13 @@ pub fn read(fd: i32, buf: u64, len: usize) -> SysResult {
 
 pub fn write(fd: i32, buf: u64, len: usize) -> SysResult {
     let p = proc::current();
-    let file = p.fds.get(fd)?;
+    let file = p.files().fds.get(fd)?;
     let data = user::read_vec(p.space(), buf, len.min(1 << 24))?;
     write_file(&file, &data, None)
 }
 
 pub fn pread(fd: i32, buf: u64, len: usize, offset: u64) -> SysResult {
-    let file = proc::current().fds.get(fd)?;
+    let file = proc::current().files().fds.get(fd)?;
     if !matches!(&file.handle, Handle::Node(n) if matches!(n.kind, Kind::File(_))) {
         return Err(ESPIPE);
     }
@@ -206,7 +206,7 @@ pub fn pread(fd: i32, buf: u64, len: usize, offset: u64) -> SysResult {
 
 pub fn pwrite(fd: i32, buf: u64, len: usize, offset: u64) -> SysResult {
     let p = proc::current();
-    let file = p.fds.get(fd)?;
+    let file = p.files().fds.get(fd)?;
     if !matches!(&file.handle, Handle::Node(n) if matches!(n.kind, Kind::File(_))) {
         return Err(ESPIPE);
     }
@@ -242,7 +242,7 @@ pub fn readv(fd: i32, iov: u64, count: usize) -> SysResult {
 pub fn writev(fd: i32, iov: u64, count: usize) -> SysResult {
     // Gather first, so a line written in pieces reaches the terminal in one go.
     let p = proc::current();
-    let file = p.fds.get(fd)?;
+    let file = p.files().fds.get(fd)?;
     let mut data = Vec::new();
     for (base, len) in iovecs(iov, count)? {
         data.extend(user::read_vec(p.space(), base, len.min(1 << 24))?);
@@ -267,7 +267,7 @@ pub fn open_path(path: &str, flags: u32, mode: u32) -> SysResult {
         }
         Err(ENOENT) if flags & O_CREAT != 0 => {
             let (dir, name) = fs::parent_of(path)?;
-            let node = Node::file(Vec::new(), mode & !p.umask);
+            let node = Node::file(Vec::new(), mode & !p.files().umask);
             fs::link(&dir, &name, node.clone())?;
             node
         }
@@ -292,35 +292,35 @@ pub fn open_path(path: &str, flags: u32, mode: u32) -> SysResult {
     }
     let kept = flags & !(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | O_CLOEXEC);
     let file = OpenFile::node(node, kept, String::from(path));
-    Ok(p.fds.insert(file, flags & O_CLOEXEC != 0, 0)? as u64)
+    Ok(p.files().fds.insert(file, flags & O_CLOEXEC != 0, 0)? as u64)
 }
 
 pub fn close(fd: i32) -> SysResult {
-    proc::current().fds.close(fd)?;
+    proc::current().files().fds.close(fd)?;
     Ok(0)
 }
 
 pub fn dup(fd: i32) -> SysResult {
     let p = proc::current();
-    let file = p.fds.get(fd)?;
-    Ok(p.fds.insert(file, false, 0)? as u64)
+    let file = p.files().fds.get(fd)?;
+    Ok(p.files().fds.insert(file, false, 0)? as u64)
 }
 
 pub fn dup3(old: i32, new: i32, flags: u32, is_dup2: bool) -> SysResult {
     let p = proc::current();
-    let file = p.fds.get(old)?;
+    let file = p.files().fds.get(old)?;
     if old == new {
         return if is_dup2 { Ok(new as u64) } else { Err(EINVAL) };
     }
     if new < 0 || new as usize >= proc::fd::MAX_FDS {
         return Err(EBADF);
     }
-    p.fds.place(new as usize, proc::fd::Fd { file, cloexec: flags & O_CLOEXEC != 0 });
+    p.files().fds.place(new as usize, proc::fd::Fd { file, cloexec: flags & O_CLOEXEC != 0 });
     Ok(new as u64)
 }
 
 pub fn lseek(fd: i32, offset: i64, whence: u32) -> SysResult {
-    let file = proc::current().fds.get(fd)?;
+    let file = proc::current().files().fds.get(fd)?;
     let Handle::Node(node) = &file.handle else { return Err(ESPIPE) };
     if matches!(node.kind, Kind::Device(_)) {
         return Ok(0);
@@ -398,7 +398,7 @@ fn stat_of(handle: &Handle) -> Stat {
 
 pub fn fstat(fd: i32, out: u64) -> SysResult {
     let p = proc::current();
-    let file = p.fds.get(fd)?;
+    let file = p.files().fds.get(fd)?;
     user::write_struct(p.space(), out, &stat_of(&file.handle))?;
     Ok(0)
 }
@@ -407,7 +407,7 @@ fn handle_for(dirfd: i32, path_ptr: u64, flags: u32) -> Result<Handle, Errno> {
     let p = proc::current();
     let path = user::read_cstr(p.space(), path_ptr, 4096)?;
     if path.is_empty() && flags & AT_EMPTY_PATH != 0 {
-        let file = if dirfd == AT_FDCWD { None } else { Some(p.fds.get(dirfd)?) };
+        let file = if dirfd == AT_FDCWD { None } else { Some(p.files().fds.get(dirfd)?) };
         // A bare Handle doesn't count as a pipe end (only OpenFile does), so cloning one is harmless.
         return Ok(match file {
             Some(f) => match &f.handle {
@@ -415,7 +415,7 @@ fn handle_for(dirfd: i32, path_ptr: u64, flags: u32) -> Result<Handle, Errno> {
                 Handle::PipeRead(pp) => Handle::PipeRead(pp.clone()),
                 Handle::PipeWrite(pp) => Handle::PipeWrite(pp.clone()),
             },
-            None => Handle::Node(fs::lookup(&p.cwd, true)?),
+            None => Handle::Node(fs::lookup(&p.files().cwd, true)?),
         });
     }
     let abs = resolve_str(dirfd, &path)?;
@@ -454,7 +454,7 @@ pub fn statx(dirfd: i32, path_ptr: u64, flags: u32, out: u64) -> SysResult {
 
 pub fn getdents64(fd: i32, buf: u64, len: usize) -> SysResult {
     let p = proc::current();
-    let file = p.fds.get(fd)?;
+    let file = p.files().fds.get(fd)?;
     let Handle::Node(node) = &file.handle else { return Err(ENOTDIR) };
     let Kind::Dir(entries) = &node.kind else { return Err(ENOTDIR) };
     let mut list: Vec<(String, u64, u8)> = vec![(".".into(), node.ino, 4), ("..".into(), node.ino, 4)];
@@ -508,7 +508,7 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
     const FIOCLEX: u32 = 0x5451;
 
     let p = proc::current();
-    let file = p.fds.get(fd)?;
+    let file = p.files().fds.get(fd)?;
     match request {
         FIONBIO => {
             let on = user::read_u64(p.space(), arg).map(|v| v as u32 != 0)?;
@@ -517,7 +517,7 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
             return Ok(0);
         }
         FIOCLEX | FIONCLEX => {
-            p.fds.entry(fd)?.cloexec = request == FIOCLEX;
+            p.files().fds.entry(fd)?.cloexec = request == FIOCLEX;
             return Ok(0);
         }
         _ => {}
@@ -562,12 +562,12 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
 
 pub fn fcntl(fd: i32, cmd: u32, arg: u64) -> SysResult {
     let p = proc::current();
-    let file = p.fds.get(fd)?;
+    let file = p.files().fds.get(fd)?;
     match cmd {
-        0 | 1030 => Ok(p.fds.insert(file, cmd == 1030, arg as usize)? as u64), // F_DUPFD, F_DUPFD_CLOEXEC
-        1 => Ok(p.fds.entry(fd)?.cloexec as u64),                              // F_GETFD
+        0 | 1030 => Ok(p.files().fds.insert(file, cmd == 1030, arg as usize)? as u64), // F_DUPFD, F_DUPFD_CLOEXEC
+        1 => Ok(p.files().fds.entry(fd)?.cloexec as u64),                              // F_GETFD
         2 => {
-            p.fds.entry(fd)?.cloexec = arg & 1 != 0; // F_SETFD
+            p.files().fds.entry(fd)?.cloexec = arg & 1 != 0; // F_SETFD
             Ok(0)
         }
         3 => Ok(*file.flags.lock() as u64), // F_GETFL
@@ -584,7 +584,7 @@ pub fn fcntl(fd: i32, cmd: u32, arg: u64) -> SysResult {
 
 pub fn getcwd(buf: u64, size: usize) -> SysResult {
     let p = proc::current();
-    let mut cwd = p.cwd.clone().into_bytes();
+    let mut cwd = p.files().cwd.clone().into_bytes();
     cwd.push(0);
     if cwd.len() > size {
         return Err(ERANGE);
@@ -598,16 +598,16 @@ pub fn chdir(path_ptr: u64) -> SysResult {
     if !fs::lookup(&path, true)?.is_dir() {
         return Err(ENOTDIR);
     }
-    proc::current().cwd = path;
+    proc::current().files().cwd = path;
     Ok(0)
 }
 
 pub fn fchdir(fd: i32) -> SysResult {
     let p = proc::current();
-    let file = p.fds.get(fd)?;
+    let file = p.files().fds.get(fd)?;
     match &file.handle {
         Handle::Node(n) if n.is_dir() => {
-            p.cwd = file.path.clone();
+            p.files().cwd = file.path.clone();
             Ok(0)
         }
         _ => Err(ENOTDIR),
@@ -618,7 +618,7 @@ pub fn mkdirat(dirfd: i32, path_ptr: u64, mode: u32) -> SysResult {
     let path = resolve(dirfd, path_ptr)?;
     let (dir, name) = fs::parent_of(&path)?;
     let node = Node::dir();
-    *node.mode.lock() = mode & 0o7777 & !proc::current().umask;
+    *node.mode.lock() = mode & 0o7777 & !proc::current().files().umask;
     fs::link(&dir, &name, node)?;
     Ok(0)
 }
@@ -711,7 +711,7 @@ pub fn faccessat(dirfd: i32, path_ptr: u64, mode: u32) -> SysResult {
 pub fn chmod(n: u64, a: [u64; 6]) -> SysResult {
     let (node, mode) = match n {
         90 => (fs::lookup(&resolve(AT_FDCWD, a[0])?, true)?, a[1]),
-        91 => match &proc::current().fds.get(a[0] as i32)?.handle {
+        91 => match &proc::current().files().fds.get(a[0] as i32)?.handle {
             Handle::Node(n) => (n.clone(), a[1]),
             _ => return Ok(0),
         },
@@ -738,7 +738,7 @@ pub fn truncate_path(path_ptr: u64, len: u64) -> SysResult {
 }
 
 pub fn ftruncate(fd: i32, len: u64) -> SysResult {
-    match &proc::current().fds.get(fd)?.handle {
+    match &proc::current().files().fds.get(fd)?.handle {
         Handle::Node(n) => truncate_node(n, len),
         _ => Err(EINVAL),
     }
@@ -754,11 +754,11 @@ pub fn pipe2(fds_ptr: u64, flags: u32) -> SysResult {
         *write_end.flags.lock() |= O_NONBLOCK;
     }
     let cloexec = flags & O_CLOEXEC != 0;
-    let r = p.fds.insert(read_end, cloexec, 0)?;
-    let w = match p.fds.insert(write_end, cloexec, 0) {
+    let r = p.files().fds.insert(read_end, cloexec, 0)?;
+    let w = match p.files().fds.insert(write_end, cloexec, 0) {
         Ok(w) => w,
         Err(e) => {
-            let _ = p.fds.close(r);
+            let _ = p.files().fds.close(r);
             return Err(e);
         }
     };
@@ -775,7 +775,7 @@ const POLLNVAL: i16 = 0x20;
 
 /// What is ready on a descriptor right now, as poll() bits.
 fn readiness(fd: i32) -> i16 {
-    let Ok(file) = proc::current().fds.get(fd) else { return POLLNVAL };
+    let Ok(file) = proc::current().files().fds.get(fd) else { return POLLNVAL };
     match &file.handle {
         Handle::Node(n) => match n.kind {
             Kind::Device(Device::Tty) => POLLOUT | if crate::tty::available() > 0 { POLLIN } else { 0 },

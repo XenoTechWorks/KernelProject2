@@ -63,12 +63,13 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         // progress display). Real timers come with signal delivery.
         36 | 38 => misc::itimer(a[if n == 36 { 1 } else { 2 }]),
         37 => Ok(0),
-        39 => Ok(crate::proc::current().pid as u64),
+        39 => Ok(crate::proc::current().tgid as u64),
         57 => process::clone(frame, 17, 0, 0, 0, 0),
         58 => process::clone(frame, 0x100 | 0x4000 | 17, 0, 0, 0, 0),
         56 => process::clone(frame, a[0], a[1], a[2], a[3], a[4]),
         59 => process::execve(frame, AT_FDCWD, a[0], a[1], a[2]),
-        60 | 231 => crate::proc::exit(((a[0] & 0xff) << 8) as i32),
+        60 => crate::proc::exit_thread(((a[0] & 0xff) << 8) as i32),
+        231 => crate::proc::exit(((a[0] & 0xff) << 8) as i32),
         61 => process::wait4(a[0] as i32 as i64, a[1], a[2] as u32),
         62 => process::kill(a[0] as i32 as i64, a[1] as usize),
         63 => misc::uname(a[0]),
@@ -113,10 +114,11 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         157 => Ok(0), // prctl: accept and ignore (PR_SET_NAME etc.)
         158 => process::arch_prctl(a[0] as u32, a[1]),
         160 => Ok(0), // setrlimit
-        186 => Ok(crate::proc::current().pid as u64), // gettid: one thread per process for now
-        200 | 234 => process::kill(a[0] as i32 as i64, a[if n == 200 { 1 } else { 2 }] as usize), // tkill, tgkill
+        186 => Ok(crate::proc::current().pid as u64), // gettid
+        200 => process::tkill(a[0] as u32, a[1] as usize),
+        234 => process::tkill(a[1] as u32, a[2] as usize), // tgkill: the thread id is unique already
         201 => misc::time(a[0]),
-        202 => misc::futex(a[0], a[1] as u32, a[2] as u32),
+        202 => crate::proc::futex::futex(a[0], a[1] as u32, a[2] as u32, a[3], a[4], a[5] as u32),
         204 => misc::sched_getaffinity(a[1] as usize, a[2]),
         217 => fs::getdents64(a[0] as i32, a[1], a[2] as usize),
         218 => {

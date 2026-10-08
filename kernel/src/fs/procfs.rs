@@ -88,7 +88,8 @@ fn state_letter(state: State) -> char {
     match state {
         State::Runnable => 'R',
         State::Sleeping => 'S',
-        State::Zombie(_) => 'Z',
+        State::Zombie(_) | State::Lingering => 'Z',
+        State::Dead => 'X',
     }
 }
 
@@ -106,14 +107,14 @@ fn process_dir(p: &proc::Process) -> Arc<Node> {
         p.start_ticks,
     );
     let status = format!(
-        "Name:\t{}\nState:\t{state}\nTgid:\t{pid}\nPid:\t{pid}\nPPid:\t{}\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nThreads:\t1\n",
+        "Name:\t{}\nState:\t{state}\nTgid:\t{pid}\nPid:\t{pid}\nPPid:\t{}\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nThreads:\t{}\n",
         p.name,
         p.ppid,
+        proc::threads(p.tgid).count(),
         pid = p.pid,
     );
     let fds = p
-        .fds
-        .iter()
+        .files().fds.iter()
         .map(|(n, file)| (n.to_string(), link(file.path.clone())))
         .collect();
     dir(alloc::vec![
@@ -125,7 +126,7 @@ fn process_dir(p: &proc::Process) -> Arc<Node> {
         ("maps".into(), file(Vec::new())),
         ("mounts".into(), file(MOUNTS)),
         ("exe".into(), link(p.exe.clone())),
-        ("cwd".into(), link(p.cwd.clone())),
+        ("cwd".into(), link(p.files().cwd.clone())),
         ("root".into(), link("/")),
         ("fd".into(), dir(fds)),
     ])
@@ -166,7 +167,7 @@ pub fn build() -> Arc<Node> {
         entries.push(("self".into(), link(pid.to_string())));
         entries.push(("thread-self".into(), link(format!("{pid}/task/{pid}"))));
     }
-    for p in proc::all() {
+    for p in proc::processes() {
         entries.push((p.pid.to_string(), process_dir(p)));
     }
     dir(entries)

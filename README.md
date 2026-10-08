@@ -10,7 +10,8 @@ kernel answers those calls the way Linux does, the program can't tell the differ
 ## What works today
 
 - Boots with Limine on a 64-bit PC (tested in QEMU).
-- Processes: `fork`, `execve`, `wait4`, `exit`, a scheduler with time slices, Ctrl+C.
+- Processes and threads: `fork`, `clone` (threads share memory, files and signal handlers, as on
+  Linux), `execve`, `wait4`, `exit`/`exit_group`, futexes, and a scheduler with time slices.
 - Signals the Linux way: handlers run on Linux's `rt_sigframe` and return through `rt_sigreturn`,
   with masks, pending signals, `SA_RESTART`, `SIGCHLD`, and faults (`SIGSEGV` ...) a program can catch.
 - Memory: each program gets its own address space, plus `brk`, `mmap`, `munmap`, `mprotect` and a
@@ -31,7 +32,7 @@ kernel answers those calls the way Linux does, the program can't tell the differ
 The proof: `hello-static` and `hello-dynamic` are ordinary C programs built by gcc against glibc and
 copied in unchanged, and they run. So do **fastfetch** (built from its own unchanged source) and
 **git** (Ubuntu's own `/usr/bin/git`): init, add, commit, branches, merges, diff, stash, log --graph.
-`signal-test` checks signal handling against the same results as on Linux.
+`signal-test` and `thread-test` check signals and glibc pthreads against the same results as on Linux.
 
 ## Real Linux programs
 
@@ -99,15 +100,13 @@ Roughly in order; each step is checked by running a real program.
 
 1. **More of Linux for real tools**: real interval timers (`setitimer`/`alarm` are accepted but
    don't fire yet), `socketpair` and Unix sockets, `eventfd`, `epoll`.
-2. **Threads**: `clone(CLONE_VM | CLONE_THREAD)`, real futexes, per-thread TLS. git and most modern
-   programs use threads.
-3. **Disks**: a virtio or AHCI driver and a real file system (ext2 first), so programs and files
+2. **Disks**: a virtio or AHCI driver and a real file system (ext2 first), so programs and files
    persist and don't all live in the boot archive.
-4. **Run the targets**: fastfetch and git run; next then BusyBox or coreutils as a compatibility test.
-5. **Windows programs**: our own Windows layer (C++). A PE loader for `.exe` files and the Windows
+3. **Run the targets**: fastfetch and git run; next then BusyBox or coreutils as a compatibility test.
+4. **Windows programs**: our own Windows layer (C++). A PE loader for `.exe` files and the Windows
    system DLLs (`kernel32`, `ntdll`, ...) implemented on top of the kernel, the same idea as Wine but
    built into the system.
-6. Later: more CPUs (APIC/IOAPIC), networking, a real login, and running make/gcc/cmake on the system itself.
+5. Later: more CPUs (APIC/IOAPIC), networking, a real login, and running make/gcc/cmake on the system itself.
 
 ## Licenses of what's used
 

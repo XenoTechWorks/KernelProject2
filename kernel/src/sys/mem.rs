@@ -27,19 +27,19 @@ fn page_flags(prot: u32) -> u64 {
 
 pub fn brk(addr: u64) -> SysResult {
     let p = proc::current();
-    if addr < p.brk_start || addr >= proc::MMAP_TOP {
-        return Ok(p.brk);
+    if addr < p.mem().brk_start || addr >= proc::MMAP_TOP {
+        return Ok(p.mem().brk);
     }
-    let old_end = p.brk.next_multiple_of(PAGE_SIZE);
+    let old_end = p.mem().brk.next_multiple_of(PAGE_SIZE);
     let new_end = addr.next_multiple_of(PAGE_SIZE);
     if new_end > old_end {
         if !p.space_mut().map_zeroed(old_end, new_end, USER | WRITABLE | NO_EXECUTE) {
-            return Ok(p.brk);
+            return Ok(p.mem().brk);
         }
     } else if new_end < old_end {
         p.space_mut().unmap_range(new_end, old_end);
     }
-    p.brk = addr;
+    p.mem().brk = addr;
     Ok(addr)
 }
 
@@ -52,7 +52,7 @@ pub fn mmap(addr: u64, len: u64, prot: u32, flags: u32, fd: i32, offset: u64) ->
 
     // The file contents, read up front (mappings are private copies for now).
     let file_data = if flags & MAP_ANONYMOUS == 0 {
-        let file = p.fds.get(fd)?;
+        let file = p.files().fds.get(fd)?;
         let Handle::Node(node) = &file.handle else { return Err(EACCES) };
         match &node.kind {
             Kind::File(data) => {
@@ -77,11 +77,11 @@ pub fn mmap(addr: u64, len: u64, prot: u32, flags: u32, fd: i32, offset: u64) ->
         }
         addr
     } else {
-        let start = p.mmap_next.checked_sub(len).ok_or(ENOMEM)?;
-        if start < p.brk + (64 << 20) {
+        let start = p.mem().mmap_next.checked_sub(len).ok_or(ENOMEM)?;
+        if start < p.mem().brk + (64 << 20) {
             return Err(ENOMEM);
         }
-        p.mmap_next = start;
+        p.mem().mmap_next = start;
         start
     };
     let end = start.checked_add(len).filter(|&e| e <= USER_END).ok_or(ENOMEM)?;

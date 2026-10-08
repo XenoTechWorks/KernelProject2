@@ -50,6 +50,7 @@ add_host_program() {
 }
 add_host_program "$stage/bin/hello-dynamic"
 gcc -O2 -o "$stage/bin/signal-test" "$root/tests/signals.c"
+gcc -O2 -pthread -o "$stage/bin/thread-test" "$root/tests/threads.c"
 
 # Unmodified Linux programs built from their own sources (see README: "Real Linux programs").
 # git straight from Ubuntu, with the template files `git init` copies.

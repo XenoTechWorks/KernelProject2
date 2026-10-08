@@ -1,12 +1,19 @@
-//! Processes and the scheduler.
+//! Processes, threads and the scheduler.
+//!
+//! Like Linux, the scheduler runs *tasks*. A task has its own registers, kernel stack, signal mask and
+//! thread-local storage, and points at parts it may share with other tasks: its memory, its open
+//! files (with the current directory) and its signal handlers. A process is a group of tasks sharing
+//! all three; `fork` copies them instead. A task's `pid` is Linux's thread id; its `tgid` (thread
+//! group id) is what programs call the process id.
 //!
 //! One CPU for now, and the kernel itself is never interrupted: interrupts are only enabled while a
-//! program runs or while the CPU idles. So the process table needs no locks, only care not to keep a
-//! reference across a switch. The scheduler loop runs on the boot stack; each process has its own
-//! kernel stack, and switching is saving one stack pointer and loading another.
+//! program runs or while the CPU idles. So the task table and the shared parts need no locks, only
+//! care not to keep a reference across a switch. The scheduler loop runs on the boot stack; each task
+//! has its own kernel stack, and switching is saving one stack pointer and loading another.
 
 pub mod elf;
 pub mod fd;
+pub mod futex;
 pub mod signal;
 
 use crate::arch::idt::{self, TrapFrame};
@@ -16,12 +23,13 @@ use crate::sys::errno::*;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::{asm, global_asm};
 use core::cell::UnsafeCell;
 use fd::FdTable;
 
-pub use signal::{SIGINT, SIGKILL, SIGPIPE, SIGQUIT, SIGSEGV, SIGSTOP, send as signal};
+pub use signal::{SIGINT, SIGKILL, SIGPIPE, SIGQUIT, SIGSEGV, SIGSTOP};
 
 const KERNEL_STACK_SIZE: usize = 64 * 1024;
 /// Highest address of every program's stack, and how far down it may grow.
@@ -34,7 +42,18 @@ pub const MMAP_TOP: u64 = 0x0000_7000_0000_0000;
 pub enum State {
     Runnable,
     Sleeping,
+    /// The process ended; kept until its parent collects the status with wait4.
     Zombie(i32),
+    /// The first thread of a process ended while others still run; it becomes the zombie later.
+    Lingering,
+    /// A finished thread, removed by the scheduler once it has switched away from it.
+    Dead,
+}
+
+impl State {
+    fn alive(self) -> bool {
+        matches!(self, State::Runnable | State::Sleeping)
+    }
 }
 
 #[repr(C, align(16))]
@@ -51,26 +70,55 @@ pub struct SigAction {
     pub mask: u64,
 }
 
+/// Something tasks share. See the module comment for why no lock is needed.
+pub struct Shared<T>(UnsafeCell<T>);
+unsafe impl<T> Sync for Shared<T> {}
+unsafe impl<T> Send for Shared<T> {}
+
+impl<T> Shared<T> {
+    pub fn new(value: T) -> Arc<Self> {
+        Arc::new(Shared(UnsafeCell::new(value)))
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    pub fn get(&self) -> &mut T {
+        unsafe { &mut *self.0.get() }
+    }
+}
+
+pub struct Memory {
+    pub space: Option<AddressSpace>,
+    pub brk_start: u64,
+    pub brk: u64,
+    pub mmap_next: u64,
+}
+
+pub struct Files {
+    pub fds: FdTable,
+    pub cwd: String,
+    pub umask: u32,
+}
+
+pub type Handlers = [SigAction; 65];
+
 pub struct Process {
+    /// Thread id (equal to `tgid` for a process's first thread).
     pub pid: u32,
+    /// Process id: the thread group.
+    pub tgid: u32,
     pub ppid: u32,
     pub pgid: u32,
     pub sid: u32,
     pub state: State,
     pub name: String,
     pub exe: String,
-    pub cwd: String,
     /// The arguments it was started with, NUL-separated (/proc/<pid>/cmdline).
     pub cmdline: Vec<u8>,
-    pub umask: u32,
-    pub space: Option<AddressSpace>,
-    pub fds: FdTable,
-    pub brk_start: u64,
-    pub brk: u64,
-    pub mmap_next: u64,
+    pub mem: Arc<Shared<Memory>>,
+    pub files: Arc<Shared<Files>>,
+    pub handlers: Arc<Shared<Handlers>>,
     pub fs_base: u64,
     pub clear_child_tid: u64,
-    pub sigactions: [SigAction; 65],
     pub sigmask: u64,
     /// Signals sent but not acted on yet (bit n-1 for signal n).
     pub pending: u64,
@@ -80,6 +128,8 @@ pub struct Process {
     pub fault_addr: Option<u64>,
     /// Set while a vfork parent waits for this child to exec or exit.
     pub vfork_parent: Option<u32>,
+    /// The futex this task waits on, if any.
+    pub futex: Option<futex::Key>,
     pub start_ticks: u64,
     fpu: Box<FpuState>,
     kstack: Box<[u8]>,
@@ -88,11 +138,23 @@ pub struct Process {
 
 impl Process {
     pub fn space(&self) -> &AddressSpace {
-        self.space.as_ref().expect("process without memory")
+        self.mem.get().space.as_ref().expect("process without memory")
     }
 
     pub fn space_mut(&mut self) -> &mut AddressSpace {
-        self.space.as_mut().expect("process without memory")
+        self.mem.get().space.as_mut().expect("process without memory")
+    }
+
+    pub fn mem(&self) -> &mut Memory {
+        self.mem.get()
+    }
+
+    pub fn files(&self) -> &mut Files {
+        self.files.get()
+    }
+
+    pub fn handlers(&self) -> &mut Handlers {
+        self.handlers.get()
     }
 
     fn kstack_top(&self) -> u64 {
@@ -131,28 +193,40 @@ pub fn init() {
     unsafe { asm!("fxsave [{}]", in(reg) &raw mut INITIAL_FPU) };
 }
 
-/// The running process. Only valid while running on its behalf (in a system call or interrupt).
 fn cmdline_of(args: &[String]) -> Vec<u8> {
     args.iter().flat_map(|a| a.bytes().chain(core::iter::once(0))).collect()
 }
 
-/// The running process's pid, if a process is running.
+/// The running task's process id, if a task is running.
 pub fn current_pid() -> Option<u32> {
-    sched().current
+    sched().current.and_then(get).map(|p| p.tgid)
 }
 
+/// The running task. Only valid while running on its behalf (in a system call or interrupt).
 pub fn current() -> &'static mut Process {
     let s = sched();
     let pid = s.current.expect("no current process");
     s.procs.get_mut(&pid).expect("current process missing")
 }
 
+/// A task by thread id.
 pub fn get(pid: u32) -> Option<&'static mut Process> {
-    sched().procs.get_mut(&pid).map(|p| &mut **p)
+    sched().procs.get_mut(&pid).map(|p| &mut **p).filter(|p| p.state != State::Dead)
 }
 
+/// Every task that hasn't finished.
 pub fn all() -> impl Iterator<Item = &'static mut Process> {
-    sched().procs.values_mut().map(|p| &mut **p)
+    sched().procs.values_mut().map(|p| &mut **p).filter(|p| p.state != State::Dead)
+}
+
+/// One entry per process (its first thread), as /proc and kill() see them.
+pub fn processes() -> impl Iterator<Item = &'static mut Process> {
+    all().filter(|p| p.pid == p.tgid)
+}
+
+/// The tasks of process `tgid`.
+pub fn threads(tgid: u32) -> impl Iterator<Item = &'static mut Process> {
+    all().filter(move |p| p.tgid == tgid)
 }
 
 global_asm!(
@@ -195,31 +269,28 @@ fn prime_stack(p: &mut Process, frame: TrapFrame) {
     }
 }
 
-fn blank_process(pid: u32) -> Box<Process> {
+fn new_task(pid: u32, mem: Arc<Shared<Memory>>, files: Arc<Shared<Files>>, handlers: Arc<Shared<Handlers>>) -> Box<Process> {
     Box::new(Process {
         pid,
+        tgid: pid,
         ppid: 0,
         pgid: pid,
         sid: pid,
         state: State::Runnable,
         name: String::new(),
         exe: String::new(),
-        cwd: String::from("/"),
         cmdline: Vec::new(),
-        umask: 0o022,
-        space: None,
-        fds: FdTable::default(),
-        brk_start: 0,
-        brk: 0,
-        mmap_next: MMAP_TOP,
+        mem,
+        files,
+        handlers,
         fs_base: 0,
         clear_child_tid: 0,
-        sigactions: [SigAction::default(); 65],
         sigmask: 0,
         pending: 0,
         saved_mask: None,
         fault_addr: None,
         vfork_parent: None,
+        futex: None,
         start_ticks: crate::arch::irq::ticks(),
         fpu: Box::new(unsafe { (*(&raw const INITIAL_FPU)).clone() }),
         kstack: new_kernel_stack(),
@@ -227,26 +298,31 @@ fn blank_process(pid: u32) -> Box<Process> {
     })
 }
 
+fn memory_of(image: &mut Option<elf::Image>) -> Arc<Shared<Memory>> {
+    let image = image.take().unwrap();
+    Shared::new(Memory { space: Some(image.space), brk_start: image.brk, brk: image.brk, mmap_next: MMAP_TOP })
+}
+
 /// Starts the first program (pid 1) with the terminal as stdin, stdout and stderr.
 pub fn spawn_init(path: &str) -> Result<(), Errno> {
     let s = sched();
-    let mut p = blank_process(1);
-    s.next_pid = 2;
     let tty = crate::fs::lookup("/dev/console", true)?;
     let console = fd::OpenFile::node(tty, 2, String::from("/dev/console"));
+    let mut fds = FdTable::default();
     for _ in 0..3 {
-        p.fds.insert(console.clone(), false, 0)?;
+        fds.insert(console.clone(), false, 0)?;
     }
     let args = alloc::vec![String::from(path)];
     let env = alloc::vec![String::from("PATH=/bin:/usr/bin"), String::from("HOME=/root"), String::from("TERM=linux")];
-    let image = elf::load(path, &args, &env)?;
+    let mut image = Some(elf::load(path, &args, &env)?);
+    let (entry, stack) = image.as_ref().map(|i| (i.entry, i.stack)).unwrap();
+    let files = Shared::new(Files { fds, cwd: String::from("/"), umask: 0o022 });
+    let mut p = new_task(1, memory_of(&mut image), files, Shared::new([SigAction::default(); 65]));
+    s.next_pid = 2;
     p.name = elf::short_name(path);
     p.exe = String::from(path);
     p.cmdline = cmdline_of(&args);
-    p.brk_start = image.brk;
-    p.brk = image.brk;
-    p.space = Some(image.space);
-    prime_stack(&mut p, TrapFrame::user(image.entry, image.stack));
+    prime_stack(&mut p, TrapFrame::user(entry, stack));
     s.procs.insert(1, p);
     Ok(())
 }
@@ -266,7 +342,7 @@ pub fn run() -> ! {
         s.last = pid;
         s.current = Some(pid);
         let p = s.procs.get_mut(&pid).unwrap();
-        if let Some(space) = &p.space {
+        if let Some(space) = &p.mem.get().space {
             space.activate();
         }
         let top = p.kstack_top();
@@ -279,10 +355,14 @@ pub fn run() -> ! {
         let ctx = p.ctx_rsp;
         unsafe { switch_context(&mut s.sched_rsp, ctx) };
         s.current = None;
+        // A finished thread can only be freed once we're off its kernel stack, which is now.
+        if s.procs.get(&pid).is_some_and(|p| p.state == State::Dead) {
+            s.procs.remove(&pid);
+        }
     }
 }
 
-/// Gives the CPU back to the scheduler; returns when this process is picked again.
+/// Gives the CPU back to the scheduler; returns when this task is picked again.
 pub fn yield_now() {
     let s = sched();
     let p = current();
@@ -319,24 +399,75 @@ pub fn timer_tick(frame: &TrapFrame) {
     }
 }
 
-/// Ends the current process. `status` is a wait status: (code << 8) for exit(code), or a signal number.
-pub fn exit(status: i32) -> ! {
-    let s = sched();
+/// Clears the thread id word the C library asked for (CLONE_CHILD_CLEARTID / set_tid_address) and
+/// wakes whoever waits on it: that's how pthread_join learns a thread has finished.
+fn clear_tid(p: &mut Process) {
+    if p.clear_child_tid != 0 && p.mem.get().space.is_some() {
+        let _ = crate::mm::user::write(p.space(), p.clear_child_tid, &0u32.to_le_bytes());
+        futex::wake(futex::key(p, p.clear_child_tid), 1);
+        p.clear_child_tid = 0;
+    }
+}
+
+/// exit(): ends the current thread; the process ends with its last thread.
+pub fn exit_thread(status: i32) -> ! {
     let p = current();
-    if p.pid == 1 {
+    clear_tid(p);
+    let others = threads(p.tgid).any(|t| t.pid != p.pid && t.state.alive());
+    if !others {
+        finish_process(status);
+    }
+    p.state = if p.pid == p.tgid { State::Lingering } else { State::Dead };
+    p.vfork_parent = None;
+    wake_all();
+    yield_now();
+    unreachable!("a finished thread was scheduled");
+}
+
+/// exit_group(), or a fatal signal: ends every thread of the current process.
+pub fn exit(status: i32) -> ! {
+    let p = current();
+    let (me, tgid) = (p.pid, p.tgid);
+    // The other threads are parked in the kernel (one CPU), so they can simply be dropped.
+    let others: Vec<u32> = threads(tgid).filter(|t| t.pid != me && t.pid != tgid).map(|t| t.pid).collect();
+    for pid in others {
+        sched().procs.remove(&pid);
+    }
+    if let Some(leader) = get(tgid) {
+        if leader.pid != me && leader.state.alive() {
+            leader.state = State::Lingering;
+        }
+    }
+    clear_tid(p);
+    finish_process(status);
+}
+
+/// The last thread of a process is ending: release what it holds and leave a zombie for the parent.
+fn finish_process(status: i32) -> ! {
+    let p = current();
+    if p.tgid == 1 {
         panic!("init exited (status {status:#x})");
     }
-    p.fds.clear();
-    p.space = None; // frees its memory (and switches to the kernel's page tables)
-    p.state = State::Zombie(status);
-    let pid = p.pid;
-    for child in s.procs.values_mut() {
-        if child.ppid == pid {
+    // Drop this task's hold on memory and files. Shared with no one else, they're freed now; a vfork
+    // parent keeps the memory it lent.
+    p.files = Shared::new(Files { fds: FdTable::default(), cwd: String::from("/"), umask: 0o022 });
+    p.mem = Shared::new(Memory { space: None, brk_start: 0, brk: 0, mmap_next: MMAP_TOP });
+    p.vfork_parent = None;
+    let tgid = p.tgid;
+    for child in all() {
+        if child.ppid == tgid {
             child.ppid = 1;
         }
     }
-    release_vfork(p);
     let ppid = p.ppid;
+    if p.pid == tgid {
+        p.state = State::Zombie(status);
+    } else {
+        p.state = State::Dead;
+        if let Some(leader) = sched().procs.get_mut(&tgid) {
+            leader.state = State::Zombie(status);
+        }
+    }
     if let Some(parent) = get(ppid) {
         signal::send(parent, signal::SIGCHLD);
     }
@@ -345,49 +476,54 @@ pub fn exit(status: i32) -> ! {
     unreachable!("a zombie was scheduled");
 }
 
-fn release_vfork(p: &mut Process) {
-    p.vfork_parent = None;
-}
-
 pub fn fork(frame: &TrapFrame, flags: u64, new_sp: u64, parent_tid: u64, child_tid: u64, tls: u64) -> Result<u32, Errno> {
     const CLONE_VM: u64 = 0x100;
+    const CLONE_FILES: u64 = 0x400;
+    const CLONE_SIGHAND: u64 = 0x800;
     const CLONE_VFORK: u64 = 0x4000;
+    const CLONE_PARENT: u64 = 0x8000;
     const CLONE_THREAD: u64 = 0x10000;
     const CLONE_SETTLS: u64 = 0x80000;
     const CLONE_PARENT_SETTID: u64 = 0x100000;
     const CLONE_CHILD_CLEARTID: u64 = 0x200000;
     const CLONE_CHILD_SETTID: u64 = 0x1000000;
 
-    // Threads share memory with their parent; they come later. vfork (CLONE_VM | CLONE_VFORK) is fine
-    // as a copy, since the parent waits until the child has exec'd.
-    if flags & CLONE_THREAD != 0 || (flags & CLONE_VM != 0 && flags & CLONE_VFORK == 0) {
-        return Err(ENOSYS);
+    // Linux's rules: threads share handlers, and sharing handlers needs shared memory.
+    if (flags & CLONE_THREAD != 0 && flags & CLONE_SIGHAND == 0) || (flags & CLONE_SIGHAND != 0 && flags & CLONE_VM == 0) {
+        return Err(EINVAL);
     }
 
     let s = sched();
     let parent = current();
-    let space = parent.space().duplicate().ok_or(ENOMEM)?;
+    let mem = if flags & CLONE_VM != 0 {
+        parent.mem.clone()
+    } else {
+        let m = parent.mem();
+        let space = parent.space().duplicate().ok_or(ENOMEM)?;
+        Shared::new(Memory { space: Some(space), brk_start: m.brk_start, brk: m.brk, mmap_next: m.mmap_next })
+    };
+    let files = if flags & CLONE_FILES != 0 {
+        parent.files.clone()
+    } else {
+        let f = parent.files();
+        Shared::new(Files { fds: f.fds.clone(), cwd: f.cwd.clone(), umask: f.umask })
+    };
+    let handlers = if flags & CLONE_SIGHAND != 0 { parent.handlers.clone() } else { Shared::new(*parent.handlers()) };
+
     let pid = s.next_pid;
     s.next_pid += 1;
-
-    let mut child = blank_process(pid);
-    child.ppid = parent.pid;
+    let mut child = new_task(pid, mem, files, handlers);
+    let thread = flags & CLONE_THREAD != 0;
+    child.tgid = if thread { parent.tgid } else { pid };
+    child.ppid = if thread || flags & CLONE_PARENT != 0 { parent.ppid } else { parent.tgid };
     child.pgid = parent.pgid;
     child.sid = parent.sid;
     child.name = parent.name.clone();
     child.exe = parent.exe.clone();
     child.cmdline = parent.cmdline.clone();
-    child.cwd = parent.cwd.clone();
-    child.umask = parent.umask;
-    child.fds = parent.fds.clone();
-    child.brk_start = parent.brk_start;
-    child.brk = parent.brk;
-    child.mmap_next = parent.mmap_next;
     child.fs_base = if flags & CLONE_SETTLS != 0 { tls } else { parent.fs_base };
-    child.sigactions = parent.sigactions;
     child.sigmask = parent.sigmask;
     unsafe { asm!("fxsave [{}]", in(reg) &mut *child.fpu) };
-    child.space = Some(space);
 
     if flags & CLONE_CHILD_SETTID != 0 {
         crate::mm::user::write(child.space(), child_tid, &pid.to_le_bytes())?;
@@ -411,8 +547,9 @@ pub fn fork(frame: &TrapFrame, flags: u64, new_sp: u64, parent_tid: u64, child_t
     }
     s.procs.insert(pid, child);
 
+    // vfork: the parent waits until the child has exec'd or exited (it may be using our memory).
     if vfork {
-        while get(pid).is_some_and(|c| c.vfork_parent.is_some() && !matches!(c.state, State::Zombie(_))) {
+        while get(pid).is_some_and(|c| c.vfork_parent.is_some() && c.state.alive()) {
             if sleep().is_err() {
                 break;
             }
@@ -423,30 +560,52 @@ pub fn fork(frame: &TrapFrame, flags: u64, new_sp: u64, parent_tid: u64, child_t
 
 /// Replaces the current program (execve). On success the system call "returns" into the new program.
 pub fn exec(frame: &mut TrapFrame, path: &str, args: &[String], env: &[String]) -> Result<(), Errno> {
-    let image = elf::load(path, args, env)?;
+    let mut image = Some(elf::load(path, args, env)?);
     let p = current();
-    image.space.activate();
-    p.space = Some(image.space);
-    p.name = elf::short_name(args.first().map_or(path, |a| a.as_str()));
-    p.exe = image.path;
-    p.cmdline = cmdline_of(args);
-    p.brk_start = image.brk;
-    p.brk = image.brk;
-    p.mmap_next = MMAP_TOP;
-    p.fs_base = 0;
-    p.clear_child_tid = 0;
-    unsafe { cpu::wrmsr(cpu::MSR_FS_BASE, 0) };
-    p.fds.close_on_exec();
-    for action in p.sigactions.iter_mut() {
+    // Other threads end, as on Linux.
+    let (me, tgid) = (p.pid, p.tgid);
+    let others: Vec<u32> = threads(tgid).filter(|t| t.pid != me).map(|t| t.pid).collect();
+    for pid in others {
+        sched().procs.remove(&pid);
+    }
+    // A thread other than the first one takes over the process id, so the parent still finds it.
+    // Moving the Box keeps the task (and the kernel stack we're on) where it is.
+    let p = if me != tgid {
+        let s = sched();
+        let mut task = s.procs.remove(&me).unwrap();
+        task.pid = tgid;
+        s.procs.insert(tgid, task);
+        s.current = Some(tgid);
+        current()
+    } else {
+        p
+    };
+    let (entry, stack, exe) = image.as_ref().map(|i| (i.entry, i.stack, i.path.clone())).unwrap();
+    image.as_ref().unwrap().space.activate();
+    // New memory, our own copies of the files table and handlers (whoever shared them keeps theirs).
+    p.mem = memory_of(&mut image);
+    let f = p.files();
+    let mut fds = f.fds.clone();
+    fds.close_on_exec();
+    p.files = Shared::new(Files { fds, cwd: f.cwd.clone(), umask: f.umask });
+    let mut handlers = *p.handlers();
+    for action in handlers.iter_mut() {
         if action.handler != signal::SIG_IGN {
             *action = SigAction::default();
         }
     }
+    p.handlers = Shared::new(handlers);
+    p.name = elf::short_name(args.first().map_or(path, |a| a.as_str()));
+    p.exe = exe;
+    p.cmdline = cmdline_of(args);
+    p.fs_base = 0;
+    p.clear_child_tid = 0;
+    unsafe { cpu::wrmsr(cpu::MSR_FS_BASE, 0) };
     *p.fpu = unsafe { (*(&raw const INITIAL_FPU)).clone() };
     unsafe { asm!("fxrstor [{}]", in(reg) &*p.fpu) };
-    release_vfork(p);
+    p.vfork_parent = None;
     wake_all();
-    *frame = TrapFrame::user(image.entry, image.stack);
+    *frame = TrapFrame::user(entry, stack);
     Ok(())
 }
 
@@ -456,7 +615,9 @@ pub fn wait(target: i64, nohang: bool) -> Result<Option<(u32, i32)>, Errno> {
         let s = sched();
         let me = current();
         let matches = |p: &Process| {
-            p.ppid == me.pid
+            p.ppid == me.tgid
+                && p.pid == p.tgid
+                && p.state != State::Dead
                 && match target {
                     -1 => true,
                     0 => p.pgid == me.pgid,
@@ -480,15 +641,28 @@ pub fn wait(target: i64, nohang: bool) -> Result<Option<(u32, i32)>, Errno> {
     }
 }
 
+/// Sends a signal to a process: to one of its threads that isn't blocking it (Linux picks any).
+pub fn signal_process(tgid: u32, sig: usize) -> Result<(), Errno> {
+    let leader = get(tgid).filter(|p| p.pid == p.tgid).ok_or(ESRCH)?;
+    if sig == 0 {
+        return Ok(());
+    }
+    let target = threads(tgid).find(|t| t.state.alive() && t.sigmask & signal::bit(sig) == 0).map(|t| t.pid);
+    match target.and_then(get) {
+        Some(t) => signal::send(t, sig),
+        None => signal::send(leader, sig),
+    }
+    Ok(())
+}
+
 pub fn signal_group(pgid: u32, sig: usize) {
-    for p in sched().procs.values_mut() {
-        if p.pgid == pgid {
-            signal(p, sig);
-        }
+    let tgids: Vec<u32> = processes().filter(|p| p.pgid == pgid).map(|p| p.tgid).collect();
+    for tgid in tgids {
+        let _ = signal_process(tgid, sig);
     }
 }
 
-/// An exception in a program: grow its stack, or end it with the matching signal.
+/// An exception in a program: grow its stack, or deliver the matching signal.
 pub fn user_fault(frame: &mut TrapFrame, name: &str) {
     let p = current();
     if frame.vector == 14 {
@@ -510,11 +684,11 @@ pub fn user_fault(frame: &mut TrapFrame, name: &str) {
         17 => SIGBUS,
         _ => SIGSEGV,
     };
-    let handled = p.sigactions[sig].handler > signal::SIG_IGN && p.sigmask & signal::bit(sig) == 0;
+    let handled = p.handlers()[sig].handler > signal::SIG_IGN && p.sigmask & signal::bit(sig) == 0;
     if !handled {
         crate::log!(
             "pid {} ({}): {name} at {:#x}, address {:#x}, error {:#x}",
-            p.pid,
+            p.tgid,
             p.name,
             frame.rip,
             cpu::read_cr2(),

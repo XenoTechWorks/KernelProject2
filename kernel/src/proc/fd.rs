@@ -104,8 +104,4 @@ impl FdTable {
     pub fn iter(&self) -> impl Iterator<Item = (usize, &Arc<OpenFile>)> {
         self.slots.iter().enumerate().filter_map(|(i, s)| s.as_ref().map(|s| (i, &s.file)))
     }
-
-    pub fn clear(&mut self) {
-        self.slots.clear();
-    }
 }

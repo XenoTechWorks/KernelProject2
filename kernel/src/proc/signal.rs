@@ -67,9 +67,9 @@ pub fn send(p: &mut Process, sig: usize) {
     if sig == 0 || sig > 64 || matches!(p.state, State::Zombie(_)) {
         return;
     }
-    let handler = p.sigactions[sig].handler;
+    let handler = p.handlers()[sig].handler;
     // init only gets the signals it has handlers for, like on Linux.
-    if p.pid == 1 && handler == SIG_DFL {
+    if p.tgid == 1 && handler == SIG_DFL {
         return;
     }
     if sig != SIGKILL && (handler == SIG_IGN || (handler == SIG_DFL && ignored_by_default(sig))) {
@@ -91,7 +91,7 @@ pub fn deliver(frame: &mut TrapFrame) {
         }
         let sig = ready.trailing_zeros() as usize + 1;
         p.pending &= !bit(sig);
-        let action = p.sigactions[sig];
+        let action = p.handlers()[sig];
         match action.handler {
             SIG_IGN => continue,
             SIG_DFL if ignored_by_default(sig) => continue,
@@ -110,7 +110,7 @@ pub fn deliver(frame: &mut TrapFrame) {
 /// one and isn't blocking the signal, otherwise end it, as Linux does.
 pub fn fault(frame: &mut TrapFrame, sig: usize, addr: u64) {
     let p = current();
-    let handler = p.sigactions[sig].handler;
+    let handler = p.handlers()[sig].handler;
     if handler == SIG_DFL || handler == SIG_IGN || p.sigmask & bit(sig) != 0 {
         exit(sig as i32);
     }
@@ -198,7 +198,7 @@ fn start_handler(p: &mut Process, frame: &mut TrapFrame, sig: usize, action: Sig
     }
     p.sigmask = (p.sigmask | action.mask) & !UNBLOCKABLE;
     if action.flags & SA_RESETHAND != 0 {
-        p.sigactions[sig] = SigAction::default();
+        p.handlers()[sig] = SigAction::default();
     }
     Ok(())
 }

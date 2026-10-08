@@ -32,6 +32,7 @@ pub const ENOSYS: Errno = 38;
 pub const ENOTEMPTY: Errno = 39;
 pub const ELOOP: Errno = 40;
 pub const ELIBBAD: Errno = 80;
+pub const ETIMEDOUT: Errno = 110;
 
 pub const AT_FDCWD: i32 = -100;
 pub const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
