@@ -73,7 +73,8 @@ std::string utf16_to_utf8(const char16_t *s, long max) {
     return out;
 }
 
-std::string format(const char *fmt, ms_va_list ap) {
+// `wide_strings`: the wprintf family, where %s and %c are UTF-16 (and %hs, %hc, %S narrow).
+std::string format(const char *fmt, ms_va_list ap, bool wide_strings = false) {
     std::string out;
     for (const char *p = fmt; *p; p++) {
         if (*p != '%') {
@@ -111,9 +112,10 @@ std::string format(const char *fmt, ms_va_list ap) {
         }
         // Length: h hh l ll L z j t, and Microsoft's I, I32, I64.
         int size = 4;  // bytes of the integer argument
-        bool wide = false;
+        bool wide = false, narrow = false;
         if (*p == 'h') {
             p++;
+            narrow = true;
             if (*p == 'h') p++;
         } else if (*p == 'l') {
             p++;
@@ -168,14 +170,22 @@ std::string format(const char *fmt, ms_va_list ap) {
                 break;
             }
             case 'c':
-            case 'C':
-                body = static_cast<char>(__builtin_va_arg(ap, int));
+            case 'C': {
+                int c = __builtin_va_arg(ap, int);
+                bool w = (wide || (wide_strings && !narrow)) != (conv == 'C');
+                if (w) {
+                    char16_t text[2] = {static_cast<char16_t>(c), 0};
+                    body = utf16_to_utf8(text, 1);
+                } else {
+                    body = static_cast<char>(c);
+                }
                 break;
+            }
             case 's':
             case 'S': {
                 void *arg = __builtin_va_arg(ap, void *);
                 if (!arg) body = "(null)";
-                else if (wide || conv == 'S') body = utf16_to_utf8(static_cast<char16_t *>(arg), precision);
+                else if ((wide || (wide_strings && !narrow)) != (conv == 'S')) body = utf16_to_utf8(static_cast<char16_t *>(arg), precision);
                 else body = precision >= 0 ? std::string(static_cast<char *>(arg), strnlen(static_cast<char *>(arg), precision)) : static_cast<char *>(arg);
                 precision = -1;
                 break;
@@ -475,3 +485,129 @@ const Export exports[] = {
 }  // namespace
 
 const BuiltinDll msvcrt_dll{"msvcrt.dll", exports, sizeof exports / sizeof exports[0]};
+
+// ── UCRT (ucrtbase.dll and its api-ms-win-crt-*.dll names) ─────────────────────────────────────
+// What Visual Studio and newer mingw builds link against. The C functions are the same as above;
+// what differs is start-up (argument and environment set-up through __p___argv and friends) and
+// one stdio entry point per family (__stdio_common_vfprintf and others) taking options and a locale.
+
+namespace {
+std::vector<std::u16string> wide_args, wide_env;
+std::vector<char16_t *> wide_argv, wide_envp;
+
+std::u16string utf8_to_utf16(const char *s) {
+    std::u16string out;
+    while (*s) {
+        uint32_t c = static_cast<uint8_t>(*s++);
+        int extra = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
+        if (extra) c &= 0x3F >> extra;
+        for (int k = 0; k < extra && *s; k++) c = (c << 6) | (static_cast<uint8_t>(*s++) & 0x3F);
+        if (c >= 0x10000) {
+            c -= 0x10000;
+            out += static_cast<char16_t>(0xD800 + (c >> 10));
+            out += static_cast<char16_t>(0xDC00 + (c & 0x3FF));
+        } else {
+            out += static_cast<char16_t>(c);
+        }
+    }
+    return out;
+}
+
+void build_wide(char **from, std::vector<std::u16string> &strings, std::vector<char16_t *> &pointers) {
+    if (!pointers.empty()) return;
+    for (char **p = from; *p; p++) strings.push_back(utf8_to_utf16(*p));
+    for (auto &s : strings) pointers.push_back(s.data());
+    pointers.push_back(nullptr);
+}
+
+int daylight_flag;
+long timezone_seconds;
+char *tz_names[2] = {const_cast<char *>("UTC"), const_cast<char *>("UTC")};
+
+// __stdio_common_v*printf options (bits of the first argument).
+constexpr uint64_t STANDARD_SNPRINTF_BEHAVIOR = 2;
+}  // namespace
+
+extern "C" {
+
+WINAPI int *ucrt___p___argc() { return &process::argc; }
+WINAPI char ***ucrt___p___argv() { return &process::argv; }
+WINAPI char16_t ***ucrt___p___wargv() {
+    build_wide(process::argv, wide_args, wide_argv);
+    static char16_t **p = wide_argv.data();
+    return &p;
+}
+WINAPI char ***ucrt___p__environ() { return &process::envp; }
+WINAPI char16_t ***ucrt___p__wenviron() {
+    build_wide(process::envp, wide_env, wide_envp);
+    static char16_t **p = wide_envp.data();
+    return &p;
+}
+WINAPI char **ucrt__get_initial_narrow_environment() { return process::envp; }
+WINAPI int ucrt__configure_narrow_argv(int) { return 0; }
+WINAPI int ucrt__configure_wide_argv(int) { return 0; }
+WINAPI int ucrt__initialize_narrow_environment() { return 0; }
+WINAPI int ucrt__initialize_wide_environment() { return 0; }
+WINAPI void ucrt__set_app_type(int) {}
+WINAPI int ucrt__set_new_mode(int) { return 0; }
+WINAPI void *ucrt__set_invalid_parameter_handler(void *) { return nullptr; }
+WINAPI int ucrt__crt_atexit(Callback f) { return crt_atexit(f); }
+WINAPI int ucrt__crt_at_quick_exit(Callback) { return 0; }
+WINAPI int ucrt__initterm_e(int(WINAPI **begin)(), int(WINAPI **end)()) {
+    for (auto f = begin; f < end; f++)
+        if (*f)
+            if (int r = (*f)()) return r;
+    return 0;
+}
+WINAPI int *ucrt___p__commode() { return &commode; }
+WINAPI int *ucrt___p__fmode() { return &fmode; }
+WINAPI WinFile *ucrt___acrt_iob_func(unsigned index) { return index < 3 ? &iob[index] : nullptr; }
+
+WINAPI int ucrt___stdio_common_vfprintf(uint64_t, WinFile *f, const char *fmt, void *, ms_va_list ap) {
+    return crt_vfprintf(f, fmt, ap);
+}
+WINAPI int ucrt___stdio_common_vfwprintf(uint64_t, WinFile *f, const char16_t *fmt, void *, ms_va_list ap) {
+    std::string s = format(utf16_to_utf8(fmt, -1).c_str(), ap, true);
+    return write_all(fd_of(f), s.data(), s.size()) ? static_cast<int>(s.size()) : -1;
+}
+WINAPI int ucrt___stdio_common_vsprintf(uint64_t options, char *buf, size_t size, const char *fmt, void *, ms_va_list ap) {
+    std::string s = format(fmt, ap);
+    if (buf && size) {
+        size_t n = s.size() < size ? s.size() : size - 1;
+        memcpy(buf, s.data(), n);
+        buf[n] = 0;
+    }
+    // C99 snprintf returns the full length; the legacy behaviour is -1 when the text was cut off.
+    if (s.size() < size || (options & STANDARD_SNPRINTF_BEHAVIOR) || !buf) return static_cast<int>(s.size());
+    return -1;
+}
+WINAPI int *ucrt___daylight() { return &daylight_flag; }
+WINAPI long *ucrt___timezone() { return &timezone_seconds; }
+WINAPI char **ucrt___tzname() { return tz_names; }
+WINAPI void ucrt__tzset() {}
+WINAPI int ucrt__fileno(WinFile *f) { return fd_of(f); }
+WINAPI int ucrt__isatty(int fd) { return isatty(fd); }
+WINAPI void ucrt__invalid_parameter_noinfo() {}
+WINAPI void ucrt__invalid_parameter_noinfo_noreturn() { crt_abort(); }
+WINAPI int ucrt__seh_filter_exe(DWORD, void *) { return 0; }  // EXCEPTION_CONTINUE_SEARCH
+
+}  // extern "C"
+
+#define UCRT(name) {#name, reinterpret_cast<void *>(&ucrt_##name)}
+
+namespace {
+const Export ucrt_exports[] = {
+    UCRT(__acrt_iob_func), UCRT(__daylight), UCRT(__p___argc), UCRT(__p___argv), UCRT(__p___wargv),
+    UCRT(__p__commode), UCRT(__p__environ), UCRT(__p__fmode), UCRT(__p__wenviron), UCRT(__stdio_common_vfprintf),
+    UCRT(__stdio_common_vfwprintf), UCRT(__stdio_common_vsprintf), UCRT(__timezone), UCRT(__tzname),
+    UCRT(_configure_narrow_argv), UCRT(_configure_wide_argv), UCRT(_crt_at_quick_exit), UCRT(_crt_atexit),
+    UCRT(_fileno), UCRT(_get_initial_narrow_environment), UCRT(_initialize_narrow_environment),
+    UCRT(_initialize_wide_environment), UCRT(_initterm_e), UCRT(_invalid_parameter_noinfo),
+    UCRT(_invalid_parameter_noinfo_noreturn), UCRT(_isatty), UCRT(_seh_filter_exe), UCRT(_set_app_type),
+    UCRT(_set_invalid_parameter_handler), UCRT(_set_new_mode), UCRT(_tzset),
+};
+}  // namespace
+
+// Its own functions first; for everything else (malloc, strlen, fwrite, ...) find_export falls back
+// to msvcrt's.
+const BuiltinDll ucrt_dll{"ucrtbase.dll", ucrt_exports, sizeof ucrt_exports / sizeof ucrt_exports[0]};

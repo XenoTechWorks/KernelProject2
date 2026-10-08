@@ -54,7 +54,9 @@ cmake --build ~/src/fastfetch/build -j8
 `hello.exe`, `winapi.exe`, `files.exe` and `threads.exe` are real Windows programs, built with
 mingw-w64 (the GCC Windows toolchain), and they run when you type their names. They cover the C
 runtime, files and directories (`CreateFile`, `FindFirstFile`, ...), threads (`CreateThread`,
-events, mutexes, critical sections, waiting) and thread-local storage. The Windows layer (`windows/`, C++) works like
+events, mutexes, critical sections, waiting) and thread-local storage. Each is built twice: against
+`msvcrt.dll` and against the UCRT (`ucrtbase.dll` and its `api-ms-win-crt-*` names), the runtime
+Visual Studio programs use; both run. The Windows layer (`windows/`, C++) works like
 Windows' own loader plus our own versions of the system DLLs, the same idea as Wine:
 
 - the kernel sees a file starting with `MZ` and runs it through `/bin/winload`, the way it runs a
@@ -95,7 +97,7 @@ user/src/        init, the shell and the commands (Zig)
 windows/src/     the Windows layer: PE loader, kernel32, msvcrt (C++)
 rootfs/          files copied into the root file system (/etc ...)
 disk/            what a new disk starts with (out/disk.img is made from it once)
-tests/           C test programs, smoke.sh (boot test), persist.sh (two boots, one disk), session.sh
+tests/           test programs (C, and Windows ones in windows/), smoke.py, persist.py, session.sh
 ```
 
 ## Building and running
@@ -113,8 +115,8 @@ make -C ~/tools/limine
 ./build.sh            # out/kernelproject2.iso
 ./run.sh              # boot it in a QEMU window (serial log in this terminal)
 ./run.sh --text       # no window: use the shell right here, over the serial port
-tests/smoke.sh        # boot, type commands, check the answers
-tests/persist.sh      # save files and a git repo, reboot, find them again
+python3 tests/smoke.py    # boot, run commands one after another, check the answers
+python3 tests/persist.py  # save files and a git repo, reboot, find them again
 ```
 
 ## Roadmap
@@ -126,8 +128,8 @@ Roughly in order; each step is checked by running a real program.
 2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
    archive), interrupt-driven I/O, and AHCI for real PCs.
 3. **Run the targets**: fastfetch and git run; next then BusyBox or coreutils as a compatibility test.
-4. **More Windows**: console programs with files and threads run. Next: loading .dll files, the
-   UCRT runtime newer compilers use, C++ exceptions (SEH unwinding), then windows and graphics.
+4. **More Windows**: console programs with files and threads run. Next: loading .dll files,
+   C++ exceptions (SEH unwinding), then windows and graphics.
 5. Later: more CPUs (APIC/IOAPIC), networking, a real login, and running make/gcc/cmake on the system itself.
 
 ## Licenses of what's used

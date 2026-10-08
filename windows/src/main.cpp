@@ -47,7 +47,19 @@ template <typename T> T read(const uint8_t *p, size_t at) {
 
 const BuiltinDll *const dlls[] = {&kernel32_dll, &kernel32_files_dll, &kernel32_threads_dll, &msvcrt_dll};
 
+void *find_in(const BuiltinDll *d, const char *name) {
+    for (size_t i = 0; i < d->count; i++)
+        if (strcmp(d->exports[i].name, name) == 0) return d->exports[i].address;
+    return nullptr;
+}
+
 void *find_export(const char *dll, const char *name) {
+    // UCRT: Windows resolves every api-ms-win-crt-*.dll "API set" to ucrtbase.dll. Its C functions
+    // are the ones msvcrt.cpp already has.
+    if (strncasecmp(dll, "api-ms-win-crt-", 15) == 0 || strcasecmp(dll, "ucrtbase.dll") == 0) {
+        if (void *f = find_in(&ucrt_dll, name)) return f;
+        return find_in(&msvcrt_dll, name);
+    }
     for (const BuiltinDll *d : dlls) {
         if (strcasecmp(d->name, dll) != 0) continue;
         for (size_t i = 0; i < d->count; i++)

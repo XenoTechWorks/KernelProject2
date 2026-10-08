@@ -54,8 +54,14 @@ gcc -O2 -pthread -o "$stage/bin/thread-test" "$root/tests/threads.c"
 
 step "Windows layer (winload) and Windows test programs"
 g++ -std=c++20 -O2 -static -fno-exceptions -fno-rtti -Wall -Wextra -o "$stage/bin/winload" "$root"/windows/src/*.cpp
+# Each test twice: against msvcrt.dll (mingw's default) and against the UCRT (ucrtbase.dll, what
+# Visual Studio uses). This GCC has no -mcrtdll, so a specs file swaps the runtime library.
+ucrt_specs="$HOME/.cache/kernelproject2/ucrt.specs"
+mkdir -p "$(dirname "$ucrt_specs")"
+x86_64-w64-mingw32-gcc -dumpspecs | sed 's/-lmsvcrt/-lucrt/g' > "$ucrt_specs"
 for program in hello winapi files threads; do
     x86_64-w64-mingw32-gcc -O2 -o "$stage/bin/$program.exe" "$root/tests/windows/$program.c"
+    x86_64-w64-mingw32-gcc -O2 -specs="$ucrt_specs" -D_UCRT -o "$stage/bin/$program-ucrt.exe" "$root/tests/windows/$program.c"
 done
 
 # Unmodified Linux programs built from their own sources (see README: "Real Linux programs").
