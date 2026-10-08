@@ -1,0 +1,8 @@
+# There's no `less` yet, so git prints straight to the terminal.
+[core]
+	pager = cat
+[user]
+	name = root
+	email = root@kernelproject2
+[init]
+	defaultBranch = main

@@ -7,6 +7,7 @@
 
 pub mod elf;
 pub mod fd;
+pub mod signal;
 
 use crate::arch::idt::{self, TrapFrame};
 use crate::arch::{cpu, gdt};
@@ -20,21 +21,7 @@ use core::arch::{asm, global_asm};
 use core::cell::UnsafeCell;
 use fd::FdTable;
 
-pub const SIGINT: usize = 2;
-pub const SIGQUIT: usize = 3;
-pub const SIGILL: usize = 4;
-pub const SIGTRAP: usize = 5;
-pub const SIGBUS: usize = 7;
-pub const SIGFPE: usize = 8;
-pub const SIGKILL: usize = 9;
-pub const SIGSEGV: usize = 11;
-pub const SIGPIPE: usize = 13;
-pub const SIGCHLD: usize = 17;
-pub const SIGCONT: usize = 18;
-pub const SIGSTOP: usize = 19;
-pub const SIGURG: usize = 23;
-pub const SIGWINCH: usize = 28;
-pub const SIG_IGN: u64 = 1;
+pub use signal::{SIGINT, SIGKILL, SIGPIPE, SIGQUIT, SIGSEGV, SIGSTOP, send as signal};
 
 const KERNEL_STACK_SIZE: usize = 64 * 1024;
 /// Highest address of every program's stack, and how far down it may grow.
@@ -85,7 +72,12 @@ pub struct Process {
     pub clear_child_tid: u64,
     pub sigactions: [SigAction; 65],
     pub sigmask: u64,
-    pub pending_kill: Option<usize>,
+    /// Signals sent but not acted on yet (bit n-1 for signal n).
+    pub pending: u64,
+    /// The mask to restore after a handler started from rt_sigsuspend.
+    pub saved_mask: Option<u64>,
+    /// The faulting address for the signal being delivered (SIGSEGV etc.).
+    pub fault_addr: Option<u64>,
     /// Set while a vfork parent waits for this child to exec or exit.
     pub vfork_parent: Option<u32>,
     pub start_ticks: u64,
@@ -224,7 +216,9 @@ fn blank_process(pid: u32) -> Box<Process> {
         clear_child_tid: 0,
         sigactions: [SigAction::default(); 65],
         sigmask: 0,
-        pending_kill: None,
+        pending: 0,
+        saved_mask: None,
+        fault_addr: None,
         vfork_parent: None,
         start_ticks: crate::arch::irq::ticks(),
         fpu: Box::new(unsafe { (*(&raw const INITIAL_FPU)).clone() }),
@@ -299,15 +293,15 @@ pub fn yield_now() {
 }
 
 /// Waits until something happens (input, a child exiting, a timer tick). Callers check their
-/// condition again afterwards. Fails with EINTR when the process is being killed.
+/// condition again afterwards. Fails with EINTR when a signal needs acting on.
 pub fn sleep() -> Result<(), Errno> {
     let p = current();
-    if p.pending_kill.is_some() {
+    if signal::interrupted(p) {
         return Err(EINTR);
     }
     p.state = State::Sleeping;
     yield_now();
-    if current().pending_kill.is_some() { Err(EINTR) } else { Ok(()) }
+    if signal::interrupted(current()) { Err(EINTR) } else { Ok(()) }
 }
 
 pub fn wake_all() {
@@ -321,15 +315,7 @@ pub fn wake_all() {
 pub fn timer_tick(frame: &TrapFrame) {
     wake_all();
     if frame.from_user() && sched().current.is_some() {
-        check_kill();
         yield_now();
-    }
-}
-
-/// Ends the current process if a signal killed it.
-pub fn check_kill() {
-    if let Some(sig) = current().pending_kill {
-        exit(sig as i32);
     }
 }
 
@@ -350,6 +336,10 @@ pub fn exit(status: i32) -> ! {
         }
     }
     release_vfork(p);
+    let ppid = p.ppid;
+    if let Some(parent) = get(ppid) {
+        signal::send(parent, signal::SIGCHLD);
+    }
     wake_all();
     yield_now();
     unreachable!("a zombie was scheduled");
@@ -448,7 +438,7 @@ pub fn exec(frame: &mut TrapFrame, path: &str, args: &[String], env: &[String]) 
     unsafe { cpu::wrmsr(cpu::MSR_FS_BASE, 0) };
     p.fds.close_on_exec();
     for action in p.sigactions.iter_mut() {
-        if action.handler != SIG_IGN {
+        if action.handler != signal::SIG_IGN {
             *action = SigAction::default();
         }
     }
@@ -490,30 +480,6 @@ pub fn wait(target: i64, nohang: bool) -> Result<Option<(u32, i32)>, Errno> {
     }
 }
 
-/// Default action of a signal: true when it ends the process.
-fn kills_by_default(sig: usize) -> bool {
-    !matches!(sig, SIGCHLD | SIGCONT | SIGURG | SIGWINCH | 0)
-}
-
-/// Sends a signal. Handlers aren't run yet: a handled signal is treated like the default action
-/// (end the process), an ignored one does nothing.
-pub fn signal(p: &mut Process, sig: usize) {
-    if sig == 0 || sig > 64 || matches!(p.state, State::Zombie(_)) {
-        return;
-    }
-    if p.pid == 1 && sig != SIGKILL {
-        return;
-    }
-    let ignored = sig != SIGKILL && sig != SIGSTOP && p.sigactions[sig].handler == SIG_IGN;
-    if ignored || !kills_by_default(sig) {
-        return;
-    }
-    p.pending_kill.get_or_insert(sig);
-    if p.state == State::Sleeping {
-        p.state = State::Runnable;
-    }
-}
-
 pub fn signal_group(pgid: u32, sig: usize) {
     for p in sched().procs.values_mut() {
         if p.pgid == pgid {
@@ -536,6 +502,7 @@ pub fn user_fault(frame: &mut TrapFrame, name: &str) {
             }
         }
     }
+    use signal::{SIGBUS, SIGFPE, SIGILL, SIGTRAP};
     let sig = match frame.vector {
         0 | 16 | 19 => SIGFPE,
         3 => SIGTRAP,
@@ -543,13 +510,17 @@ pub fn user_fault(frame: &mut TrapFrame, name: &str) {
         17 => SIGBUS,
         _ => SIGSEGV,
     };
-    crate::log!(
-        "pid {} ({}): {name} at {:#x}, address {:#x}, error {:#x}",
-        p.pid,
-        p.name,
-        frame.rip,
-        cpu::read_cr2(),
-        frame.error
-    );
-    exit(sig as i32);
+    let handled = p.sigactions[sig].handler > signal::SIG_IGN && p.sigmask & signal::bit(sig) == 0;
+    if !handled {
+        crate::log!(
+            "pid {} ({}): {name} at {:#x}, address {:#x}, error {:#x}",
+            p.pid,
+            p.name,
+            frame.rip,
+            cpu::read_cr2(),
+            frame.error
+        );
+    }
+    let addr = if frame.vector == 14 { cpu::read_cr2() } else { frame.rip };
+    signal::fault(frame, sig, addr);
 }

@@ -161,6 +161,14 @@ pub fn futex(addr: u64, op: u32, val: u32) -> SysResult {
     }
 }
 
+/// getitimer / setitimer: reports "no timer set" in the old-value struct.
+pub fn itimer(old: u64) -> SysResult {
+    if old != 0 {
+        user::write(proc::current().space(), old, &[0u8; 32])?;
+    }
+    Ok(0)
+}
+
 pub fn sched_getaffinity(size: usize, mask: u64) -> SysResult {
     if size < 8 {
         return Err(EINVAL);

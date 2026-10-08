@@ -24,6 +24,8 @@ checks=(
     "cat /proc/meminfo => MemTotal:"
     "ls /proc/self/ => cmdline"
     "fastfetch => Kernel: Linux 6.12.0-kp2"
+    "signal-test => signals: 7/7 passed"
+    "mkdir /root/r && cd /root/r && git init -q && echo hi > f && git add f && git commit -qm one && git log --oneline => one"
 )
 
 screenshot=0

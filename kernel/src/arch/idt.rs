@@ -206,7 +206,12 @@ const EXCEPTION_NAMES: [&str; 32] = [
 extern "C" fn trap_dispatch(frame: &mut TrapFrame) {
     match frame.vector {
         SYSCALL_VECTOR => crate::sys::dispatch(frame),
-        32..=47 => crate::arch::irq::handle(frame),
+        32..=47 => {
+            crate::arch::irq::handle(frame);
+            if frame.from_user() {
+                crate::proc::signal::deliver(frame);
+            }
+        }
         vector => {
             let name = EXCEPTION_NAMES[vector as usize & 31];
             if frame.from_user() {

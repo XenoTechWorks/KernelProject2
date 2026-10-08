@@ -18,12 +18,13 @@ pub type SysResult = Result<u64, Errno>;
 pub fn dispatch(frame: &mut TrapFrame) {
     let number = frame.rax;
     let a = [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9];
+    frame.error = number; // kept so a signal handler can restart the call (SA_RESTART)
     let result = call(frame, number, a);
     frame.rax = match result {
         Ok(v) => v,
         Err(e) => (-e) as u64,
     };
-    crate::proc::check_kill();
+    crate::proc::signal::deliver(frame);
 }
 
 fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
@@ -43,6 +44,7 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         12 => mem::brk(a[0]),
         13 => process::rt_sigaction(a[0] as usize, a[1], a[2]),
         14 => process::rt_sigprocmask(a[0] as u32, a[1], a[2]),
+        15 => crate::proc::signal::sigreturn(frame),
         16 => fs::ioctl(a[0] as i32, a[1] as u32, a[2]),
         17 => fs::pread(a[0] as i32, a[1], a[2] as usize, a[3]),
         18 => fs::pwrite(a[0] as i32, a[1], a[2] as usize, a[3]),
@@ -55,7 +57,12 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         28 => Ok(0), // madvise: advice only
         32 => fs::dup(a[0] as i32),
         33 => fs::dup3(a[0] as i32, a[1] as i32, 0, true),
+        34 => crate::proc::signal::suspend(crate::proc::current().sigmask), // pause
         35 => misc::nanosleep(a[0]),
+        // Interval timers and alarm(): accepted but never fire yet (git uses one only to pace its
+        // progress display). Real timers come with signal delivery.
+        36 | 38 => misc::itimer(a[if n == 36 { 1 } else { 2 }]),
+        37 => Ok(0),
         39 => Ok(crate::proc::current().pid as u64),
         57 => process::clone(frame, 17, 0, 0, 0, 0),
         58 => process::clone(frame, 0x100 | 0x4000 | 17, 0, 0, 0, 0),
@@ -76,6 +83,7 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         83 => fs::mkdirat(AT_FDCWD, a[0], a[1] as u32),
         84 => fs::unlinkat(AT_FDCWD, a[0], AT_REMOVEDIR),
         85 => fs::openat(AT_FDCWD, a[0], 0o1101, a[1] as u32), // creat: O_CREAT|O_WRONLY|O_TRUNC
+        86 => fs::linkat(AT_FDCWD, a[0], AT_FDCWD, a[1], 0),
         87 => fs::unlinkat(AT_FDCWD, a[0], 0),
         88 => fs::symlinkat(a[0], AT_FDCWD, a[1]),
         89 => fs::readlinkat(AT_FDCWD, a[0], a[1], a[2] as usize),
@@ -97,6 +105,8 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         112 => process::setsid(),
         121 => process::getpgid(a[0] as u32),
         124 => process::getsid(a[0] as u32),
+        127 => process::rt_sigpending(a[0]),
+        130 => crate::proc::signal::suspend(crate::mm::user::read_u64(crate::proc::current().space(), a[0])?),
         131 => Ok(0), // sigaltstack
         137 => fs::statfs(a[1]),
         138 => fs::statfs(a[1]),
@@ -121,6 +131,7 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         262 => fs::fstatat(a[0] as i32, a[1], a[2], a[3] as u32),
         263 => fs::unlinkat(a[0] as i32, a[1], a[2] as u32),
         264 => fs::renameat(a[0] as i32, a[1], a[2] as i32, a[3]),
+        265 => fs::linkat(a[0] as i32, a[1], a[2] as i32, a[3], a[4] as u32),
         266 => fs::symlinkat(a[0], a[1] as i32, a[2]),
         267 => fs::readlinkat(a[0] as i32, a[1], a[2], a[3] as usize),
         269 | 439 => fs::faccessat(a[0] as i32, a[1], a[2] as u32),

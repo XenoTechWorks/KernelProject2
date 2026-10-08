@@ -49,8 +49,15 @@ add_host_program() {
     done
 }
 add_host_program "$stage/bin/hello-dynamic"
+gcc -O2 -o "$stage/bin/signal-test" "$root/tests/signals.c"
 
 # Unmodified Linux programs built from their own sources (see README: "Real Linux programs").
+# git straight from Ubuntu, with the template files `git init` copies.
+step "git (/usr/bin/git)"
+add_host_program /usr/bin/git
+mkdir -p "$stage/usr/share/git-core"
+cp -r /usr/share/git-core/templates "$stage/usr/share/git-core/"
+
 fastfetch="${FASTFETCH:-$HOME/src/fastfetch/build/fastfetch}"
 if [[ -x "$fastfetch" ]]; then
     step "fastfetch ($fastfetch)"

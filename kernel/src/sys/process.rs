@@ -90,6 +90,12 @@ pub fn rt_sigprocmask(how: u32, set: u64, old: u64) -> SysResult {
     Ok(0)
 }
 
+pub fn rt_sigpending(out: u64) -> SysResult {
+    let p = proc::current();
+    user::write_struct(p.space(), out, &(p.pending & p.sigmask))?;
+    Ok(0)
+}
+
 pub fn sched_yield() -> SysResult {
     proc::yield_now();
     Ok(0)

@@ -668,6 +668,20 @@ pub fn renameat(olddir: i32, old_ptr: u64, newdir: i32, new_ptr: u64) -> SysResu
     Ok(0)
 }
 
+/// A hard link: a second name for the same file.
+pub fn linkat(olddir: i32, old_ptr: u64, newdir: i32, new_ptr: u64, flags: u32) -> SysResult {
+    const AT_SYMLINK_FOLLOW: u32 = 0x400;
+    let old = resolve(olddir, old_ptr)?;
+    let new = resolve(newdir, new_ptr)?;
+    let node = fs::lookup(&old, flags & AT_SYMLINK_FOLLOW != 0)?;
+    if node.is_dir() {
+        return Err(EPERM);
+    }
+    let (dir, name) = fs::parent_of(&new)?;
+    fs::link(&dir, &name, node)?;
+    Ok(0)
+}
+
 pub fn symlinkat(target_ptr: u64, dirfd: i32, path_ptr: u64) -> SysResult {
     let target = user::read_cstr(proc::current().space(), target_ptr, 4096)?;
     let path = resolve(dirfd, path_ptr)?;
