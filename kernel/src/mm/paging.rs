@@ -120,6 +120,25 @@ impl AddressSpace {
         }
     }
 
+    /// Maps a fresh zeroed page at `va` if nothing is mapped there. Takes `&self` like `entry`: the
+    /// page tables live outside this struct (for growing a stack while a system call reads it).
+    pub fn map_new_page(&self, va: u64, flags: u64) -> bool {
+        if self.translate(va).is_some() {
+            return true;
+        }
+        let Some(page) = frame::alloc() else { return false };
+        match self.entry(va & !(PAGE_SIZE - 1), true) {
+            Some(e) => {
+                *e = page | flags | PRESENT;
+                true
+            }
+            None => {
+                frame::free(page);
+                false
+            }
+        }
+    }
+
     /// Maps fresh zeroed pages over [start, end) that aren't mapped yet.
     pub fn map_zeroed(&mut self, start: u64, end: u64, flags: u64) -> bool {
         let mut va = start & !(PAGE_SIZE - 1);

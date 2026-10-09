@@ -2,7 +2,7 @@
 //! checked page by page against its page tables first, so a bad pointer returns EFAULT instead of
 //! crashing the kernel.
 
-use super::paging::{AddressSpace, USER, USER_END, WRITABLE};
+use super::paging::{AddressSpace, NO_EXECUTE, USER, USER_END, WRITABLE};
 use super::{PAGE_SIZE, phys_to_virt};
 use crate::sys::errno::{EFAULT, Errno};
 use alloc::string::String;
@@ -21,6 +21,12 @@ fn each_chunk(
     let mut done = 0;
     while done < len {
         let va = addr + done as u64;
+        // The stack grows when a program touches it, and also when a system call does (a buffer
+        // on the stack below what the program has used so far).
+        use crate::proc::{STACK_LIMIT, STACK_TOP};
+        if va < STACK_TOP && va >= STACK_TOP - STACK_LIMIT && space.translate(va).is_none() {
+            space.map_new_page(va, USER | WRITABLE | NO_EXECUTE);
+        }
         let (page, flags) = space.translate(va).ok_or(EFAULT)?;
         if flags & USER == 0 || (write && flags & WRITABLE == 0) {
             return Err(EFAULT);
