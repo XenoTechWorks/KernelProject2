@@ -27,8 +27,11 @@ class Machine:
             os.close(fd)
             shutil.copyfile(disk, self._scratch)
             disk = self._scratch
+        # QEMU's monitor on a socket, for screenshots.
+        self._monitor = os.path.join(tempfile.gettempdir(), f"kp2-monitor-{os.getpid()}-{id(self)}")
         args = ["qemu-system-x86_64", "-M", "q35", "-m", "1G", "-cdrom", os.path.join(ROOT, "out/kernelproject2.iso"),
-                "-serial", "stdio", "-display", "none", "-no-reboot", "-monitor", "none"]
+                "-serial", "stdio", "-display", "none", "-no-reboot",
+                "-monitor", f"unix:{self._monitor},server,nowait"]
         if disk:
             args += ["-drive", f"file={disk},if=none,id=home,format=raw",
                      "-device", "virtio-blk-pci,drive=home,disable-legacy=on"]
@@ -71,8 +74,17 @@ class Machine:
         return ANSI.sub(b"", self.output).replace(b"\r", b"").decode("utf-8", "replace")
 
     def screenshot(self, path):
-        """Only with a monitor attached; kept simple for now."""
-        raise NotImplementedError
+        """Saves what's on the screen right now as a PNG."""
+        import socket
+        with socket.socket(socket.AF_UNIX) as s:
+            s.connect(self._monitor)
+            s.sendall(f"screendump {os.path.abspath(path)} -f png\n".encode())
+            time.sleep(1)
+
+    def type(self, text):
+        """Sends keys without waiting for anything (for interactive programs)."""
+        self.qemu.stdin.write(text.encode())
+        self.qemu.stdin.flush()
 
     def close(self):
         if self.qemu.poll() is None:
@@ -80,6 +92,8 @@ class Machine:
             self.qemu.wait()
         if self._scratch:
             os.unlink(self._scratch)
+        if os.path.exists(self._monitor):
+            os.unlink(self._monitor)
 
     def __enter__(self):
         return self

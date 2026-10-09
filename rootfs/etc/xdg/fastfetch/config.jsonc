@@ -1,0 +1,16 @@
+// fastfetch's system-wide settings on KernelProject2: our own logo instead of the generic Linux one.
+// (A config file replaces fastfetch's default module list, so the list is spelled out here.)
+{
+    "logo": {
+        "source": "/etc/kernelproject2/logo.txt",
+        "color": { "1": "cyan", "2": "blue" },
+        "padding": { "top": 1, "right": 3 }
+    },
+    "display": {
+        "color": { "keys": "cyan", "title": "cyan" }
+    },
+    "modules": [
+        "title", "separator", "os", "host", "kernel", "uptime", "shell", "terminal",
+        "cpu", "memory", "swap", "disk", "locale", "break", "colors"
+    ]
+}

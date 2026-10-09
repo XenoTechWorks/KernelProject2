@@ -25,6 +25,7 @@ CHECKS = [
     ("cat /proc/meminfo", "MemTotal:"),
     ("ls /proc/self/", "cmdline"),
     ("fastfetch", "Kernel: Linux 6.12.0-kp2"),
+    ("kpfetch", "Kernel"),
     ("signal-test", "signals: 7/7 passed"),
     ("thread-test", "threads: 6/6 passed"),
     ("hello.exe one", "Hello from Windows! 2 argument(s)"),
