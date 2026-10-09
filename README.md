@@ -103,6 +103,29 @@ The same layout as Linux:
 They're written in Zig as ordinary Linux programs with no libc (`user/src`), so they also run on real
 Linux. That keeps them honest: if one works on Linux but not here, the kernel is wrong.
 
+## Apps in windows
+
+A program can open a window: a small terminal of its own floating over the console, with a title
+and a close button. It isn't a desktop: the command line stays the whole screen, and windows sit
+on top of it.
+
+```sh
+clock &        # a clock in a window; the shell keeps the keyboard
+```
+
+- Drag a window by its title with the mouse (PS/2; click into the QEMU window to use it, Ctrl+Alt+G
+  lets go). Click a window to give it the keyboard, or press F12 to move the keyboard between the
+  console and the windows. The focused window has a blue frame.
+- × closes a window: its program reads end-of-file and exits. A window also goes away when its
+  program closes it or exits.
+
+For programs it's a file: opening `/dev/window` makes a window. What the program writes is drawn in
+it (the usual terminal escape sequences, so colors and cursor movement work); xterm's title
+(`ESC ] 2 ; title BEL`) and resize (`ESC [ 8 ; rows ; cols t`) sequences set its title and size.
+Reading returns its keys, and mouse clicks as xterm reports once the program turns them on
+(`ESC [ ? 1000 h`). `user/src/lib/ui.zig` wraps this for Zig programs (open, text, buttons,
+events); `clock` is the example.
+
 ## Layout
 
 ```
@@ -114,12 +137,14 @@ kernel/          the kernel (Rust)
   src/proc/        processes, scheduler, fork/exec/wait, the ELF loader
   src/sys/         the Linux system calls
   src/tty.rs       terminal line discipline
-  src/console.rs   text console on the screen
+  src/term.rs      a terminal: character cells and escape sequences
+  src/console.rs   the screen: the console, windows over it, the mouse pointer
+  src/keyboard.rs, src/mouse.rs   PS/2 keyboard and mouse
 user/src/        init, the shell and the commands (Zig)
 windows/src/     the Windows layer: PE loader, kernel32, msvcrt (C++)
 rootfs/          files copied into the root file system (/etc ...)
 disk/            what a new disk starts with (out/disk.img is made from it once)
-tests/           test programs (C, and Windows ones in windows/), smoke.py, persist.py, session.sh
+tests/           test programs (C, and Windows ones in windows/), smoke.py, persist.py, windows.py, session.sh
 ```
 
 ## Building and running
@@ -139,6 +164,7 @@ make -C ~/tools/limine
 ./run.sh --text       # no window: use the shell right here, over the serial port
 python3 tests/smoke.py    # boot, run commands one after another, check the answers
 python3 tests/persist.py  # save files and a git repo, reboot, find them again
+python3 tests/windows.py  # open windows, drag and close them with the mouse
 ```
 
 ## Roadmap

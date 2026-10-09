@@ -73,13 +73,24 @@ class Machine:
     def text(self):
         return ANSI.sub(b"", self.output).replace(b"\r", b"").decode("utf-8", "replace")
 
-    def screenshot(self, path):
-        """Saves what's on the screen right now as a PNG."""
+    def monitor(self, command, wait=0.3):
+        """Sends a command to QEMU's monitor."""
         import socket
         with socket.socket(socket.AF_UNIX) as s:
             s.connect(self._monitor)
-            s.sendall(f"screendump {os.path.abspath(path)} -f png\n".encode())
-            time.sleep(1)
+            s.sendall(command.encode() + b"\n")
+            time.sleep(wait)
+
+    def screenshot(self, path):
+        """Saves what's on the screen right now as a PNG."""
+        self.monitor(f"screendump {os.path.abspath(path)} -f png", wait=1)
+
+    def mouse(self, dx=0, dy=0, buttons=None):
+        """Moves the (PS/2) mouse by dx, dy pixels; then sets the buttons held, if given (1 left)."""
+        if dx or dy:
+            self.monitor(f"mouse_move {dx} {dy}")
+        if buttons is not None:
+            self.monitor(f"mouse_button {buttons}")
 
     def type(self, text):
         """Sends keys without waiting for anything (for interactive programs)."""

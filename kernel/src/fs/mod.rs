@@ -30,6 +30,8 @@ pub enum Device {
     Null,
     Zero,
     Random,
+    /// /dev/window: each open makes a new window on the screen (console.rs).
+    Window,
 }
 
 pub enum Kind {
@@ -527,6 +529,7 @@ pub fn init_devices() {
         ("zero", Device::Zero, 0o666),
         ("random", Device::Random, 0o666),
         ("urandom", Device::Random, 0o666),
+        ("window", Device::Window, 0o666),
     ] {
         install(&alloc::format!("/dev/{name}"), Node::new(Kind::Device(device), mode));
     }

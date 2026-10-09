@@ -13,6 +13,8 @@ pub enum Handle {
     Node(Arc<Node>),
     PipeRead(Arc<Pipe>),
     PipeWrite(Arc<Pipe>),
+    /// A window on the screen, made by opening /dev/window.
+    Window(Arc<crate::console::Window>),
 }
 
 pub struct OpenFile {
@@ -26,6 +28,10 @@ pub struct OpenFile {
 impl OpenFile {
     pub fn node(node: Arc<Node>, flags: u32, path: String) -> Arc<OpenFile> {
         Arc::new(OpenFile { handle: Handle::Node(node), offset: Mutex::new(0), flags: Mutex::new(flags), path })
+    }
+
+    pub fn window(window: Arc<crate::console::Window>, flags: u32, path: String) -> Arc<OpenFile> {
+        Arc::new(OpenFile { handle: Handle::Window(window), offset: Mutex::new(0), flags: Mutex::new(flags), path })
     }
 
     pub fn pipe(pipe: &Arc<Pipe>, write: bool) -> Arc<OpenFile> {
@@ -47,6 +53,8 @@ impl Drop for OpenFile {
             Handle::PipeRead(p) => *p.readers.lock() -= 1,
             Handle::PipeWrite(p) => *p.writers.lock() -= 1,
             Handle::Node(_) => return,
+            // The last descriptor for a window is gone: take it off the screen.
+            Handle::Window(w) => crate::console::close_window(w.id),
         }
         crate::proc::wake_all();
     }

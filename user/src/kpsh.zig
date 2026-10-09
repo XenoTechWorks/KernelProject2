@@ -2,7 +2,7 @@
 //!
 //! A shell in the Linux/POSIX shape: read a line, split it into words, run builtins itself, and run
 //! everything else as a separate program with fork + execve + wait4. Supports pipes (|), redirection
-//! (> >> < 2> 2>&1), lists (; && ||), quotes, backslash escapes, $VAR / $? / ~ expansion and scripts
+//! (> >> < 2> 2>&1), lists (; && ||), background jobs (&), quotes, backslash escapes, $VAR / $? / ~ expansion and scripts
 //! (`kpsh file`, `kpsh -c "command"`, or a file starting with #!/bin/kpsh).
 
 const std = @import("std");
@@ -73,7 +73,7 @@ var last_status: u8 = 0;
 
 // ── Words and tokens ────────────────────────────────────────────────────────────────────────────
 
-const Kind = enum { word, pipe, and_if, or_if, semi, out, append, in, err_out, err_to_out };
+const Kind = enum { word, pipe, and_if, or_if, semi, background, out, append, in, err_out, err_to_out };
 const Token = struct { kind: Kind, text: [:0]const u8 = "" };
 
 const max_tokens = 256;
@@ -158,7 +158,7 @@ fn tokenize(line: []const u8) ParseError!void {
                     try pushToken(.{ .kind = .and_if });
                     i += 2;
                 } else {
-                    // Background jobs (`cmd &`) come later; for now the command runs in the foreground.
+                    // A lone & ends the part (runLine splits there and runs it in the background).
                     try pushToken(.{ .kind = .semi });
                     i += 1;
                 }
@@ -361,9 +361,21 @@ fn setSignal(sig: usize, handler: usize) void {
 }
 
 /// In a child process: run one command and never return.
-fn runInChild(cmd: *const Command) noreturn {
-    setSignal(2, 0); // SIGINT back to default, so Ctrl+C stops the program
-    setSignal(3, 0);
+fn runInChild(cmd: *const Command, background: bool) noreturn {
+    if (background) {
+        // Like other shells without job control: a background job ignores Ctrl+C and doesn't read
+        // the terminal (its input is /dev/null unless redirected).
+        switch (sys.open("/dev/null", sys.O_RDONLY, 0)) {
+            .ok => |fd| {
+                _ = sys.syscall2(sys.nr.dup2, fd, 0);
+                sys.close(@intCast(fd));
+            },
+            .err => {},
+        }
+    } else {
+        setSignal(2, 0); // SIGINT back to default, so Ctrl+C stops the program
+        setSignal(3, 0);
+    }
     if (!applyRedirects(cmd)) sys.exit(1);
     if (cmd.argc == 0) sys.exit(0);
     if (builtin(cmd)) |status| {
@@ -398,9 +410,50 @@ fn describeSignal(sig: u32) ?[]const u8 {
     };
 }
 
-fn runPipeline(commands: []Command) u8 {
+// Background jobs still running: their last process, and the job number shown for it.
+const Job = struct { pid: usize, number: usize };
+var jobs: [16]?Job = @splat(null);
+
+fn addJob(pid: usize) void {
+    var number: usize = 1;
+    while (true) : (number += 1) {
+        for (jobs) |j| {
+            if (j != null and j.?.number == number) break;
+        } else break;
+    }
+    for (&jobs) |*slot| {
+        if (slot.* == null) {
+            slot.* = .{ .pid = pid, .number = number };
+            break;
+        }
+    }
+    rt.err.print("[{d}] {d}\n", .{ number, pid });
+}
+
+/// Collects finished background processes and says which jobs are done (before each prompt).
+fn reapJobs() void {
+    while (true) {
+        var raw: u32 = 0;
+        const r = sys.check(sys.syscall4(sys.nr.wait4, @as(usize, @bitCast(@as(isize, -1))), @intFromPtr(&raw), 1, 0)); // WNOHANG
+        const pid = switch (r) {
+            .ok => |pid| pid,
+            .err => return,
+        };
+        if (pid == 0) return;
+        for (&jobs) |*slot| {
+            if (slot.*) |j| {
+                if (j.pid == pid) {
+                    rt.err.print("[{d}] Done\n", .{j.number});
+                    slot.* = null;
+                }
+            }
+        }
+    }
+}
+
+fn runPipeline(commands: []Command, background: bool) u8 {
     // A lone builtin runs in the shell itself, so `cd` and `export` affect the shell.
-    if (commands.len == 1 and commands[0].redirect_count == 0) {
+    if (commands.len == 1 and commands[0].redirect_count == 0 and !background) {
         if (commands[0].argc == 0) return 0;
         if (builtin(&commands[0])) |status| return status;
     }
@@ -418,7 +471,7 @@ fn runPipeline(commands: []Command) u8 {
         if (pid == 0) {
             if (prev_read) |r| _ = sys.syscall2(sys.nr.dup2, @intCast(r), 0);
             if (!last) _ = sys.syscall2(sys.nr.dup2, @intCast(fds[1]), 1);
-            runInChild(cmd);
+            runInChild(cmd, background);
         }
         pids[i] = pid;
         if (prev_read) |r| sys.close(r);
@@ -426,6 +479,11 @@ fn runPipeline(commands: []Command) u8 {
             sys.close(fds[1]);
             prev_read = fds[0];
         }
+    }
+    if (background) {
+        // The other processes in the pipeline are collected by reapJobs too.
+        addJob(pids[commands.len - 1]);
+        return 0;
     }
     var status: u8 = 0;
     for (pids[0..commands.len], 0..) |pid, i| {
@@ -458,7 +516,7 @@ const help_text =
     \\  exit [code]       leave the shell
     \\  help              this text
     \\Everything else runs as a program from $PATH. Supported syntax:
-    \\  a | b   a > file   a >> file   a < file   a 2> file   a 2>&1   a; b   a && b   a || b
+    \\  a | b   a > file   a >> file   a < file   a 2> file   a 2>&1   a; b   a && b   a || b   a &
     \\  'quotes' "quotes $VAR"   $?   ~
     \\
 ;
@@ -543,7 +601,7 @@ fn nextSeparator(line: []const u8, from: usize) ?struct { at: usize, len: usize,
             },
             '#' => if (i == 0 or line[i - 1] == ' ' or line[i - 1] == '\t') return null,
             ';' => return .{ .at = i, .len = 1, .kind = .semi },
-            '&' => return if (i + 1 < line.len and line[i + 1] == '&') .{ .at = i, .len = 2, .kind = .and_if } else .{ .at = i, .len = 1, .kind = .semi },
+            '&' => return if (i + 1 < line.len and line[i + 1] == '&') .{ .at = i, .len = 2, .kind = .and_if } else .{ .at = i, .len = 1, .kind = .background },
             '|' => if (i + 1 < line.len and line[i + 1] == '|') return .{ .at = i, .len = 2, .kind = .or_if } else {},
             else => {},
         }
@@ -560,8 +618,8 @@ fn runLine(line: []const u8) void {
     while (start <= line.len) {
         const sep = nextSeparator(line, start);
         const end = if (sep) |s| s.at else line.len;
-        if (!skip) runPart(line[start..end], &commands);
         const kind: Kind = if (sep) |s| s.kind else .semi;
+        if (!skip) runPart(line[start..end], &commands, kind == .background);
         // a && b runs b only after success; a || b only after failure.
         skip = switch (kind) {
             .and_if => last_status != 0,
@@ -572,7 +630,7 @@ fn runLine(line: []const u8) void {
     }
 }
 
-fn runPart(part: []const u8, commands: *[16]Command) void {
+fn runPart(part: []const u8, commands: *[16]Command, background: bool) void {
     tokenize(part) catch |e| {
         rt.err.write(switch (e) {
             error.Unclosed => "kpsh: syntax error: unclosed quote or ${\n",
@@ -586,7 +644,7 @@ fn runPart(part: []const u8, commands: *[16]Command) void {
         last_status = 2;
         return;
     };
-    last_status = runPipeline(commands[0..n]);
+    last_status = runPipeline(commands[0..n], background);
     rt.out.flush();
     rt.err.flush();
 }
@@ -672,6 +730,7 @@ pub fn main(args: rt.Args) u8 {
     setVar("PWD", cwd(&buf));
 
     while (true) {
+        reapJobs();
         prompt();
         const n = switch (sys.read(0, line_buf[0 .. line_buf.len - 1])) {
             .ok => |n| n,

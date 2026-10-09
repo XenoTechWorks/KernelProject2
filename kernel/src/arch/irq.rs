@@ -1,4 +1,5 @@
-//! Hardware interrupts through the legacy 8259 PIC: the timer (PIT), the PS/2 keyboard and COM1.
+//! Hardware interrupts through the legacy 8259 PIC: the timer (PIT), the PS/2 keyboard and mouse,
+//! and COM1.
 
 use super::cpu::{inb, outb};
 use super::idt::TrapFrame;
@@ -41,9 +42,9 @@ pub fn init() {
         outb(0xA1, 2);
         outb(0x21, 0x01);
         outb(0xA1, 0x01);
-        // Unmask timer (0), keyboard (1), cascade (2) and COM1 (4).
+        // Unmask timer (0), keyboard (1), cascade (2), COM1 (4) and the mouse (12).
         outb(0x21, !0b1_0111);
-        outb(0xA1, 0xFF);
+        outb(0xA1, !(1 << 4));
 
         // PIT channel 0, rate generator.
         let divisor = (1_193_182 / TIMER_HZ) as u16;
@@ -62,6 +63,10 @@ pub fn handle(frame: &mut TrapFrame) {
         1 => {
             let scancode = unsafe { inb(0x60) };
             crate::keyboard::scancode(scancode);
+        }
+        12 => {
+            let byte = unsafe { inb(0x60) };
+            crate::mouse::byte(byte);
         }
         4 => {
             while let Some(byte) = super::serial::read_byte() {

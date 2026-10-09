@@ -39,6 +39,12 @@ pub fn scancode(code: u8) {
             s.caps = !s.caps;
             return;
         }
+        // F12 moves the keyboard between the console and the windows.
+        0x58 if !released && !extended => {
+            drop(s);
+            crate::console::cycle_focus();
+            return;
+        }
         _ => {}
     }
     if released {
@@ -58,7 +64,7 @@ pub fn scancode(code: u8) {
             _ => return,
         };
         drop(s);
-        crate::tty::input(seq);
+        crate::console::input(seq);
         return;
     }
 
@@ -74,5 +80,5 @@ pub fn scancode(code: u8) {
         byte = byte.to_ascii_lowercase() - b'a' + 1; // Ctrl+C = 3, Ctrl+D = 4, ...
     }
     drop(s);
-    crate::tty::input(&[byte]);
+    crate::console::input(&[byte]);
 }

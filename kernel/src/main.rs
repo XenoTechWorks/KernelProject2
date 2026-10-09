@@ -13,9 +13,11 @@ mod font;
 mod fs;
 mod keyboard;
 mod mm;
+mod mouse;
 mod proc;
 mod smbios;
 mod sys;
+mod term;
 mod time;
 mod tty;
 
@@ -132,6 +134,7 @@ extern "C" fn kmain() -> ! {
     // Home lives on the disk when there is one, so what you make there survives a reboot.
     drivers::virtio_blk::init();
     fs::mount_disk("/root");
+    mouse::init();
     irq::init();
 
     // The same order Linux tries.

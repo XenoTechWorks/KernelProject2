@@ -8,6 +8,7 @@ use crate::proc::{self, fd::Handle, fd::OpenFile};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::Ordering;
 
 const O_ACCMODE: u32 = 3;
 const O_WRONLY: u32 = 1;
@@ -89,6 +90,27 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
                 super::misc::fill_random(buf);
                 Ok(buf.len() as u64)
             }
+            Type::Device(Device::Window) => Err(ENXIO),
+        },
+        // What was typed into the window (and mouse clicks); end of file once the user closes it.
+        Handle::Window(window) => loop {
+            {
+                let mut q = window.input.lock();
+                if !q.is_empty() {
+                    let n = q.len().min(buf.len());
+                    for (i, b) in q.drain(..n).enumerate() {
+                        buf[i] = b;
+                    }
+                    return Ok(n as u64);
+                }
+            }
+            if window.closed.load(Ordering::Relaxed) {
+                return Ok(0);
+            }
+            if nonblocking(file) {
+                return Err(EAGAIN);
+            }
+            proc::sleep()?;
         },
         Handle::PipeRead(pipe) => loop {
             {
@@ -142,6 +164,10 @@ fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
             }
             Type::Device(_) => Ok(data.len() as u64),
         },
+        Handle::Window(window) => {
+            crate::console::window_write(window.id, data);
+            Ok(data.len() as u64)
+        }
         Handle::PipeWrite(pipe) => {
             let mut written = 0;
             while written < data.len() {
@@ -278,7 +304,11 @@ pub fn open_path(path: &str, flags: u32, mode: u32) -> SysResult {
         }
     }
     let kept = flags & !(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | O_CLOEXEC);
-    let file = OpenFile::node(node, kept, String::from(path));
+    let file = if node.kind_of() == Type::Device(Device::Window) && flags & O_PATH == 0 {
+        OpenFile::window(crate::console::open_window().ok_or(ENXIO)?, kept, String::from(path))
+    } else {
+        OpenFile::node(node, kept, String::from(path))
+    };
     Ok(p.files().fds.insert(file, flags & O_CLOEXEC != 0, 0)? as u64)
 }
 
@@ -380,6 +410,7 @@ fn stat_of(handle: &Handle) -> Stat {
             }
         }
         Handle::PipeRead(_) | Handle::PipeWrite(_) => Stat { dev: 2, mode: fs::S_IFIFO | 0o600, nlink: 1, blksize: 4096, ..Default::default() },
+        Handle::Window(_) => Stat { mode: fs::S_IFCHR | 0o666, nlink: 1, blksize: 4096, ..Default::default() },
     }
 }
 
@@ -401,6 +432,7 @@ fn handle_for(dirfd: i32, path_ptr: u64, flags: u32) -> Result<Handle, Errno> {
                 Handle::Node(n) => Handle::Node(n.clone()),
                 Handle::PipeRead(pp) => Handle::PipeRead(pp.clone()),
                 Handle::PipeWrite(pp) => Handle::PipeWrite(pp.clone()),
+                Handle::Window(w) => Handle::Window(w.clone()),
             },
             None => Handle::Node(fs::lookup(&p.files().cwd, true)?),
         });
@@ -498,6 +530,21 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
             return Ok(0);
         }
         _ => {}
+    }
+    if let Handle::Window(window) = &file.handle {
+        return match request {
+            TIOCGWINSZ => {
+                let (cols, rows) = crate::console::window_size(window.id);
+                let ws: [u16; 4] = [rows as u16, cols as u16, 0, 0];
+                user::write_struct(p.space(), arg, &ws)?;
+                Ok(0)
+            }
+            FIONREAD => {
+                user::write_struct(p.space(), arg, &(window.input.lock().len() as u32))?;
+                Ok(0)
+            }
+            _ => Err(ENOTTY),
+        };
     }
     let is_tty = matches!(&file.handle, Handle::Node(n) if n.kind_of() == Type::Device(Device::Tty));
     if !is_tty {
@@ -731,6 +778,11 @@ fn readiness(fd: i32) -> i16 {
                 r |= POLLHUP;
             }
             r
+        }
+        Handle::Window(window) => {
+            let closed = window.closed.load(Ordering::Relaxed);
+            let input = !window.input.lock().is_empty();
+            POLLOUT | if input || closed { POLLIN } else { 0 } | if closed { POLLHUP } else { 0 }
         }
         Handle::PipeWrite(pipe) => {
             if *pipe.readers.lock() == 0 {
