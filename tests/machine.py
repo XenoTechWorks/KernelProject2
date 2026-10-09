@@ -31,10 +31,12 @@ class Machine:
         self._monitor = os.path.join(tempfile.gettempdir(), f"kp2-monitor-{os.getpid()}-{id(self)}")
         args = ["qemu-system-x86_64", "-M", "q35", "-m", "1G", "-cdrom", os.path.join(ROOT, "out/kernelproject2.iso"),
                 "-serial", "stdio", "-display", "none", "-no-reboot",
-                "-monitor", f"unix:{self._monitor},server,nowait"]
+                "-monitor", f"unix:{self._monitor},server,nowait",
+                "-qmp", f"unix:{self._monitor}-qmp,server,nowait"]
         if disk:
             args += ["-drive", f"file={disk},if=none,id=home,format=raw",
                      "-device", "virtio-blk-pci,drive=home,disable-legacy=on"]
+        args += ["-device", "virtio-tablet-pci,disable-legacy=on"]
         self.qemu = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self._wait_for_prompt(60)
 
@@ -85,10 +87,30 @@ class Machine:
         """Saves what's on the screen right now as a PNG."""
         self.monitor(f"screendump {os.path.abspath(path)} -f png", wait=1)
 
+    def tablet(self, x, y, buttons=None, screen=(1280, 800)):
+        """Puts the (virtio) tablet's pointer at screen pixel (x, y); then presses (1) or releases
+        (0) the left button, if given. Uses QMP, which can send absolute pointer events."""
+        import json
+        import socket
+        events = [{"type": "abs", "data": {"axis": "x", "value": x * 32768 // screen[0]}},
+                  {"type": "abs", "data": {"axis": "y", "value": y * 32768 // screen[1]}}]
+        if buttons is not None:
+            events.append({"type": "btn", "data": {"down": bool(buttons), "button": "left"}})
+        with socket.socket(socket.AF_UNIX) as s:
+            s.connect(self._monitor + "-qmp")
+            s.sendall(json.dumps({"execute": "qmp_capabilities"}).encode() + b"\n")
+            s.sendall(json.dumps({"execute": "input-send-event", "arguments": {"events": events}}).encode() + b"\n")
+            time.sleep(0.3)
+
     def mouse(self, dx=0, dy=0, buttons=None):
         """Moves the (PS/2) mouse by dx, dy pixels; then sets the buttons held, if given (1 left)."""
-        if dx or dy:
-            self.monitor(f"mouse_move {dx} {dy}")
+        # In steps like a real mouse's: QEMU may drop the rest of one big jump (a PS/2 packet
+        # holds at most 127 pixels each way).
+        while dx or dy:
+            sx, sy = max(-100, min(100, dx)), max(-100, min(100, dy))
+            self.monitor(f"mouse_move {sx} {sy}", wait=0.05)
+            dx, dy = dx - sx, dy - sy
+        time.sleep(0.25)
         if buttons is not None:
             self.monitor(f"mouse_button {buttons}")
 
@@ -103,8 +125,9 @@ class Machine:
             self.qemu.wait()
         if self._scratch:
             os.unlink(self._scratch)
-        if os.path.exists(self._monitor):
-            os.unlink(self._monitor)
+        for path in (self._monitor, self._monitor + "-qmp"):
+            if os.path.exists(path):
+                os.unlink(path)
 
     def __enter__(self):
         return self

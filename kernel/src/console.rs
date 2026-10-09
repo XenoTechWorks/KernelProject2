@@ -191,6 +191,9 @@ struct Mouse {
     resize: Option<(u32, u8, i32, i32, i32, i32)>,
     /// Over a resizable edge: the pointer shows that.
     resize_shape: bool,
+    /// Buttons held on each pointing device (the PS/2 mouse, the tablet): QEMU sends moves to one
+    /// and clicks to the other, and each reports only its own buttons.
+    device_buttons: [u8; 2],
 }
 
 pub struct Screen {
@@ -402,8 +405,26 @@ pub fn window_blit(id: u32, x: i32, y: i32, w: i32, h: i32, pixels: &[u32]) {
 /// bit 1 right, bit 2 middle), and its wheel turned `wheel` steps (down is positive).
 pub fn mouse(dx: i32, dy: i32, buttons: u8, wheel: i32) {
     if let Some(screen) = CONSOLE.lock().as_mut() {
-        screen.mouse_event(dx, dy, buttons, wheel);
+        screen.mouse.device_buttons[0] = buttons;
+        let held = screen.mouse.device_buttons[0] | screen.mouse.device_buttons[1];
+        screen.mouse_event(dx, dy, held, wheel);
     }
+}
+
+/// The pointer is at `at` on the screen (from a tablet, which knows where it is; None: where it
+/// was), with these buttons held and the wheel turned `wheel` steps.
+pub fn mouse_at(at: Option<(i32, i32)>, buttons: u8, wheel: i32) {
+    if let Some(screen) = CONSOLE.lock().as_mut() {
+        let (dx, dy) = at.map_or((0, 0), |(x, y)| (x - screen.mouse.x, y - screen.mouse.y));
+        screen.mouse.device_buttons[1] = buttons;
+        let held = screen.mouse.device_buttons[0] | screen.mouse.device_buttons[1];
+        screen.mouse_event(dx, dy, held, wheel);
+    }
+}
+
+/// The screen's size in pixels.
+pub fn pixel_size() -> (usize, usize) {
+    CONSOLE.lock().as_ref().map_or((0, 0), |s| (s.width, s.height))
 }
 
 /// The contents size of a text window: its cells plus padding.

@@ -133,6 +133,7 @@ extern "C" fn kmain() -> ! {
     }
     // Home lives on the disk when there is one, so what you make there survives a reboot.
     drivers::virtio_blk::init();
+    drivers::virtio_input::init();
     fs::mount_disk("/root");
     mouse::init();
     irq::init();

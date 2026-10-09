@@ -59,6 +59,7 @@ pub fn handle(frame: &mut TrapFrame) {
     match irq {
         0 => {
             TICKS.fetch_add(1, Ordering::Relaxed);
+            crate::drivers::virtio_input::poll();
         }
         1 => {
             let scancode = unsafe { inb(0x60) };

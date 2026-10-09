@@ -126,6 +126,18 @@ with Machine() as m:
     done = m.run("true")
     check("dragged window closes with its × button", done is not None and "[1] Done" in done, done)
 
+    # The tablet (absolute pointer) closes one too: the pointer lands exactly where it's sent.
+    m.run("textclock &")
+    time.sleep(1)
+    cx, cy = close_button(x, y, clock_w)
+    m.tablet(cx, cy)
+    m.tablet(cx, cy, buttons=1)
+    m.tablet(cx, cy, buttons=0)
+    time.sleep(1)
+    done = m.run("true")
+    check("the tablet clicks × right where it points", done is not None and "[1] Done" in done, done)
+    p.x, p.y = cx, cy  # the PS/2 pointer moves the same pointer
+
     # The keyboard stays with the shell until the window is clicked; then q goes to the clock.
     m.run("textclock &")
     time.sleep(1)

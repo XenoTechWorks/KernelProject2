@@ -116,9 +116,10 @@ widgets &      # a tour of the widgets
 textclock &    # a text app in a window
 ```
 
-The shell keeps the keyboard. Drag a window by its header with the mouse (PS/2; click into the
-QEMU window to use it, Ctrl+Alt+G lets go), resize it by its right or bottom edge, scroll lists
-with the wheel. Click a window to give it the keyboard, or press F12 to move the keyboard between
+The shell keeps the keyboard. Drag a window by its header with the mouse, resize it by its right
+or bottom edge, scroll lists with the wheel. `run.sh` gives QEMU a virtio tablet, so the pointer
+sits exactly under your mouse; without one the PS/2 mouse works too (click into the QEMU window to
+use it, Ctrl+Alt+G lets go), but QEMU's idea of where it is can drift from yours. Click a window to give it the keyboard, or press F12 to move the keyboard between
 the console and the windows. × closes a window: its program reads end-of-file and exits.
 - The kernel composites them (`kernel/src/console.rs`): the console is a layer of pixels, each
   window an image with its frame and shadow, blended together where something changed.
@@ -152,7 +153,7 @@ kernel/          the kernel (Rust)
   src/arch/        x86-64: GDT, interrupts, syscall entry, PIC/timer, serial
   src/mm/          physical pages, page tables, kernel heap, safe access to user memory
   src/fs/          the VFS, ext2, /proc, /sys, the initramfs reader, pipes
-  src/drivers/     PCI and the virtio disk
+  src/drivers/     PCI, virtio (the disk, and the tablet for the pointer)
   src/proc/        processes, scheduler, fork/exec/wait, the ELF loader
   src/sys/         the Linux system calls
   src/tty.rs       terminal line discipline

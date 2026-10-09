@@ -554,8 +554,11 @@ pub const App = struct {
                 else => false,
             };
             const alignment = if (!b.vertical and c.alignment == .fill and !fills_row) Align.center else c.alignment;
-            const cross_size = if (alignment == .fill) cross_room else @min(want, cross_room);
-            const offset = switch (alignment) {
+            // A label in a column gets the whole width and places its text itself, so text that
+            // grows later (a calculator's display) still fits.
+            const whole = alignment == .fill or (b.vertical and c.kind == .label);
+            const cross_size = if (whole) cross_room else @min(want, cross_room);
+            const offset = if (whole) 0 else switch (alignment) {
                 .fill, .start => 0,
                 .center => @divTrunc(cross_room - cross_size, 2),
                 .end => cross_room - cross_size,
@@ -588,8 +591,19 @@ pub const App = struct {
             .box => |b| for (b.children) |child| app.draw(child, c),
             .label => |*l| {
                 const asc: i32 = @intFromFloat(@round(app.font.ascender(l.size)));
+                // Text wider than the label gets smaller to fit (a long number in a display).
+                var size = l.size;
+                const full = canvas_mod.measure(app.font, size, l.text());
+                if (full > @as(f32, @floatFromInt(r.w)) and full > 0) size = @max(8, @floor(size * @as(f32, @floatFromInt(r.w)) / full));
                 const lh: i32 = @intFromFloat(@ceil(app.font.lineHeight(l.size)));
-                _ = c.text(app.font, l.size, @floatFromInt(r.x), r.y + @divTrunc(r.h - lh, 2) + asc, l.text(), l.color);
+                const tw = canvas_mod.measure(app.font, size, l.text());
+                const room = @as(f32, @floatFromInt(r.w)) - tw;
+                const x = @as(f32, @floatFromInt(r.x)) + switch (w.alignment) {
+                    .center => @round(room / 2),
+                    .end => room,
+                    .fill, .start => 0,
+                };
+                _ = c.text(app.font, size, x, r.y + @divTrunc(r.h - lh, 2) + asc, l.text(), l.color);
             },
             .button => |b| {
                 const color: u32 = if (b.suggested)
