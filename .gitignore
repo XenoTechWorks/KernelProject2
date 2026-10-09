@@ -2,3 +2,4 @@
 /user/.zig-cache/
 /user/zig-out/
 /out/
+__pycache__/
