@@ -68,7 +68,7 @@ DWORD copy_out(const std::string &s, DWORD size, LPSTR buf) {
 
 extern "C" {
 
-WINAPI HANDLE k32_CreateFileA(LPCSTR name, DWORD access, DWORD, void *, DWORD disposition, DWORD flags_and_attributes, HANDLE) {
+WINAPI HANDLE k32_CreateFileA(LPCSTR name, DWORD access, DWORD, void *security, DWORD disposition, DWORD flags_and_attributes, HANDLE) {
     std::string path = unix_path(name);
     bool read = access & (GENERIC_READ | GENERIC_ALL), write = access & (GENERIC_WRITE | GENERIC_ALL);
     int flags = write ? (read ? O_RDWR : O_WRONLY) : O_RDONLY;
@@ -97,7 +97,12 @@ WINAPI HANDLE k32_CreateFileA(LPCSTR name, DWORD access, DWORD, void *, DWORD di
     }
     // Windows reports when CREATE_ALWAYS / OPEN_ALWAYS found the file already there.
     set_last_error(existed && (disposition == CREATE_ALWAYS || disposition == OPEN_ALWAYS) ? ERROR_ALREADY_EXISTS : 0);
-    return handles::add(new FileObject(fd));
+    if (security) {
+        BOOL inherit = 0;
+        memcpy(&inherit, static_cast<uint8_t *>(security) + 16, sizeof inherit);  // bInheritHandle
+        if (inherit) fcntl(fd, F_SETFD, 0);
+    }
+    return handles::for_fd(fd);
 }
 
 WINAPI BOOL k32_WriteFile(HANDLE h, const void *data, DWORD size, DWORD *written, void *) {

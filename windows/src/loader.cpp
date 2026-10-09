@@ -44,14 +44,27 @@ std::string dll_name(const char *name) {
 }
 
 const BuiltinDll *const builtins[] = {&kernel32_dll, &kernel32_files_dll, &kernel32_threads_dll, &kernel32_loader_dll,
-                                      &kernel32_seh_dll, &msvcrt_dll};
+                                      &kernel32_seh_dll, &kernel32_console_dll, &kernel32_system_dll, &msvcrt_dll,
+                                      &msvcrt_more_dll, &advapi32_dll, &kernel32_process_dll, &ws2_32_dll,
+                                      &kernel32_memory_dll};
 
 bool is_ucrt(const std::string &name) { return name.starts_with("api-ms-win-crt-") || name == "ucrtbase.dll"; }
 
+// Windows' own system DLLs: always ours, never loaded from a file. Functions we don't have yet are
+// linked to stubs that name them if called (most programs import far more than they use).
+const char *const system_dlls[] = {
+    "advapi32.dll", "bcrypt.dll", "comctl32.dll", "comdlg32.dll", "crypt32.dll", "gdi32.dll",   "imm32.dll",
+    "iphlpapi.dll", "netapi32.dll", "ntdll.dll",  "ole32.dll",   "oleaut32.dll", "psapi.dll", "secur32.dll",
+    "shell32.dll", "shlwapi.dll", "user32.dll",   "userenv.dll", "version.dll", "winmm.dll",  "ws2_32.dll",
+    "wsock32.dll",
+};
+
 bool is_builtin(const std::string &name) {
-    if (is_ucrt(name)) return true;
+    if (is_ucrt(name) || name.starts_with("api-ms-win-")) return true;
     for (const BuiltinDll *d : builtins)
         if (name == d->name) return true;
+    for (const char *d : system_dlls)
+        if (name == d) return true;
     return false;
 }
 
@@ -66,7 +79,8 @@ void *find_builtin(const std::string &dll, const char *name) {
     // msvcrt's.
     if (is_ucrt(dll)) {
         if (void *f = find_in(&ucrt_dll, name)) return f;
-        return find_in(&msvcrt_dll, name);
+        if (void *f = find_in(&msvcrt_dll, name)) return f;
+        return find_in(&msvcrt_more_dll, name);
     }
     for (const BuiltinDll *d : builtins)
         if (dll == d->name)
@@ -101,6 +115,64 @@ void *missing_stub(const std::string &dll, const std::string &name) {
     memcpy(code + used, bytes, sizeof bytes);
     used += 32;
     return code + used - 32;
+}
+
+// WINLOAD_TRACE=1: every call a program makes to an imported function is logged (to stderr) by a
+// small stub in front of it, like Wine's relay trace.
+bool tracing = getenv("WINLOAD_TRACE") != nullptr;
+
+// Our own code's bounds (from the linker): imported *variables* (like _environ) live outside them
+// and must not get a stub.
+extern "C" char __executable_start[], etext[];
+bool is_our_code(const void *address) { return address >= __executable_start && address < etext; }
+
+// Windows calling convention, so it keeps the registers Windows code expects kept (rsi, rdi, xmm6-15).
+extern "C" WINAPI void trace_call(const char *name) {
+    char line[160];
+    int n = snprintf(line, sizeof line, "[trace %d] %s\n", getpid(), name);
+    (void)!write(2, line, static_cast<size_t>(n));
+}
+
+// Saves the argument registers (rcx rdx r8 r9 and xmm0-3), logs the name, restores them and jumps
+// on to the real function, which then returns straight to the program.
+void *trace_stub(const std::string &dll, const std::string &name, void *target) {
+    static uint8_t *code;
+    static size_t used = 4096;
+    if (used + 128 > 4096) {
+        code = static_cast<uint8_t *>(mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+        used = 0;
+    }
+    std::string *label = new std::string(dll + "!" + name);
+    uint64_t text = reinterpret_cast<uint64_t>(label->c_str());
+    uint64_t log = reinterpret_cast<uint64_t>(&trace_call);
+    uint64_t to = reinterpret_cast<uint64_t>(target);
+    // Entry rsp is 8 mod 16; four pushes and 104 bytes leave it 16-aligned for the call.
+    uint8_t bytes[] = {
+        0x51, 0x52, 0x41, 0x50, 0x41, 0x51,                    // push rcx; push rdx; push r8; push r9
+        0x48, 0x83, 0xEC, 0x68,                                // sub rsp, 104
+        0xF3, 0x0F, 0x7F, 0x44, 0x24, 0x20,                    // movdqu [rsp+32], xmm0
+        0xF3, 0x0F, 0x7F, 0x4C, 0x24, 0x30,                    // movdqu [rsp+48], xmm1
+        0xF3, 0x0F, 0x7F, 0x54, 0x24, 0x40,                    // movdqu [rsp+64], xmm2
+        0xF3, 0x0F, 0x7F, 0x5C, 0x24, 0x50,                    // movdqu [rsp+80], xmm3
+        0x48, 0xB9, 0, 0, 0, 0, 0, 0, 0, 0,                    // mov rcx, label
+        0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0,                    // mov rax, trace_call
+        0xFF, 0xD0,                                            // call rax
+        0xF3, 0x0F, 0x6F, 0x44, 0x24, 0x20,                    // movdqu xmm0, [rsp+32]
+        0xF3, 0x0F, 0x6F, 0x4C, 0x24, 0x30,                    // movdqu xmm1, [rsp+48]
+        0xF3, 0x0F, 0x6F, 0x54, 0x24, 0x40,                    // movdqu xmm2, [rsp+64]
+        0xF3, 0x0F, 0x6F, 0x5C, 0x24, 0x50,                    // movdqu xmm3, [rsp+80]
+        0x48, 0x83, 0xC4, 0x68,                                // add rsp, 104
+        0x41, 0x59, 0x41, 0x58, 0x5A, 0x59,                    // pop r9; pop r8; pop rdx; pop rcx
+        0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0,                    // mov rax, target
+        0xFF, 0xE0,                                            // jmp rax
+    };
+    memcpy(bytes + 36, &text, 8);
+    memcpy(bytes + 46, &log, 8);
+    memcpy(bytes + 92, &to, 8);
+    static_assert(sizeof bytes <= 128);
+    memcpy(code + used, bytes, sizeof bytes);
+    used += 128;
+    return code + used - 128;
 }
 
 Module *find_loaded(const std::string &name) {
@@ -222,6 +294,7 @@ bool resolve_imports(Module *m, std::string &error) {
                 const char *name = reinterpret_cast<const char *>(m->base + (thunk & 0x7FFFFFFF) + 2);
                 address = target ? export_by_name(target, name) : find_builtin(dll, name);
                 if (!address) address = missing_stub(dll, name);
+                else if (tracing && is_our_code(address)) address = trace_stub(dll, name, address);
             }
             memcpy(m->base + slots + i * 8, &address, 8);
         }

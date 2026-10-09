@@ -73,6 +73,12 @@ x86_64-w64-mingw32-g++ -O2 -o "$stage/bin/cpp-dll.exe" "$root/tests/windows/cpp.
 mingw_dlls="$(dirname "$(x86_64-w64-mingw32-g++ -print-file-name=libstdc++-6.dll)")"
 cp "$mingw_dlls/libstdc++-6.dll" "$mingw_dlls/libgcc_s_seh-1.dll" "$stage/bin/"
 
+# Real Windows programs downloaded as they are (see README: "Real Windows programs").
+winapps="${WINAPPS:-$HOME/src/winapps}"
+for app in busybox64.exe 7za.exe; do
+    [[ -f "$winapps/$app" ]] && install -m 755 "$winapps/$app" "$stage/bin/$app"
+done
+
 # Unmodified Linux programs built from their own sources (see README: "Real Linux programs").
 # git straight from Ubuntu, with the template files `git init` copies.
 step "git (/usr/bin/git)"

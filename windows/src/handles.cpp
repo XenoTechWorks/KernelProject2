@@ -6,12 +6,12 @@
 #include <map>
 #include <unistd.h>
 
-FileObject::~FileObject() { ::close(fd); }
 SearchObject::~SearchObject() { closedir(dir); }
 
 namespace {
 std::map<uintptr_t, Object *> table;
-uintptr_t next_handle = 0x1000;
+constexpr uintptr_t FIRST_OBJECT = 0x100000;
+uintptr_t next_handle = FIRST_OBJECT;
 pthread_mutex_t table_lock = PTHREAD_MUTEX_INITIALIZER;
 }  // namespace
 
@@ -35,6 +35,7 @@ Object *handles::get(HANDLE handle) {
 }
 
 bool handles::close(HANDLE handle) {
+    if (int fd = fd_of(handle); fd >= 0) return ::close(fd) == 0;
     pthread_mutex_lock(&table_lock);
     auto it = table.find(reinterpret_cast<uintptr_t>(handle));
     Object *o = nullptr;
@@ -48,14 +49,12 @@ bool handles::close(HANDLE handle) {
     return o != nullptr;
 }
 
-// Standard handles are small numbers, like Windows' pseudo-handles for the console.
-HANDLE handles::std_handle(int fd) { return reinterpret_cast<HANDLE>(static_cast<uintptr_t>(fd + 1) * 4); }
+HANDLE handles::for_fd(int fd) { return reinterpret_cast<HANDLE>(static_cast<uintptr_t>(fd + 1) * 4); }
 
 int handles::fd_of(HANDLE handle) {
     uintptr_t h = reinterpret_cast<uintptr_t>(handle);
-    if (h >= 4 && h <= 12 && h % 4 == 0) return static_cast<int>(h / 4) - 1;
-    auto *f = get_as<FileObject>(handle, Object::Kind::File);
-    return f ? f->fd : -1;
+    if (h >= 4 && h < FIRST_OBJECT && h % 4 == 0) return static_cast<int>(h / 4) - 1;
+    return -1;
 }
 
 namespace {

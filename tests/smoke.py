@@ -40,6 +40,10 @@ CHECKS = [
     ("dlltest.exe", "dlls: 10/10 passed"),
     ("cpp.exe", "cpp: 7/7 passed"),
     ("cpp-dll.exe", "cpp: 7/7 passed"),
+    ("busybox64.exe uname -a", "Windows_NT kernelproject2 10.0 19045"),
+    ("busybox64.exe sh -c 'echo b a c | tr \" \" \"\\n\" | sort | tr -d \"\\n\"; echo'", "abc"),
+    ("busybox64.exe sh -c 'x=$(echo sub); echo got $x'", "got sub"),
+    ("busybox64.exe md5sum /etc/os-release | busybox64.exe cut -c1-8", ""),
     ("mkdir /root/r && cd /root/r && git init -q && echo hi > f && git add f && git commit -qm one && git log --oneline", "one"),
 ]
 

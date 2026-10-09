@@ -8,16 +8,15 @@
 
 #include "win.hpp"
 
+// Handles come in two kinds. Anything that is a Linux file descriptor underneath (files, pipes,
+// shared memory, the console) is the descriptor itself in disguise: (fd + 1) * 4. A child process
+// inherits descriptors, so the same handle number works there too, as inherited handles do on
+// Windows. Everything else (threads, events, mutexes, processes, searches) is an object in this
+// process's table, numbered from 0x100000.
 struct Object {
-    enum class Kind { File, Thread, Event, Mutex, Search } kind;
+    enum class Kind { Thread, Event, Mutex, Search, Process } kind;
     explicit Object(Kind k) : kind(k) {}
     virtual ~Object() = default;
-};
-
-struct FileObject : Object {
-    int fd;
-    explicit FileObject(int fd) : Object(Kind::File), fd(fd) {}
-    ~FileObject() override;
 };
 
 struct ThreadObject : Object {
@@ -40,6 +39,16 @@ struct MutexObject : Object {
     MutexObject() : Object(Kind::Mutex) {}
 };
 
+// A child process started with CreateProcess (a Linux process underneath).
+struct ProcessObject : Object {
+    int pid;
+    bool done = false;
+    DWORD exit_code = 259;  // STILL_ACTIVE
+    explicit ProcessObject(int pid) : Object(Kind::Process), pid(pid) {}
+    // Collects the exit status if it has ended (without waiting). True when it has.
+    bool check();
+};
+
 struct SearchObject : Object {
     DIR *dir;
     std::string pattern;
@@ -59,7 +68,9 @@ bool close(HANDLE handle);
 
 // The Linux file descriptor behind a handle (standard handles included), or -1.
 int fd_of(HANDLE handle);
-HANDLE std_handle(int fd);
+// The handle for a file descriptor.
+HANDLE for_fd(int fd);
+inline HANDLE std_handle(int fd) { return for_fd(fd); }
 
 // Waiting: object states change under `lock`, and every change wakes waiters (`changed`).
 extern pthread_mutex_t lock;

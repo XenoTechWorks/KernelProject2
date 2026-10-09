@@ -77,6 +77,19 @@ Windows' own loader plus our own versions of the system DLLs, the same idea as W
 
 `winload` is an ordinary Linux program, so it runs on Linux (WSL) too: handy for testing.
 
+### Real Windows programs
+
+[BusyBox for Windows](https://frippery.org/busybox/) (`busybox64.exe`, downloaded unchanged) runs
+here: its shell with pipelines, loops and `$(...)`, and its tools (`ls`, `grep`, `sed`, `awk`,
+`find`, `md5sum`, ...). Put it in `~/src/winapps/` (or set `WINAPPS`) and `build.sh` copies it into
+`/bin`. It needed child processes (`CreateProcess`, `_spawnve`, pipes, a `.exe` started from
+a `.exe` goes back through `winload`), file mappings, console modes and colors, and many smaller
+`kernel32`/`msvcrt`/`advapi32` functions. System DLLs we don't write ourselves (`user32`, `shell32`,
+...) load as empty ones, so a program only stops if it actually calls something missing.
+
+Tools for this: `tools/winimports.sh program.exe` lists what a program imports, and
+`WINLOAD_TRACE=1` prints every call it makes into our DLLs.
+
 ## The command line
 
 The same layout as Linux:
@@ -136,9 +149,9 @@ Roughly in order; each step is checked by running a real program.
    don't fire yet), `socketpair` and Unix sockets, `eventfd`, `epoll`.
 2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
    archive), interrupt-driven I/O, and AHCI for real PCs.
-3. **Run the targets**: fastfetch and git run; next then BusyBox or coreutils as a compatibility test.
-4. **More Windows**: console programs with files, threads, DLLs and C++ exceptions run. Next:
-   real-world console programs and what they ask for (SEH unwinding), then windows and graphics.
+3. **Run the targets**: fastfetch and git run; next then coreutils as a compatibility test.
+4. **More Windows**: BusyBox for Windows runs. Next: more real console programs (7-Zip), then
+   windows and graphics.
 5. Later: more CPUs (APIC/IOAPIC), networking, a real login, and running make/gcc/cmake on the system itself.
 
 ## Licenses of what's used

@@ -1,6 +1,7 @@
 // winload: runs a Windows program (a PE .exe) as a normal process.
 //
 //   winload program.exe [arguments...]
+//   winload --name first-word program.exe [arguments...]   (the program sees first-word as argv[0])
 //
 // The kernel starts this automatically when a .exe is run, the way it starts the interpreter named
 // in a #! line. Steps, as Windows' own loader does them:
@@ -46,17 +47,26 @@ std::string quote_command_line(int argc, char **argv) {
 }  // namespace
 
 int main(int argc, char **argv, char **envp) {
+    // --name: what the program is called in its own command line, when that isn't its file name.
+    const char *name = nullptr;
+    if (argc >= 4 && strcmp(argv[1], "--name") == 0) {
+        name = argv[2];
+        argv += 2;
+        argc -= 2;
+    }
     if (argc < 2) {
-        fprintf(stderr, "usage: winload program.exe [arguments...]\n");
+        fprintf(stderr, "usage: winload [--name first-word] program.exe [arguments...]\n");
         return 2;
     }
+    const char *path = argv[1];
+    if (name) argv[1] = const_cast<char *>(name);
     process::argc = argc - 1;
     process::argv = argv + 1;
     process::envp = envp;
     process::command_line = strdup(quote_command_line(argc - 1, argv + 1).c_str());
 
     std::string error;
-    Module *exe = loader::load(argv[1], error);
+    Module *exe = loader::load(path, error);
     if (!exe) {
         fprintf(stderr, "winload: %s\n", error.c_str());
         return 126;

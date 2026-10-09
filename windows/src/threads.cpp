@@ -79,6 +79,7 @@ bool ready(Object *o, bool take) {
             }
             return true;
         }
+        case Object::Kind::Process: return static_cast<ProcessObject *>(o)->check();
         default: return true;
     }
 }
@@ -121,7 +122,16 @@ DWORD wait_for(DWORD count, const HANDLE *list, bool all, DWORD ms) {
             if (found) break;
         }
         if (ms == 0) break;
-        if (!wait_for_change(ms == INFINITE ? nullptr : &deadline) && ms != INFINITE) {
+        // A process ending doesn't wake us, so with processes in the list, look again every 10 ms.
+        bool has_process = false;
+        for (Object *o : objects) has_process = has_process || o->kind == Object::Kind::Process;
+        timespec until = deadline;
+        if (has_process) {
+            timespec slice = deadline_after(10);
+            if (ms == INFINITE || slice.tv_sec < deadline.tv_sec || (slice.tv_sec == deadline.tv_sec && slice.tv_nsec < deadline.tv_nsec))
+                until = slice;
+        }
+        if (!wait_for_change(ms == INFINITE && !has_process ? nullptr : &until) && ms != INFINITE) {
             timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
             if (now.tv_sec > deadline.tv_sec || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {

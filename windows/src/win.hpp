@@ -47,8 +47,15 @@ extern const BuiltinDll kernel32_dll;
 extern const BuiltinDll kernel32_files_dll;
 extern const BuiltinDll kernel32_threads_dll;
 extern const BuiltinDll kernel32_seh_dll;
+extern const BuiltinDll kernel32_console_dll;
+extern const BuiltinDll kernel32_system_dll;
+extern const BuiltinDll kernel32_process_dll;
+extern const BuiltinDll kernel32_memory_dll;
+extern const BuiltinDll ws2_32_dll;
 extern const BuiltinDll msvcrt_dll;
-extern const BuiltinDll ucrt_dll;  // also answers for api-ms-win-crt-*.dll
+extern const BuiltinDll msvcrt_more_dll;
+extern const BuiltinDll ucrt_dll;
+extern const BuiltinDll advapi32_dll;  // also answers for api-ms-win-crt-*.dll
 
 // The image's thread-local storage template (its .tls directory), copied for every thread.
 struct TlsTemplate {
@@ -68,6 +75,13 @@ extern const char *command_line;
 extern std::vector<TlsTemplate> tls;  // one per image with a .tls section, by slot
 [[noreturn]] void exit(int code);
 }  // namespace process
+
+// memory.cpp: writes shared file-mapping views back to their files (before starting a child).
+void flush_shared_views();
+
+// process.cpp: replaces this process with `path` (a Linux path). Windows programs go through winload
+// itself, so this works whether or not the kernel knows to do that. Returns only on failure.
+void exec_program(const char *path, char *const *argv, char *const *envp);
 
 // The Thread Environment Block: Windows code reaches it through the gs segment (gs:[0x30] is its
 // own address). Only the fields programs commonly read are given names here.
