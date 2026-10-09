@@ -48,6 +48,10 @@ pub const Canvas = struct {
     /// Drawing outside this is ignored.
     clip: Rect,
 
+    pub fn deinit(c: *Canvas) void {
+        std.heap.page_allocator.free(c.pixels);
+    }
+
     pub fn init(w: u32, h: u32) ?Canvas {
         const pixels = std.heap.page_allocator.alloc(u32, w * h) catch return null;
         return .{ .pixels = pixels, .w = w, .h = h, .clip = .{ .x = 0, .y = 0, .w = @intCast(w), .h = @intCast(h) } };
@@ -125,6 +129,31 @@ pub const Canvas = struct {
                 const dx = @as(f32, @floatFromInt(x)) + 0.5 - cx;
                 const dy = @as(f32, @floatFromInt(y)) + 0.5 - cy;
                 c.blend(x, y, color, coverage(@sqrt(dx * dx + dy * dy) - radius));
+            }
+        }
+    }
+
+    /// A straight line `width` pixels thick with round ends, smoothed.
+    pub fn line(c: *Canvas, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: u32) void {
+        const half = width / 2;
+        const left: i32 = @intFromFloat(@floor(@min(x0, x1) - half - 1));
+        const top: i32 = @intFromFloat(@floor(@min(y0, y1) - half - 1));
+        const right: i32 = @intFromFloat(@ceil(@max(x0, x1) + half + 1));
+        const bottom: i32 = @intFromFloat(@ceil(@max(y0, y1) + half + 1));
+        const dx = x1 - x0;
+        const dy = y1 - y0;
+        const len2 = @max(dx * dx + dy * dy, 1e-6);
+        var y = top;
+        while (y <= bottom) : (y += 1) {
+            var x = left;
+            while (x <= right) : (x += 1) {
+                const px = @as(f32, @floatFromInt(x)) + 0.5;
+                const py = @as(f32, @floatFromInt(y)) + 0.5;
+                // Distance to the nearest point of the segment.
+                const t = std.math.clamp(((px - x0) * dx + (py - y0) * dy) / len2, 0, 1);
+                const ex = px - (x0 + t * dx);
+                const ey = py - (y0 + t * dy);
+                c.blend(x, y, color, coverage(@sqrt(ex * ex + ey * ey) - half));
             }
         }
     }

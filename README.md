@@ -109,13 +109,17 @@ Programs can open windows that float over the console, with a header, a close bu
 shadow. It isn't a desktop: the command line stays the whole screen, and windows sit on top of it.
 
 ```sh
-widgets &      # a graphical app: text entry, buttons, a switch
-clock &        # a text app in a window; the shell keeps the keyboard
+clock &        # the time, big
+calc &         # a calculator (click, or type: 7*6 Enter)
+files /etc &   # browse folders, peek into files
+widgets &      # a tour of the widgets
+textclock &    # a text app in a window
 ```
 
-- Drag a window by its header with the mouse (PS/2; click into the QEMU window to use it, Ctrl+Alt+G
-  lets go). Click a window to give it the keyboard, or press F12 to move the keyboard between the
-  console and the windows. × closes a window: its program reads end-of-file and exits.
+The shell keeps the keyboard. Drag a window by its header with the mouse (PS/2; click into the
+QEMU window to use it, Ctrl+Alt+G lets go), resize it by its right or bottom edge, scroll lists
+with the wheel. Click a window to give it the keyboard, or press F12 to move the keyboard between
+the console and the windows. × closes a window: its program reads end-of-file and exits.
 - The kernel composites them (`kernel/src/console.rs`): the console is a layer of pixels, each
   window an image with its frame and shadow, blended together where something changed.
 
@@ -123,8 +127,9 @@ For programs it's a file: opening `/dev/window` makes a window.
 
 - **Graphical**: the `WINDOW_PIXELS` ioctl makes the window a picture of a given size;
   `WINDOW_BLIT` copies a rectangle of the program's pixels into it, and `WINDOW_TITLE` names it.
-  Reading returns 16-byte events: pointer motion, button presses and releases, keys (with codes for
-  arrows and the like, and shift/ctrl), focus, the pointer leaving.
+  Reading returns 16-byte events: pointer motion, button presses and releases, the wheel, keys
+  (with codes for arrows and the like, and shift/ctrl), focus, the pointer leaving, and a new size
+  when the user resizes the window.
 - **Text**: without that ioctl, what the program writes is drawn as a terminal (escape sequences
   work); xterm's title (`ESC ] 2 ; title BEL`) and resize (`ESC [ 8 ; rows ; cols t`) sequences set
   its title and size, and mouse clicks come back as xterm reports once turned on (`ESC [ ? 1000 h`).
@@ -134,9 +139,11 @@ The graphical toolkit (`user/src/lib/gui.zig`, Zig, a working name) is our own, 
 - `gui/font.zig` reads TrueType fonts and draws smooth (anti-aliased) text; apps use
   [Inter](https://rsms.me/inter/) (SIL Open Font License), downloaded at build time;
 - `gui/canvas.zig` draws rounded rectangles, circles and text into a picture;
-- `gui/widgets.zig` has the widgets (labels, buttons, text entries, switches) in vertical and
-  horizontal boxes, with hover, press, keyboard focus (Tab) and a dark theme like GNOME's.
-  `widgets` is the example. `user/src/lib/ui.zig` is the smaller helper for text windows (`clock`).
+- `gui/widgets.zig` has the widgets (labels, buttons, text entries, switches, checkboxes,
+  sliders, progress bars, lists, separators) in vertical and horizontal boxes that share out the
+  room as the window is resized, with hover, press, keyboard focus (Tab), timers and a dark theme
+  like GNOME's. `widgets`, `clock`, `calc` and `files` are the examples.
+- `user/src/lib/ui.zig` is the smaller helper for text windows (`textclock`).
 
 ## Layout
 

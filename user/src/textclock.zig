@@ -1,6 +1,6 @@
-//! clock: a small window with the time, the date and how long the system has been up.
-//! Run it as `clock &` to keep using the shell. Click the button (or press t) to switch between
-//! 24-hour and 12-hour time; q or the window's × closes it.
+//! textclock: a small text window (see lib/ui.zig) with the time, the date and the uptime.
+//! Run it as `textclock &` to keep using the shell (`clock` is the graphical one). Click the
+//! button (or press t) to switch between 24-hour and 12-hour time; q or the window's × closes it.
 
 const std = @import("std");
 const rt = @import("lib/rt.zig");
@@ -82,8 +82,8 @@ fn civil(days_since_epoch: u64) struct { year: u64, month: u64, day: u64 } {
 }
 
 pub fn main(_: rt.Args) u8 {
-    var win = ui.Window.open("clock", cols, rows) orelse {
-        rt.err.write("clock: can't open a window (no /dev/window?)\n");
+    var win = ui.Window.open("textclock", cols, rows) orelse {
+        rt.err.write("textclock: can't open a window (no /dev/window?)\n");
         return 1;
     };
     var twelve_hour = false;

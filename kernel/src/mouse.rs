@@ -1,5 +1,7 @@
 //! PS/2 mouse: the second port of the keyboard controller (the 8042), interrupt 12. It sends
-//! 3-byte packets: buttons and sign bits, then movement in x and y. The console moves the pointer.
+//! 3-byte packets: buttons and sign bits, then movement in x and y; with the wheel turned on (the
+//! IntelliMouse extension, which QEMU and most mice have) a 4th byte for the wheel. The console
+//! moves the pointer.
 
 use crate::arch::cpu::{inb, outb};
 use spin::Mutex;
@@ -8,11 +10,13 @@ const DATA: u16 = 0x60;
 const STATUS: u16 = 0x64; // reading: status; writing: a command for the controller
 
 struct Packet {
-    bytes: [u8; 3],
+    bytes: [u8; 4],
     len: usize,
+    /// 4 with the wheel, else 3.
+    size: usize,
 }
 
-static PACKET: Mutex<Packet> = Mutex::new(Packet { bytes: [0; 3], len: 0 });
+static PACKET: Mutex<Packet> = Mutex::new(Packet { bytes: [0; 4], len: 0, size: 3 });
 
 /// Waits until the controller can take a byte (or gives up, so a missing controller can't hang us).
 fn wait_write() -> bool {
@@ -52,9 +56,19 @@ pub fn init() {
         unsafe { outb(DATA, (config | 0x02) & !0x20) };
     }
     let defaults = to_mouse(0xF6);
+    // The wheel: setting the sample rate to 200, 100, 80 asks for it; the mouse then says it's
+    // type 3 (an IntelliMouse).
+    for rate in [200, 100, 80] {
+        to_mouse(0xF3);
+        to_mouse(rate);
+    }
+    let wheel = to_mouse(0xF2) == Some(0xFA) && wait_read() && unsafe { inb(DATA) } == 3;
+    if wheel {
+        PACKET.lock().size = 4;
+    }
     let enabled = to_mouse(0xF4); // start sending packets
     if defaults == Some(0xFA) && enabled == Some(0xFA) {
-        crate::log!("ps/2 mouse enabled");
+        crate::log!("ps/2 mouse enabled{}", if wheel { " (with wheel)" } else { "" });
     }
 }
 
@@ -68,11 +82,12 @@ pub fn byte(b: u8) {
     let i = p.len;
     p.bytes[i] = b;
     p.len += 1;
-    if p.len < 3 {
+    if p.len < p.size {
         return;
     }
     p.len = 0;
-    let [flags, x, y] = p.bytes;
+    let [flags, x, y, z] = p.bytes;
+    let wheel = if p.size == 4 { ((z << 4) as i8 >> 4) as i32 } else { 0 }; // 4-bit signed
     drop(p);
     if flags & 0xC0 != 0 {
         return; // overflowed: the numbers are meaningless
@@ -80,5 +95,5 @@ pub fn byte(b: u8) {
     // 9-bit two's complement movement; the sign bits are in the first byte. Up is positive.
     let dx = x as i32 - (((flags as i32) << 4) & 0x100);
     let dy = y as i32 - (((flags as i32) << 3) & 0x100);
-    crate::console::mouse(dx, -dy, flags & 0x07);
+    crate::console::mouse(dx, -dy, flags & 0x07, wheel);
 }

@@ -36,6 +36,10 @@ pub const Event = union(enum) {
     key: Key,
     leave,
     focus: bool,
+    /// The mouse wheel: steps, down is positive.
+    scroll: struct { x: i32, y: i32, steps: i32 },
+    /// The user resized the window; the canvas already has the new size.
+    resize: struct { w: u32, h: u32 },
     /// Nothing happened before the timeout given to next().
     tick,
 };
@@ -81,6 +85,16 @@ pub const Window = struct {
         _ = ioctl(self.fd, WINDOW_BLIT, @intFromPtr(&b));
     }
 
+    /// Events waiting to be read right now (to skip redrawing for each of many pointer moves).
+    pub fn pending(self: *Window) bool {
+        if (self.taken < self.queued) return true;
+        var pfd = extern struct { fd: i32, events: i16, revents: i16 }{ .fd = self.fd, .events = 1, .revents = 0 };
+        return switch (sys.check(sys.syscall3(7, @intFromPtr(&pfd), 1, 0))) {
+            .ok => |n| n > 0,
+            .err => false,
+        };
+    }
+
     pub fn close(self: *Window) void {
         sys.close(self.fd);
     }
@@ -112,6 +126,18 @@ pub const Window = struct {
             4 => .{ .key = .{ .code = e.data, .shift = e.x & 1 != 0, .ctrl = e.x & 2 != 0 } },
             5 => .leave,
             6 => .{ .focus = e.data != 0 },
+            7 => .{ .scroll = .{ .x = e.x, .y = e.y, .steps = @bitCast(e.data) } },
+            8 => blk: {
+                const w: u32 = @intCast(e.x);
+                const h: u32 = @intCast(e.y);
+                if (w != self.canvas.w or h != self.canvas.h) {
+                    if (Canvas.init(w, h)) |c| {
+                        self.canvas.deinit();
+                        self.canvas = c;
+                    }
+                }
+                break :blk .{ .resize = .{ .w = self.canvas.w, .h = self.canvas.h } };
+            },
             else => .tick,
         };
     }

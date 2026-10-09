@@ -4,8 +4,8 @@
 //! to get a window floating over the console, in a frame with a title, a close button and a soft
 //! shadow. A window shows either a small terminal of its own (what the program writes), or pixels
 //! the program draws itself (after the WINDOW_PIXELS ioctl), which is what graphical apps use.
-//! Windows are dragged by their header with the mouse; clicking one raises it and gives it the
-//! keyboard. It's not a desktop: the command line stays underneath.
+//! Windows are dragged by their header with the mouse and resized by their right and bottom
+//! edges; clicking one raises it and gives it the keyboard. It's not a desktop: the command line stays underneath.
 //!
 //! This is a small compositor. The console is drawn into its own layer of pixels, and each window
 //! into its own image (frame, shadow and contents, with alpha at the edges). Showing part of the
@@ -41,6 +41,9 @@ const SHADOW_DROP: i32 = 3;
 const SHADOW_ALPHA: i32 = 100;
 const PAD: i32 = 6; // around a text window's cells
 const CLOSE_RADIUS: i32 = 9;
+/// How far outside a window's right and bottom edges the pointer can grab them to resize.
+const GRIP: i32 = 6;
+const MIN_SIZE: (i32, i32) = (120, 60);
 
 const HEADER_COLOR: [u32; 2] = [0x23272f, 0x2c313c]; // [unfocused, focused]
 const BORDER_COLOR: [u32; 2] = [0x353b47, 0x4b5365];
@@ -56,6 +59,8 @@ pub mod event {
     pub const KEY: u32 = 4; // data: the key (see keyboard.rs), x: modifiers (1 shift, 2 ctrl)
     pub const LEAVE: u32 = 5; // the pointer left the window
     pub const FOCUS: u32 = 6; // data: 1 got the keyboard, 0 lost it
+    pub const SCROLL: u32 = 7; // the mouse wheel (data: steps, as a signed number; down is positive)
+    pub const RESIZE: u32 = 8; // the user resized the window: x, y are its new width and height
 }
 
 /// The part of a window the rest of the kernel sees: what was typed into it, and whether the user
@@ -142,8 +147,9 @@ impl View {
     fn ih(&self) -> i32 {
         self.fh() + 2 * SHADOW
     }
-    fn frame(&self) -> Rect {
-        Rect { x: self.x, y: self.y, w: self.fw(), h: self.fh() }
+    /// Where the pointer reaches the window: its frame and a little past its resizable edges.
+    fn reach(&self) -> Rect {
+        Rect { x: self.x, y: self.y, w: self.fw() + GRIP, h: self.fh() + GRIP }
     }
     fn bounds(&self) -> Rect {
         Rect { x: self.x - SHADOW, y: self.y - SHADOW, w: self.iw(), h: self.ih() }
@@ -162,6 +168,8 @@ enum Part {
     Close,
     Header,
     Border,
+    /// An edge that resizes the window: bit 0 the right one, bit 1 the bottom one.
+    Resize(u8),
     /// In the contents, at these pixel coordinates.
     Content(i32, i32),
 }
@@ -179,6 +187,10 @@ struct Mouse {
     grab: Option<u32>,
     /// The graphical window the pointer is over (to tell it when the pointer leaves).
     hover: Option<u32>,
+    /// Resizing a window: its id, which edges, and the pointer and contents size at the start.
+    resize: Option<(u32, u8, i32, i32, i32, i32)>,
+    /// Over a resizable edge: the pointer shows that.
+    resize_shape: bool,
 }
 
 pub struct Screen {
@@ -387,10 +399,10 @@ pub fn window_blit(id: u32, x: i32, y: i32, w: i32, h: i32, pixels: &[u32]) {
 }
 
 /// The mouse moved by (dx, dy) pixels (down is positive) with these buttons held (bit 0 left,
-/// bit 1 right, bit 2 middle).
-pub fn mouse(dx: i32, dy: i32, buttons: u8) {
+/// bit 1 right, bit 2 middle), and its wheel turned `wheel` steps (down is positive).
+pub fn mouse(dx: i32, dy: i32, buttons: u8, wheel: i32) {
     if let Some(screen) = CONSOLE.lock().as_mut() {
-        screen.mouse_event(dx, dy, buttons);
+        screen.mouse_event(dx, dy, buttons, wheel);
     }
 }
 
@@ -412,16 +424,19 @@ impl Screen {
         self.focus.and_then(|id| self.index_of(id)).map(|i| &self.views[i])
     }
 
-    /// The topmost visible window whose frame covers a point.
+    /// The topmost visible window the pointer reaches at a point.
     fn top_at(&self, x: i32, y: i32) -> Option<usize> {
-        self.views.iter().rposition(|v| v.visible && v.frame().contains(x, y))
+        self.views.iter().rposition(|v| v.visible && v.reach().contains(x, y))
     }
 
     fn part(view: &View, x: i32, y: i32) -> Part {
         let (fx, fy) = (x - view.x, y - view.y);
         let (cx, cy) = view.close_center();
+        let edges = (fx >= view.fw() - 3 && fy >= HEADER) as u8 | ((fy >= view.fh() - 3) as u8) << 1;
         if (fx - cx).pow(2) + (fy - cy).pow(2) <= (CLOSE_RADIUS + 2).pow(2) {
             Part::Close
+        } else if edges != 0 {
+            Part::Resize(edges)
         } else if fy < HEADER {
             Part::Header
         } else if view.content_rect().contains(x, y) {
@@ -470,6 +485,9 @@ impl Screen {
         if self.mouse.drag.is_some_and(|(d, _, _)| d == id) {
             self.mouse.drag = None;
         }
+        if self.mouse.resize.is_some_and(|r| r.0 == id) {
+            self.mouse.resize = None;
+        }
         self.show(view.bounds());
         if self.focus == Some(id) {
             self.focus = None;
@@ -495,7 +513,17 @@ impl Screen {
         }
         view.x = view.x.clamp(-(view.fw() - 60), screen_w - 60);
         let fill = if view.text.is_some() { PALETTE[WINDOW_BG as usize] } else { 0x262b35 };
-        view.content = vec![fill; (cw * ch) as usize];
+        // Keep what was there (top-left) until the program draws the new size.
+        let old_w = if view.content.is_empty() { 0 } else { old_fw - 2 };
+        let old_content = core::mem::replace(&mut view.content, vec![fill; (cw * ch) as usize]);
+        if old_w > 0 {
+            let old_h = old_content.len() as i32 / old_w;
+            for y in 0..old_h.min(ch) {
+                let n = old_w.min(cw) as usize;
+                let (from, to) = ((y * old_w) as usize, (y * cw) as usize);
+                view.content[to..to + n].copy_from_slice(&old_content[from..from + n]);
+            }
+        }
         view.image = vec![0; (view.iw() * view.ih()) as usize];
         self.render_text(i, true);
         self.render_frame(i);
@@ -534,7 +562,7 @@ impl Screen {
 
     // ---- the mouse ----
 
-    fn mouse_event(&mut self, dx: i32, dy: i32, buttons: u8) {
+    fn mouse_event(&mut self, dx: i32, dy: i32, buttons: u8, wheel: i32) {
         let old_pointer = self.pointer_rect();
         self.mouse.x = (self.mouse.x + dx).clamp(0, self.width as i32 - 1);
         self.mouse.y = (self.mouse.y + dy).clamp(0, self.height as i32 - 1);
@@ -544,7 +572,16 @@ impl Screen {
         let released = self.mouse.buttons & !buttons;
         self.mouse.buttons = buttons;
 
-        if let Some((id, gx, gy)) = self.mouse.drag {
+        if let Some((id, edges, sx, sy, cw, ch)) = self.mouse.resize {
+            if let Some(i) = self.index_of(id) {
+                let w = if edges & 1 != 0 { cw + mx - sx } else { cw };
+                let h = if edges & 2 != 0 { ch + my - sy } else { ch };
+                self.user_resize(i, w, h);
+            }
+            if released & 1 != 0 {
+                self.mouse.resize = None;
+            }
+        } else if let Some((id, gx, gy)) = self.mouse.drag {
             if let Some(i) = self.index_of(id) {
                 self.move_view(i, mx - gx, my - gy);
             }
@@ -552,6 +589,9 @@ impl Screen {
                 self.mouse.drag = None;
             }
         } else {
+            if wheel != 0 {
+                self.wheel(mx, my, wheel);
+            }
             self.hover(mx, my, dx != 0 || dy != 0);
             if pressed != 0 {
                 self.click(mx, my, pressed);
@@ -564,9 +604,58 @@ impl Screen {
         self.show(if was_shown { old_pointer.union(pointer) } else { pointer });
     }
 
+    /// The mouse wheel turned over a window: graphical windows get it as an event, text windows
+    /// that asked for the mouse as xterm's buttons 4 and 5.
+    fn wheel(&mut self, mx: i32, my: i32, steps: i32) {
+        let Some(i) = self.top_at(mx, my) else { return };
+        let view = &self.views[i];
+        let c = view.content_rect();
+        if !c.contains(mx, my) {
+            return;
+        }
+        if view.window.pixels.load(Ordering::Relaxed) {
+            view.window.event(event::SCROLL, mx - c.x, my - c.y, steps as u32);
+        } else if view.text.as_ref().is_some_and(|t| t.mouse_reporting) {
+            let (col, row) = ((mx - c.x - PAD).max(0) as usize / CELL_W, (my - c.y - PAD).max(0) as usize / CELL_H);
+            let code = if steps > 0 { 65 } else { 64 };
+            let text = alloc::format!("\x1b[<{};{};{}M", code, col + 1, row + 1);
+            view.window.input.lock().extend(text.as_bytes());
+            crate::proc::wake_all();
+        }
+    }
+
+    /// The user dragged an edge: a new contents size (text windows keep whole cells). Graphical
+    /// programs are told, and draw the new size.
+    fn user_resize(&mut self, i: usize, w: i32, h: i32) {
+        let (max_w, max_h) = (self.width as i32 - 2, self.height as i32 - HEADER - 1);
+        let (w, h) = (w.clamp(MIN_SIZE.0, max_w), h.clamp(MIN_SIZE.1, max_h));
+        let view = &mut self.views[i];
+        view.moved = true;
+        let (w, h) = match view.text.as_mut() {
+            Some(term) => {
+                let cols = ((w - 2 * PAD) as usize / CELL_W).max(8);
+                let rows = ((h - 2 * PAD) as usize / CELL_H).max(1);
+                if (cols, rows) == (term.cols, term.rows) {
+                    return;
+                }
+                term.resize(cols, rows);
+                text_size(term)
+            }
+            None => (w, h),
+        };
+        if (w, h) == (view.cw, view.ch) {
+            return;
+        }
+        if view.text.is_none() {
+            view.window.event(event::RESIZE, w, h, 0);
+        }
+        self.resize_view(i, w, h);
+    }
+
     /// The pointer moved: tell graphical windows, and light up close buttons.
     fn hover(&mut self, mx: i32, my: i32, moved: bool) {
         let top = self.top_at(mx, my);
+        self.mouse.resize_shape = top.is_some_and(|i| matches!(Self::part(&self.views[i], mx, my), Part::Resize(_)));
         for i in 0..self.views.len() {
             let over_close = top == Some(i) && matches!(Self::part(&self.views[i], mx, my), Part::Close);
             if self.views[i].close_hover != over_close {
@@ -606,6 +695,10 @@ impl Screen {
                 self.views[i].window.closed.store(true, Ordering::Relaxed);
                 crate::proc::wake_all();
                 self.remove(id);
+            }
+            Part::Resize(edges) if pressed & 1 != 0 => {
+                let view = &self.views[i];
+                self.mouse.resize = Some((id, edges, mx, my, view.cw, view.ch));
             }
             Part::Header | Part::Border if pressed & 1 != 0 => {
                 let view = &mut self.views[i];
@@ -659,8 +752,18 @@ impl Screen {
         self.show(old.union(new));
     }
 
+    /// The pointer's picture and where its top-left corner goes.
+    fn pointer(&self) -> (&'static [&'static [u8; POINTER_W]], i32, i32) {
+        if self.mouse.resize_shape || self.mouse.resize.is_some() {
+            (&RESIZE_POINTER, self.mouse.x - 7, self.mouse.y - 7)
+        } else {
+            (&POINTER, self.mouse.x, self.mouse.y)
+        }
+    }
+
     fn pointer_rect(&self) -> Rect {
-        Rect { x: self.mouse.x, y: self.mouse.y, w: POINTER_W as i32, h: POINTER.len() as i32 }
+        let (_, x, y) = self.pointer();
+        Rect { x, y, w: POINTER_W as i32, h: 16 }
     }
 
     // ---- drawing ----
@@ -843,9 +946,10 @@ impl Screen {
     }
 
     fn draw_pointer(&mut self, clip: Rect) {
-        for (py, row) in POINTER.iter().enumerate() {
+        let (picture, x0, y0) = self.pointer();
+        for (py, row) in picture.iter().enumerate() {
             for (px, &p) in row.iter().enumerate() {
-                let (x, y) = (self.mouse.x + px as i32, self.mouse.y + py as i32);
+                let (x, y) = (x0 + px as i32, y0 + py as i32);
                 if p == b'.' || !clip.contains(x, y) {
                     continue;
                 }
@@ -946,11 +1050,19 @@ fn mix(a: u32, b: u32, amount: u32) -> u32 {
 }
 
 // The mouse pointer: '#' outline, 'o' fill, '.' see-through. The tip is its top-left corner.
-const POINTER_W: usize = 10;
+const POINTER_W: usize = 15;
 const POINTER: [&[u8; POINTER_W]; 16] = [
-    b"#.........", b"##........", b"#o#.......", b"#oo#......", b"#ooo#.....", b"#oooo#....",
-    b"#ooooo#...", b"#oooooo#..", b"#ooooooo#.", b"#oooooooo#", b"#ooooo####", b"#oo#oo#...",
-    b"#o#.#oo#..", b"##..#oo#..", b"#....#oo#.", b".....###..",
+    b"#..............", b"##.............", b"#o#............", b"#oo#...........",
+    b"#ooo#..........", b"#oooo#.........", b"#ooooo#........", b"#oooooo#.......",
+    b"#ooooooo#......", b"#oooooooo#.....", b"#ooooo####.....", b"#oo#oo#........",
+    b"#o#.#oo#.......", b"##..#oo#.......", b"#....#oo#......", b".....###.......",
+];
+// Over a resizable edge: a diagonal double arrow, centered on the pointer.
+const RESIZE_POINTER: [&[u8; POINTER_W]; 15] = [
+    b"#####..........", b"#ooo#..........", b"#oo#...........", b"#o#o#..........",
+    b"##.#o#.........", b"....#o#........", b".....#o#.......", b"......#o#......",
+    b".......#o#.....", b"........#o#....", b".........#o#.##", b"..........#o#o#",
+    b"...........#oo#", b"..........#ooo#", b"..........#####",
 ];
 
 /// The nearest of the 16 terminal colors to an RGB color.

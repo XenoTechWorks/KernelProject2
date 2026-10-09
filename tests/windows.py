@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Windows over the console, driven with QEMU's PS/2 mouse and keyboard:
 
-- a `clock` (text) window is dragged by its header and closed with its × button;
+- a `textclock` (text) window is dragged by its header and closed with its × button;
 - another one is clicked to get the keyboard, and quit with q;
-- the `widgets` (graphical) app draws, its switch turns on when clicked, and × closes it.
+- the `widgets` (graphical) app draws, its switch turns on when clicked, it gets wider when its
+  right edge is dragged, and × closes it.
 
     python3 tests/windows.py      (OUT=dir saves screenshots there)
 """
@@ -107,10 +108,10 @@ with Machine() as m:
     p = Pointer(m)
 
     # A text window: clock is 26 columns wide.
-    clock_w = 26 * CELL_W + 2 * PAD
+    clock_w = 26 * CELL_W + 2 * PAD  # textclock
     x, y = frame_x(clock_w)
-    started = m.run("clock &")
-    check("clock & starts a background job", started is not None and "[1]" in started, started)
+    started = m.run("textclock &")
+    check("textclock & starts a background job", started is not None and "[1]" in started, started)
     time.sleep(1)
 
     # Drag it by its header 300 pixels left and 200 down, then close it with × where it is now.
@@ -126,7 +127,7 @@ with Machine() as m:
     check("dragged window closes with its × button", done is not None and "[1] Done" in done, done)
 
     # The keyboard stays with the shell until the window is clicked; then q goes to the clock.
-    m.run("clock &")
+    m.run("textclock &")
     time.sleep(1)
     p.click(x + 60, y + HEADER + 40)
     m.monitor("sendkey q")
@@ -137,7 +138,7 @@ with Machine() as m:
     # A graphical app. Its switch is the first thing in the last row (widgets.zig).
     m.run("widgets &")
     time.sleep(4)
-    widgets_w = 380
+    widgets_w = 640
     x, y = frame_x(widgets_w)
     content_x, content_y = x + 1, y + HEADER
     switch = (content_x + 24 + 12, content_y + 24 + 172 + 13)  # padding, rows above, half its height
@@ -150,10 +151,21 @@ with Machine() as m:
         m.screenshot(os.path.join(out, "windows-2.png"))
     check("graphical app draws its widgets", before != (0x1d, 0x21, 0x29), before)
     check("clicking the switch turns it on (blue)", after[2] > 180 and after[0] < 120, after)
+
+    # Make it 100 pixels wider by dragging its right edge; × moves with it.
+    edge = x + widgets_w + 2 + 2
+    p.to(edge, y + 200)
+    m.mouse(buttons=1)
+    p.to(edge + 100, y + 200)
+    m.mouse(buttons=0)
+    time.sleep(2)
+    if out:
+        m.screenshot(os.path.join(out, "windows-3.png"))
+    widgets_w += 100
     p.click(*close_button(x, y, widgets_w))
     time.sleep(1)
     done = m.run("true")
-    check("graphical window closes with ×", done is not None and "[1] Done" in done, done)
+    check("resized graphical window closes with × where it is now", done is not None and "[1] Done" in done, done)
 
 print(f"{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

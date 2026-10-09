@@ -16,3 +16,6 @@ pub const Callback = widgets.Callback;
 pub const theme = widgets.theme;
 pub const setText = widgets.setText;
 pub const getText = widgets.getText;
+pub const setItems = widgets.setItems;
+pub const selected = widgets.selected;
+pub const setProgress = widgets.setProgress;
