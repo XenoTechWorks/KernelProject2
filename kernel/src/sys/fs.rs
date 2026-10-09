@@ -96,8 +96,13 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
         Handle::Window(window) => loop {
             {
                 let mut q = window.input.lock();
+                // A graphical window's events are 16 bytes each, and only whole ones are read.
+                let unit = if window.pixels.load(Ordering::Relaxed) { 16 } else { 1 };
+                if buf.len() < unit {
+                    return Err(EINVAL);
+                }
                 if !q.is_empty() {
-                    let n = q.len().min(buf.len());
+                    let n = q.len().min(buf.len()) / unit * unit;
                     for (i, b) in q.drain(..n).enumerate() {
                         buf[i] = b;
                     }
@@ -534,9 +539,37 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
     if let Handle::Window(window) = &file.handle {
         return match request {
             TIOCGWINSZ => {
-                let (cols, rows) = crate::console::window_size(window.id);
-                let ws: [u16; 4] = [rows as u16, cols as u16, 0, 0];
+                let (cols, rows, w, h) = crate::console::window_size(window.id);
+                let ws: [u16; 4] = [rows as u16, cols as u16, w as u16, h as u16];
                 user::write_struct(p.space(), arg, &ws)?;
+                Ok(0)
+            }
+            // Graphical windows: the program draws pixels itself. See console.rs.
+            WINDOW_PIXELS => {
+                let [w, h]: [u32; 2] = user::read_struct(p.space(), arg)?;
+                let (w, h) = crate::console::window_set_pixels(window.id, w, h).ok_or(EINVAL)?;
+                user::write_struct(p.space(), arg, &[w, h])?;
+                Ok(0)
+            }
+            WINDOW_TITLE => {
+                let title = user::read_cstr(p.space(), arg, 256)?;
+                crate::console::window_set_title(window.id, &title);
+                Ok(0)
+            }
+            WINDOW_BLIT => {
+                let b: Blit = user::read_struct(p.space(), arg)?;
+                if b.w > 4096 || b.h > 4096 || b.stride < b.w {
+                    return Err(EINVAL);
+                }
+                let mut pixels = vec![0u32; (b.w * b.h) as usize];
+                let mut row = vec![0u8; b.w as usize * 4];
+                for y in 0..b.h as usize {
+                    user::read(p.space(), b.pixels + (y * b.stride as usize * 4) as u64, &mut row)?;
+                    for (x, px) in row.chunks_exact(4).enumerate() {
+                        pixels[y * b.w as usize + x] = u32::from_le_bytes([px[0], px[1], px[2], px[3]]);
+                    }
+                }
+                crate::console::window_blit(window.id, b.x as i32, b.y as i32, b.w as i32, b.h as i32, &pixels);
                 Ok(0)
             }
             FIONREAD => {
@@ -582,6 +615,24 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
         }
         _ => Err(EINVAL),
     }
+}
+
+const WINDOW_PIXELS: u32 = 0x5701;
+const WINDOW_TITLE: u32 = 0x5702;
+const WINDOW_BLIT: u32 = 0x5703;
+
+/// The WINDOW_BLIT argument: a w x h piece of a picture in the program's memory (rows `stride`
+/// pixels apart), for (x, y) in the window.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+struct Blit {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    stride: u32,
+    _pad: u32,
+    pixels: u64,
 }
 
 pub fn fcntl(fd: i32, cmd: u32, arg: u64) -> SysResult {

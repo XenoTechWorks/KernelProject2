@@ -1,17 +1,21 @@
 //! The screen: the text console on the boot framebuffer, and windows on top of it.
 //!
 //! The console is a terminal (term.rs) filling the screen. A program can also open `/dev/window`
-//! to get a window: a small terminal of its own, in a frame with a title and a close button,
-//! floating over the console. Windows can be dragged by their title with the mouse; clicking one
-//! raises it and sends it the keyboard. Everything is drawn in character cells, so a window is
-//! just more text on the same screen, not a separate desktop.
+//! to get a window floating over the console, in a frame with a title, a close button and a soft
+//! shadow. A window shows either a small terminal of its own (what the program writes), or pixels
+//! the program draws itself (after the WINDOW_PIXELS ioctl), which is what graphical apps use.
+//! Windows are dragged by their header with the mouse; clicking one raises it and gives it the
+//! keyboard. It's not a desktop: the command line stays underneath.
 //!
-//! Painting composes one cell at a time: the topmost window covering a cell wins, else the
-//! console; the mouse pointer is drawn over that.
+//! This is a small compositor. The console is drawn into its own layer of pixels, and each window
+//! into its own image (frame, shadow and contents, with alpha at the edges). Showing part of the
+//! screen blends them, bottom to top, into a back buffer, then copies that to the framebuffer.
 
 use crate::term::{Cell, Term};
 use alloc::collections::VecDeque;
+use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
@@ -29,60 +33,166 @@ const CONSOLE_BG: u8 = 0;
 const WINDOW_BG: u8 = 16;
 const DEFAULT_WINDOW: (usize, usize) = (40, 10);
 
+// Window frames, in pixels.
+const HEADER: i32 = 34;
+const RADIUS: i32 = 10;
+const SHADOW: i32 = 14;
+const SHADOW_DROP: i32 = 3;
+const SHADOW_ALPHA: i32 = 100;
+const PAD: i32 = 6; // around a text window's cells
+const CLOSE_RADIUS: i32 = 9;
+
+const HEADER_COLOR: [u32; 2] = [0x23272f, 0x2c313c]; // [unfocused, focused]
+const BORDER_COLOR: [u32; 2] = [0x353b47, 0x4b5365];
+const TITLE_COLOR: [u32; 2] = [0x8b93a1, 0xe6e9ef];
+const CLOSE_COLOR: u32 = 0x3a404d;
+const CLOSE_HOVER: u32 = 0xe06c75;
+
+/// Events a graphical window's program reads, 16 bytes each: kind, x, y, data (all 32-bit).
+pub mod event {
+    pub const MOTION: u32 = 1; // the pointer moved over the window (x, y in its pixels)
+    pub const PRESS: u32 = 2; // a mouse button went down (data: 1 left, 2 right, 3 middle)
+    pub const RELEASE: u32 = 3;
+    pub const KEY: u32 = 4; // data: the key (see keyboard.rs), x: modifiers (1 shift, 2 ctrl)
+    pub const LEAVE: u32 = 5; // the pointer left the window
+    pub const FOCUS: u32 = 6; // data: 1 got the keyboard, 0 lost it
+}
+
 /// The part of a window the rest of the kernel sees: what was typed into it, and whether the user
 /// closed it.
 pub struct Window {
     pub id: u32,
     pub input: Mutex<VecDeque<u8>>,
     pub closed: AtomicBool,
+    /// The program draws pixels (and reads events) rather than writing text.
+    pub pixels: AtomicBool,
+}
+
+impl Window {
+    fn event(&self, kind: u32, x: i32, y: i32, data: u32) {
+        let mut q = self.input.lock();
+        for word in [kind, x as u32, y as u32, data] {
+            q.extend(word.to_le_bytes());
+        }
+        crate::proc::wake_all();
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Rect {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+impl Rect {
+    fn right(self) -> i32 {
+        self.x + self.w
+    }
+    fn bottom(self) -> i32 {
+        self.y + self.h
+    }
+    fn contains(self, x: i32, y: i32) -> bool {
+        x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
+    }
+    fn intersect(self, o: Rect) -> Option<Rect> {
+        let (x0, y0) = (self.x.max(o.x), self.y.max(o.y));
+        let (x1, y1) = (self.right().min(o.right()), self.bottom().min(o.bottom()));
+        (x1 > x0 && y1 > y0).then_some(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+    }
+    fn union(self, o: Rect) -> Rect {
+        let (x0, y0) = (self.x.min(o.x), self.y.min(o.y));
+        Rect { x: x0, y: y0, w: self.right().max(o.right()) - x0, h: self.bottom().max(o.bottom()) - y0 }
+    }
 }
 
 struct View {
     window: Arc<Window>,
-    /// Top-left corner of the frame, in cells.
-    x: usize,
-    y: usize,
-    term: Term,
+    /// Top-left corner of the frame, on the screen.
+    x: i32,
+    y: i32,
+    /// Size of the contents, in pixels.
+    cw: i32,
+    ch: i32,
+    /// A text window's terminal; None when the program draws pixels.
+    text: Option<Term>,
+    title: String,
+    /// The contents, as opaque pixels (cw x ch).
+    content: Vec<u32>,
+    /// Frame, shadow and contents: premultiplied ARGB, iw() x ih().
+    image: Vec<u32>,
+    /// Hidden until the program first draws something (so it doesn't flash at the default size).
+    visible: bool,
+    /// The user dragged it (until then it stays centered on where it opened when it changes size).
+    moved: bool,
+    close_hover: bool,
 }
 
 impl View {
-    fn width(&self) -> usize {
-        self.term.cols + 2
+    fn fw(&self) -> i32 {
+        self.cw + 2
     }
-    fn height(&self) -> usize {
-        self.term.rows + 2
+    fn fh(&self) -> i32 {
+        self.ch + HEADER + 1
     }
-    fn contains(&self, x: usize, y: usize) -> bool {
-        x >= self.x && x < self.x + self.width() && y >= self.y && y < self.y + self.height()
+    fn iw(&self) -> i32 {
+        self.fw() + 2 * SHADOW
+    }
+    fn ih(&self) -> i32 {
+        self.fh() + 2 * SHADOW
+    }
+    fn frame(&self) -> Rect {
+        Rect { x: self.x, y: self.y, w: self.fw(), h: self.fh() }
+    }
+    fn bounds(&self) -> Rect {
+        Rect { x: self.x - SHADOW, y: self.y - SHADOW, w: self.iw(), h: self.ih() }
+    }
+    fn content_rect(&self) -> Rect {
+        Rect { x: self.x + 1, y: self.y + HEADER, w: self.cw, h: self.ch }
+    }
+    /// Center of the close button, in frame coordinates.
+    fn close_center(&self) -> (i32, i32) {
+        (self.fw() - 20, HEADER / 2)
     }
 }
 
-/// Where a cell falls in a window.
+/// Where a point falls in a window.
 enum Part {
-    Title,
     Close,
+    Header,
     Border,
-    Content(usize, usize),
+    /// In the contents, at these pixel coordinates.
+    Content(i32, i32),
 }
 
 #[derive(Default)]
 struct Mouse {
-    /// Position in pixels.
-    x: usize,
-    y: usize,
+    x: i32,
+    y: i32,
     buttons: u8,
     /// Hidden until the mouse first moves (so there's no pointer on machines without one).
     shown: bool,
     /// Dragging a window: its id, and where in the frame it was grabbed.
-    drag: Option<(u32, usize, usize)>,
+    drag: Option<(u32, i32, i32)>,
+    /// The window a button was pressed in: it gets the motion and the release, even outside.
+    grab: Option<u32>,
+    /// The graphical window the pointer is over (to tell it when the pointer leaves).
+    hover: Option<u32>,
 }
 
 pub struct Screen {
     fb: *mut u32,
     pitch: usize, // in pixels
+    width: usize,
+    height: usize,
     cols: usize,
     rows: usize,
     console: Term,
+    /// The console, drawn (width x height).
+    layer: Vec<u32>,
+    /// Where a piece of the screen is put together before it goes to the framebuffer.
+    back: Vec<u32>,
     /// Bottom to top.
     views: Vec<View>,
     /// The window that gets the keyboard; None is the console.
@@ -99,22 +209,28 @@ pub fn init(fb: &limine::framebuffer::Framebuffer) {
     if fb.bpp != 32 {
         return;
     }
-    let cols = fb.width as usize / CELL_W;
-    let rows = fb.height as usize / CELL_H;
+    let (width, height) = (fb.width as usize, fb.height as usize);
+    let cols = width / CELL_W;
+    let rows = height / CELL_H;
     let mut console = Term::new(cols, rows, CONSOLE_BG);
     console.count_scrolls = true;
     let mut screen = Screen {
         fb: fb.address() as *mut u32,
         pitch: fb.pitch as usize / 4,
+        width,
+        height,
         cols,
         rows,
         console,
+        layer: vec![PALETTE[CONSOLE_BG as usize]; width * height],
+        back: vec![0; width * height],
         views: Vec::new(),
         focus: None,
         mouse: Mouse::default(),
         next_id: 1,
     };
     screen.flush_console();
+    screen.show(screen.screen_rect());
     *CONSOLE.lock() = Some(screen);
 }
 
@@ -140,11 +256,13 @@ pub fn try_write(bytes: &[u8]) {
     }
 }
 
-/// Keys typed on the keyboard: to the focused window, or to the console's tty. (The serial port
+/// A key pressed on the keyboard: `bytes` is what a terminal gets, `key` and `mods` what a
+/// graphical window gets. Goes to the focused window, or to the console's tty. (The serial port
 /// always goes to the tty: it can't see windows.)
-pub fn input(bytes: &[u8]) {
+pub fn key(bytes: &[u8], key: u32, mods: u32) {
     let target = CONSOLE.lock().as_ref().and_then(|s| s.focused()).map(|v| v.window.clone());
     match target {
+        Some(window) if window.pixels.load(Ordering::Relaxed) => window.event(event::KEY, mods as i32, 0, key),
         Some(window) => {
             window.input.lock().extend(bytes);
             crate::proc::wake_all();
@@ -156,12 +274,10 @@ pub fn input(bytes: &[u8]) {
 /// Moves the keyboard to the next window (and after the last one, back to the console).
 pub fn cycle_focus() {
     if let Some(screen) = CONSOLE.lock().as_mut() {
-        let next = match screen.focus {
-            None => screen.views.first().map(|v| v.window.id),
-            Some(id) => {
-                let i = screen.index_of(id).unwrap_or(0);
-                screen.views.get(i + 1).map(|v| v.window.id)
-            }
+        let visible: Vec<u32> = screen.views.iter().filter(|v| v.visible).map(|v| v.window.id).collect();
+        let next = match screen.focus.and_then(|id| visible.iter().position(|&v| v == id)) {
+            None => visible.first().copied(),
+            Some(i) => visible.get(i + 1).copied(),
         };
         screen.set_focus(next);
     }
@@ -172,16 +288,37 @@ pub fn cycle_focus() {
 pub fn open_window() -> Option<Arc<Window>> {
     let mut guard = CONSOLE.lock();
     let screen = guard.as_mut()?;
-    let window = Arc::new(Window { id: screen.next_id, input: Mutex::new(VecDeque::new()), closed: AtomicBool::new(false) });
+    let window = Arc::new(Window {
+        id: screen.next_id,
+        input: Mutex::new(VecDeque::new()),
+        closed: AtomicBool::new(false),
+        pixels: AtomicBool::new(false),
+    });
     screen.next_id += 1;
     let (cols, rows) = DEFAULT_WINDOW;
-    let term = Term::new(cols.min(screen.cols - 2), rows.min(screen.rows - 2), WINDOW_BG);
+    let term = Term::new(cols.min(screen.cols - 4), rows.min(screen.rows - 6), WINDOW_BG);
+    let n = screen.views.len() as i32;
+    let mut view = View {
+        window: window.clone(),
+        x: 0,
+        y: 0,
+        cw: 0,
+        ch: 0,
+        text: Some(term),
+        title: String::new(),
+        content: Vec::new(),
+        image: Vec::new(),
+        visible: false,
+        moved: false,
+        close_hover: false,
+    };
+    let (cw, ch) = text_size(view.text.as_ref().unwrap());
     // Each new window a little below and right of the last, so they don't hide each other.
-    let n = screen.views.len();
-    let x = (screen.cols.saturating_sub(cols + 2) / 2 + 3 * n) % screen.cols.saturating_sub(cols + 1).max(1);
-    let y = (2 + 2 * n) % screen.rows.saturating_sub(rows + 1).max(1);
-    screen.views.push(View { window: window.clone(), x, y, term });
-    screen.repaint_view(screen.views.len() - 1);
+    view.x = (screen.width as i32 - (cw + 2)) / 2 + 32 * (n % 8);
+    view.y = 64 + 32 * (n % 8);
+    screen.views.push(view);
+    let i = screen.views.len() - 1;
+    screen.resize_view(i, cw, ch);
     Some(window)
 }
 
@@ -192,18 +329,61 @@ pub fn close_window(id: u32) {
     }
 }
 
-/// Output from a window's program.
+/// Output from a text window's program.
 pub fn window_write(id: u32, bytes: &[u8]) {
     if let Some(screen) = CONSOLE.lock().as_mut() {
         screen.window_write(id, bytes);
     }
 }
 
-/// A window's size in columns and rows.
-pub fn window_size(id: u32) -> (usize, usize) {
+/// A window's size: (columns, rows, width, height in pixels).
+pub fn window_size(id: u32) -> (usize, usize, usize, usize) {
     let guard = CONSOLE.lock();
     let view = guard.as_ref().and_then(|s| s.index_of(id).map(|i| &s.views[i]));
-    view.map_or(DEFAULT_WINDOW, |v| (v.term.cols, v.term.rows))
+    view.map_or((DEFAULT_WINDOW.0, DEFAULT_WINDOW.1, 0, 0), |v| {
+        let (cols, rows) = v.text.as_ref().map_or((0, 0), |t| (t.cols, t.rows));
+        (cols, rows, v.cw as usize, v.ch as usize)
+    })
+}
+
+/// Makes a window graphical, with contents of this many pixels. Returns the size it got (no larger
+/// than the screen).
+pub fn window_set_pixels(id: u32, w: u32, h: u32) -> Option<(u32, u32)> {
+    let mut guard = CONSOLE.lock();
+    let screen = guard.as_mut()?;
+    let i = screen.index_of(id)?;
+    let w = (w as i32).clamp(16, screen.width as i32 - 2);
+    let h = (h as i32).clamp(16, screen.height as i32 - HEADER - 1);
+    let view = &mut screen.views[i];
+    view.text = None;
+    view.window.pixels.store(true, Ordering::Relaxed);
+    screen.resize_view(i, w, h);
+    Some((w as u32, h as u32))
+}
+
+pub fn window_set_title(id: u32, title: &str) {
+    if let Some(screen) = CONSOLE.lock().as_mut() {
+        if let Some(i) = screen.index_of(id) {
+            screen.views[i].title = String::from(title);
+            screen.refresh_frame(i);
+        }
+    }
+}
+
+/// New pixels for part of a graphical window: w x h of them, row by row.
+pub fn window_blit(id: u32, x: i32, y: i32, w: i32, h: i32, pixels: &[u32]) {
+    if let Some(screen) = CONSOLE.lock().as_mut() {
+        if let Some(i) = screen.index_of(id) {
+            let view = &mut screen.views[i];
+            let Some(r) = (Rect { x, y, w, h }).intersect(Rect { x: 0, y: 0, w: view.cw, h: view.ch }) else { return };
+            for row in r.y..r.bottom() {
+                let from = ((row - y) * w + (r.x - x)) as usize;
+                let to = (row * view.cw + r.x) as usize;
+                view.content[to..to + r.w as usize].copy_from_slice(&pixels[from..from + r.w as usize]);
+            }
+            screen.content_changed(i, r);
+        }
+    }
 }
 
 /// The mouse moved by (dx, dy) pixels (down is positive) with these buttons held (bit 0 left,
@@ -214,7 +394,16 @@ pub fn mouse(dx: i32, dy: i32, buttons: u8) {
     }
 }
 
+/// The contents size of a text window: its cells plus padding.
+fn text_size(term: &Term) -> (i32, i32) {
+    ((term.cols * CELL_W) as i32 + 2 * PAD, (term.rows * CELL_H) as i32 + 2 * PAD)
+}
+
 impl Screen {
+    fn screen_rect(&self) -> Rect {
+        Rect { x: 0, y: 0, w: self.width as i32, h: self.height as i32 }
+    }
+
     fn index_of(&self, id: u32) -> Option<usize> {
         self.views.iter().position(|v| v.window.id == id)
     }
@@ -223,317 +412,537 @@ impl Screen {
         self.focus.and_then(|id| self.index_of(id)).map(|i| &self.views[i])
     }
 
-    /// The topmost window covering a cell.
-    fn top_at(&self, x: usize, y: usize) -> Option<usize> {
-        self.views.iter().rposition(|v| v.contains(x, y))
+    /// The topmost visible window whose frame covers a point.
+    fn top_at(&self, x: i32, y: i32) -> Option<usize> {
+        self.views.iter().rposition(|v| v.visible && v.frame().contains(x, y))
     }
 
-    fn part(view: &View, x: usize, y: usize) -> Part {
+    fn part(view: &View, x: i32, y: i32) -> Part {
         let (fx, fy) = (x - view.x, y - view.y);
-        if fy == 0 {
-            if fx == view.width() - 3 { Part::Close } else { Part::Title }
-        } else if fx == 0 || fy == view.height() - 1 || fx == view.width() - 1 {
-            Part::Border
+        let (cx, cy) = view.close_center();
+        if (fx - cx).pow(2) + (fy - cy).pow(2) <= (CLOSE_RADIUS + 2).pow(2) {
+            Part::Close
+        } else if fy < HEADER {
+            Part::Header
+        } else if view.content_rect().contains(x, y) {
+            Part::Content(fx - 1, fy - HEADER)
         } else {
-            Part::Content(fx - 1, fy - 1)
+            Part::Border
         }
     }
 
     fn set_focus(&mut self, focus: Option<u32>) {
         let old = core::mem::replace(&mut self.focus, focus);
-        for id in [old, focus].into_iter().flatten() {
-            if let Some(i) = self.index_of(id) {
-                self.repaint_view(i);
+        if old == focus {
+            return;
+        }
+        for (id, now) in [(old, false), (focus, true)] {
+            let Some(i) = id.and_then(|id| self.index_of(id)) else { continue };
+            if self.views[i].window.pixels.load(Ordering::Relaxed) {
+                self.views[i].window.event(event::FOCUS, 0, 0, now as u32);
             }
+            // The frame's colors change, and a text window's cursor shows only while focused.
+            self.render_text(i, true);
+            self.refresh_frame(i);
         }
         // The console's cursor shows only while it has the keyboard.
         let (x, y) = self.console.cursor();
-        self.repaint_rect(x, y, 1, 1);
+        self.console.dirty[y * self.cols + x] = true;
+        self.flush_console();
     }
 
     fn raise(&mut self, i: usize) -> usize {
         let view = self.views.remove(i);
+        let bounds = view.bounds();
         self.views.push(view);
-        let top = self.views.len() - 1;
-        self.repaint_view(top);
-        top
+        self.show(bounds);
+        self.views.len() - 1
     }
 
     fn remove(&mut self, id: u32) {
         let Some(i) = self.index_of(id) else { return };
         let view = self.views.remove(i);
+        for slot in [&mut self.mouse.grab, &mut self.mouse.hover] {
+            if *slot == Some(id) {
+                *slot = None;
+            }
+        }
         if self.mouse.drag.is_some_and(|(d, _, _)| d == id) {
             self.mouse.drag = None;
         }
-        self.repaint_rect(view.x, view.y, view.width(), view.height());
+        self.show(view.bounds());
         if self.focus == Some(id) {
-            self.set_focus(self.views.last().map(|v| v.window.id));
+            self.focus = None;
+            let next = self.views.iter().rev().find(|v| v.visible).map(|v| v.window.id);
+            self.set_focus(next);
+            if next.is_none() {
+                let (x, y) = self.console.cursor();
+                self.console.dirty[y * self.cols + x] = true;
+                self.flush_console();
+            }
+        }
+    }
+
+    /// Gives a window new contents size (keeping its center until the user has moved it).
+    fn resize_view(&mut self, i: usize, cw: i32, ch: i32) {
+        let screen_w = self.width as i32;
+        let view = &mut self.views[i];
+        let old = view.bounds();
+        let old_fw = view.fw();
+        (view.cw, view.ch) = (cw, ch);
+        if !view.moved && !view.content.is_empty() {
+            view.x += (old_fw - view.fw()) / 2;
+        }
+        view.x = view.x.clamp(-(view.fw() - 60), screen_w - 60);
+        let fill = if view.text.is_some() { PALETTE[WINDOW_BG as usize] } else { 0x262b35 };
+        view.content = vec![fill; (cw * ch) as usize];
+        view.image = vec![0; (view.iw() * view.ih()) as usize];
+        self.render_text(i, true);
+        self.render_frame(i);
+        if self.views[i].visible {
+            let new = self.views[i].bounds();
+            self.show(old.union(new));
         }
     }
 
     fn window_write(&mut self, id: u32, bytes: &[u8]) {
         let Some(i) = self.index_of(id) else { return };
         let view = &mut self.views[i];
-        let title = view.term.title.clone();
-        view.term.write(bytes);
-        if let Some((cols, rows)) = view.term.size_request.take() {
-            let (cols, rows) = (cols.clamp(8, self.cols - 2), rows.clamp(1, self.rows - 2));
-            if (cols, rows) != (view.term.cols, view.term.rows) {
-                let (x, y, w, h) = (view.x, view.y, view.width(), view.height());
-                view.term.resize(cols, rows);
-                view.x = view.x.min(self.cols - view.width());
-                view.y = view.y.min(self.rows - view.height());
-                self.repaint_rect(x, y, w, h);
-                self.repaint_view(i);
-                return;
+        let Some(term) = view.text.as_mut() else { return };
+        term.write(bytes);
+        if let Some((cols, rows)) = term.size_request.take() {
+            let cols = cols.clamp(8, self.cols - 4);
+            let rows = rows.clamp(1, self.rows - 6);
+            if (cols, rows) != (term.cols, term.rows) {
+                term.resize(cols, rows);
+                let (cw, ch) = text_size(term);
+                self.resize_view(i, cw, ch);
             }
         }
-        if view.term.title != title {
-            let (x, y, w) = (view.x, view.y, view.width());
-            self.repaint_rect(x, y, w, 1);
+        let view = &mut self.views[i];
+        let term = view.text.as_ref().unwrap();
+        if term.title != view.title {
+            view.title = term.title.clone();
+            self.refresh_frame(i);
         }
-        self.flush_view(i);
+        let changed = self.render_text(i, false);
+        if changed.is_some() || !self.views[i].visible {
+            let all = Rect { x: 0, y: 0, w: self.views[i].cw, h: self.views[i].ch };
+            self.content_changed(i, changed.unwrap_or(all));
+        }
     }
 
     // ---- the mouse ----
 
     fn mouse_event(&mut self, dx: i32, dy: i32, buttons: u8) {
-        let (old_x, old_y) = (self.mouse.x, self.mouse.y);
-        let max_x = (self.cols * CELL_W) as i32 - 1;
-        let max_y = (self.rows * CELL_H) as i32 - 1;
-        self.mouse.x = (old_x as i32 + dx).clamp(0, max_x) as usize;
-        self.mouse.y = (old_y as i32 + dy).clamp(0, max_y) as usize;
+        let old_pointer = self.pointer_rect();
+        self.mouse.x = (self.mouse.x + dx).clamp(0, self.width as i32 - 1);
+        self.mouse.y = (self.mouse.y + dy).clamp(0, self.height as i32 - 1);
         let was_shown = core::mem::replace(&mut self.mouse.shown, true);
-        if was_shown {
-            self.repaint_pointer(old_x, old_y);
-        }
-        let (cx, cy) = (self.mouse.x / CELL_W, self.mouse.y / CELL_H);
-
+        let (mx, my) = (self.mouse.x, self.mouse.y);
         let pressed = buttons & !self.mouse.buttons;
         let released = self.mouse.buttons & !buttons;
         self.mouse.buttons = buttons;
 
         if let Some((id, gx, gy)) = self.mouse.drag {
             if let Some(i) = self.index_of(id) {
-                self.move_view(i, cx.saturating_sub(gx), cy.saturating_sub(gy));
+                self.move_view(i, mx - gx, my - gy);
             }
             if released & 1 != 0 {
                 self.mouse.drag = None;
             }
-        } else if pressed != 0 {
-            self.click(cx, cy, pressed);
-        } else if released != 0 || buttons != 0 {
-            // Releases and drags inside a window go to its program if it asked for the mouse.
-            if let Some(i) = self.top_at(cx, cy).filter(|&i| Some(self.views[i].window.id) == self.focus) {
-                if let Part::Content(x, y) = Self::part(&self.views[i], cx, cy) {
-                    let button = if released != 0 { released } else { buttons };
-                    self.report(i, button, x, y, released != 0, released == 0);
-                }
+        } else {
+            self.hover(mx, my, dx != 0 || dy != 0);
+            if pressed != 0 {
+                self.click(mx, my, pressed);
+            }
+            if released != 0 {
+                self.release(mx, my, released);
             }
         }
-        self.repaint_pointer(self.mouse.x, self.mouse.y);
+        let pointer = self.pointer_rect();
+        self.show(if was_shown { old_pointer.union(pointer) } else { pointer });
     }
 
-    fn click(&mut self, cx: usize, cy: usize, pressed: u8) {
-        let Some(i) = self.top_at(cx, cy) else {
+    /// The pointer moved: tell graphical windows, and light up close buttons.
+    fn hover(&mut self, mx: i32, my: i32, moved: bool) {
+        let top = self.top_at(mx, my);
+        for i in 0..self.views.len() {
+            let over_close = top == Some(i) && matches!(Self::part(&self.views[i], mx, my), Part::Close);
+            if self.views[i].close_hover != over_close {
+                self.views[i].close_hover = over_close;
+                self.refresh_frame(i);
+            }
+        }
+        // While a button is held, the window it was pressed in gets the motion, wherever it goes.
+        let target = match self.mouse.grab {
+            Some(id) => self.index_of(id),
+            None => top.filter(|&i| self.views[i].content_rect().contains(mx, my)),
+        };
+        let target = target.filter(|&i| self.views[i].window.pixels.load(Ordering::Relaxed));
+        let target_id = target.map(|i| self.views[i].window.id);
+        if self.mouse.hover != target_id {
+            if let Some(i) = self.mouse.hover.and_then(|id| self.index_of(id)) {
+                self.views[i].window.event(event::LEAVE, 0, 0, 0);
+            }
+            self.mouse.hover = target_id;
+        }
+        if let (Some(i), true) = (target, moved) {
+            let c = self.views[i].content_rect();
+            self.views[i].window.event(event::MOTION, mx - c.x, my - c.y, 0);
+        }
+    }
+
+    fn click(&mut self, mx: i32, my: i32, pressed: u8) {
+        let Some(i) = self.top_at(mx, my) else {
             return self.set_focus(None);
         };
         let i = if i + 1 == self.views.len() { i } else { self.raise(i) };
         let id = self.views[i].window.id;
         self.set_focus(Some(id));
-        match Self::part(&self.views[i], cx, cy) {
+        match Self::part(&self.views[i], mx, my) {
             Part::Close if pressed & 1 != 0 => {
                 // Closing tells the program (its reads end); the window goes away now.
                 self.views[i].window.closed.store(true, Ordering::Relaxed);
                 crate::proc::wake_all();
                 self.remove(id);
             }
-            Part::Title | Part::Border if pressed & 1 != 0 => {
-                let view = &self.views[i];
-                self.mouse.drag = Some((id, cx - view.x, cy - view.y));
+            Part::Header | Part::Border if pressed & 1 != 0 => {
+                let view = &mut self.views[i];
+                view.moved = true;
+                self.mouse.drag = Some((id, mx - view.x, my - view.y));
             }
-            Part::Content(x, y) => self.report(i, pressed, x, y, false, false),
+            Part::Content(x, y) => {
+                self.mouse.grab = Some(id);
+                self.button_event(i, pressed, x, y, false);
+            }
             _ => {}
         }
     }
 
-    /// Sends a mouse event to a window's program as an xterm SGR report: ESC [ < b ; x ; y M/m.
-    fn report(&mut self, i: usize, buttons: u8, x: usize, y: usize, release: bool, motion: bool) {
-        let view = &self.views[i];
-        if !view.term.mouse_reporting {
-            return;
+    fn release(&mut self, mx: i32, my: i32, released: u8) {
+        if let Some(i) = self.mouse.grab.and_then(|id| self.index_of(id)) {
+            let c = self.views[i].content_rect();
+            self.button_event(i, released, mx - c.x, my - c.y, true);
         }
-        let button = if buttons & 1 != 0 { 0 } else if buttons & 4 != 0 { 1 } else { 2 };
-        let code = button + if motion { 32 } else { 0 };
-        let text = alloc::format!("\x1b[<{};{};{}{}", code, x + 1, y + 1, if release { 'm' } else { 'M' });
-        view.window.input.lock().extend(text.as_bytes());
-        crate::proc::wake_all();
+        if self.mouse.buttons == 0 {
+            self.mouse.grab = None;
+        }
     }
 
-    fn move_view(&mut self, i: usize, x: usize, y: usize) {
+    /// A button pressed or released in a window's contents: an event for a graphical window, an
+    /// xterm SGR report (ESC [ < b ; x ; y M/m) for a text window that asked for the mouse.
+    fn button_event(&mut self, i: usize, buttons: u8, x: i32, y: i32, release: bool) {
+        let view = &self.views[i];
+        let (number, sgr) = if buttons & 1 != 0 { (1, 0) } else if buttons & 2 != 0 { (2, 2) } else { (3, 1) };
+        if view.window.pixels.load(Ordering::Relaxed) {
+            view.window.event(if release { event::RELEASE } else { event::PRESS }, x, y, number);
+        } else if view.text.as_ref().is_some_and(|t| t.mouse_reporting) {
+            let (col, row) = ((x - PAD).max(0) as usize / CELL_W, (y - PAD).max(0) as usize / CELL_H);
+            let text = alloc::format!("\x1b[<{};{};{}{}", sgr, col + 1, row + 1, if release { 'm' } else { 'M' });
+            view.window.input.lock().extend(text.as_bytes());
+            crate::proc::wake_all();
+        }
+    }
+
+    fn move_view(&mut self, i: usize, x: i32, y: i32) {
+        let (w, h) = (self.width as i32, self.height as i32);
         let view = &mut self.views[i];
-        let (x, y) = (x.min(self.cols - view.width()), y.min(self.rows - view.height()));
+        // Keep enough of the header on the screen to grab it again.
+        let (x, y) = (x.clamp(-(view.fw() - 60), w - 60), y.clamp(0, h - HEADER));
         if (x, y) == (view.x, view.y) {
             return;
         }
-        let (old_x, old_y, w, h) = (view.x, view.y, view.width(), view.height());
+        let old = view.bounds();
         (view.x, view.y) = (x, y);
-        self.repaint_rect(old_x, old_y, w, h);
-        self.repaint_view(i);
+        let new = view.bounds();
+        self.show(old.union(new));
     }
 
-    // ---- painting ----
+    fn pointer_rect(&self) -> Rect {
+        Rect { x: self.mouse.x, y: self.mouse.y, w: POINTER_W as i32, h: POINTER.len() as i32 }
+    }
 
-    /// Paints the console's changed cells. When it scrolled, the pixels are moved up instead of
-    /// repainting everything, then whatever floated over the console is repainted.
+    // ---- drawing ----
+
+    /// Draws the console's changed cells. When it scrolled, its pixels move up instead.
     fn flush_console(&mut self) {
         let scrolled = core::mem::take(&mut self.console.scrolled);
         if scrolled >= self.rows {
             self.console.dirty.fill(true);
         } else if scrolled > 0 {
-            let lines = scrolled * CELL_H;
-            unsafe {
-                core::ptr::copy(self.fb.add(lines * self.pitch), self.fb, (self.rows * CELL_H - lines) * self.pitch);
-            }
+            let shift = scrolled * CELL_H * self.width;
+            let len = self.layer.len();
+            self.layer.copy_within(shift..len, 0);
         }
+        let mut spans: Vec<(usize, usize, usize)> = Vec::new(); // (row, first column, last column)
         for i in 0..self.console.dirty.len() {
             if core::mem::take(&mut self.console.dirty[i]) {
                 let (x, y) = (i % self.cols, i / self.cols);
-                if self.top_at(x, y).is_none() {
-                    self.paint_cell(x, y);
+                self.paint_console_cell(x, y);
+                match spans.last_mut() {
+                    Some(span) if span.0 == y => span.2 = x,
+                    _ => spans.push((y, x, x)),
                 }
             }
         }
-        if scrolled > 0 && scrolled < self.rows {
-            // Windows and the pointer moved up with the pixels: put them back, and repaint what
-            // they left behind.
-            for i in 0..self.views.len() {
-                let v = &self.views[i];
-                let top = v.y.saturating_sub(scrolled);
-                self.repaint_rect(v.x, top, v.width(), v.y + v.height() - top);
-            }
-            if self.mouse.shown {
-                let (cx, cy) = (self.mouse.x / CELL_W, self.mouse.y / CELL_H);
-                let top = cy.saturating_sub(scrolled);
-                self.repaint_rect(cx, top, 3, cy + 2 - top);
+        if scrolled > 0 {
+            self.show(self.screen_rect());
+        } else {
+            for (y, x0, x1) in spans {
+                let r = Rect { x: (x0 * CELL_W) as i32, y: (y * CELL_H) as i32, w: ((x1 - x0 + 1) * CELL_W) as i32, h: CELL_H as i32 };
+                self.show(r);
             }
         }
     }
 
-    /// Paints a window's changed cells.
-    fn flush_view(&mut self, i: usize) {
-        for c in 0..self.views[i].term.dirty.len() {
-            let view = &mut self.views[i];
-            if core::mem::take(&mut view.term.dirty[c]) {
-                let (x, y) = (view.x + 1 + c % view.term.cols, view.y + 1 + c / view.term.cols);
-                if self.top_at(x, y) == Some(i) {
-                    self.paint_cell(x, y);
-                }
-            }
-        }
+    fn paint_console_cell(&mut self, x: usize, y: usize) {
+        let cell = self.console.cells[y * self.cols + x];
+        let cursor = self.focus.is_none() && self.console.cursor_visible && self.console.cursor() == (x, y);
+        let at = y * CELL_H * self.width + x * CELL_W;
+        let width = self.width;
+        draw_glyph(&mut self.layer[at..], width, cell, cursor);
     }
 
-    fn repaint_view(&mut self, i: usize) {
-        let v = &mut self.views[i];
-        v.term.dirty.fill(false);
-        let (x, y, w, h) = (v.x, v.y, v.width(), v.height());
-        self.repaint_rect(x, y, w, h);
-    }
-
-    fn repaint_rect(&mut self, x: usize, y: usize, w: usize, h: usize) {
-        for cy in y..(y + h).min(self.rows) {
-            for cx in x..(x + w).min(self.cols) {
-                self.paint_cell(cx, cy);
-            }
-        }
-    }
-
-    /// Repaints the cells under the pointer drawn at (px, py).
-    fn repaint_pointer(&mut self, px: usize, py: usize) {
-        let (x0, y0) = (px / CELL_W, py / CELL_H);
-        let (x1, y1) = ((px + POINTER_W - 1) / CELL_W, (py + POINTER.len() - 1) / CELL_H);
-        self.repaint_rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
-    }
-
-    /// What a screen cell shows: (character, foreground, background, cursor here).
-    fn compose(&self, x: usize, y: usize) -> (u32, u8, u8, bool) {
-        let Some(i) = self.top_at(x, y) else {
-            let cell = self.console.cells[y * self.cols + x];
-            let cursor = self.focus.is_none() && self.console.cursor_visible && self.console.cursor() == (x, y);
-            return (cell.ch, cell.fg, cell.bg, cursor);
-        };
-        let view = &self.views[i];
-        let focused = self.focus == Some(view.window.id);
-        let frame = if focused { 12 } else { 8 };
-        let (fx, fy, w, h) = (x - view.x, y - view.y, view.width(), view.height());
-        let line = |ch: char| (ch as u32, frame, WINDOW_BG, false);
-        match Self::part(view, x, y) {
-            Part::Content(cx, cy) => {
-                let Cell { ch, fg, bg } = view.term.cells[cy * view.term.cols + cx];
-                let cursor = focused && view.term.cursor_visible && view.term.cursor() == (cx, cy);
-                (ch, fg, bg, cursor)
-            }
-            Part::Close => ('×' as u32, if focused { 9 } else { 8 }, WINDOW_BG, false),
-            Part::Title => {
-                // ╭─ title ───── × ╮
-                let title = view.term.title.as_bytes();
-                let room = w.saturating_sub(8);
-                match fx {
-                    0 => line('╭'),
-                    _ if fx == w - 1 => line('╮'),
-                    2 if !title.is_empty() => line(' '),
-                    _ if fx == w - 4 || fx == w - 2 => line(' '),
-                    _ if fx >= 3 && fx - 3 < title.len().min(room) => {
-                        (title[fx - 3] as u32, if focused { 15 } else { 7 }, WINDOW_BG, false)
-                    }
-                    _ if fx == 3 + title.len().min(room) && !title.is_empty() => line(' '),
-                    _ => line('─'),
-                }
-            }
-            Part::Border => match (fx, fy) {
-                (0, _) if fy == h - 1 => line('╰'),
-                _ if fy == h - 1 && fx == w - 1 => line('╯'),
-                _ if fy == h - 1 => line('─'),
-                _ => line('│'),
-            },
-        }
-    }
-
-    fn paint_cell(&mut self, x: usize, y: usize) {
-        let (ch, fg, bg, cursor) = self.compose(x, y);
-        let (fg, bg) = (PALETTE[fg as usize], PALETTE[bg as usize]);
-        let glyph = crate::font::glyph(ch).or_else(|| crate::font::glyph('?' as u32)).unwrap();
-        for (gy, &bits) in glyph.iter().enumerate() {
-            let row = unsafe { self.fb.add((y * CELL_H + gy) * self.pitch + x * CELL_W) };
-            let underline = cursor && gy >= CELL_H - 2;
-            for gx in 0..CELL_W {
-                let on = bits >> gx & 1 == 1 || underline;
-                unsafe { row.add(gx).write_volatile(if on { fg } else { bg }) };
-            }
-        }
-        if self.mouse.shown {
-            self.paint_pointer_over(x, y);
-        }
-    }
-
-    /// Draws the part of the mouse pointer that falls in this cell.
-    fn paint_pointer_over(&mut self, x: usize, y: usize) {
-        let (cell_x, cell_y) = (x * CELL_W, y * CELL_H);
-        for (py, row) in POINTER.iter().enumerate() {
-            let sy = self.mouse.y + py;
-            if sy < cell_y || sy >= cell_y + CELL_H {
+    /// Draws a text window's changed cells (or all of them) into its contents. Returns the area
+    /// that changed, in contents coordinates.
+    fn render_text(&mut self, i: usize, all: bool) -> Option<Rect> {
+        let focused = self.focus == Some(self.views[i].window.id);
+        let view = &mut self.views[i];
+        let cw = view.cw as usize;
+        let term = view.text.as_mut()?;
+        let mut changed: Option<Rect> = None;
+        for c in 0..term.cells.len() {
+            if !core::mem::take(&mut term.dirty[c]) && !all {
                 continue;
             }
-            for (px, &p) in row.iter().enumerate() {
-                let sx = self.mouse.x + px;
-                if sx < cell_x || sx >= cell_x + CELL_W || p == b'.' {
+            let (cx, cy) = (c % term.cols, c / term.cols);
+            let cursor = focused && term.cursor_visible && term.cursor() == (cx, cy);
+            let (px, py) = (PAD as usize + cx * CELL_W, PAD as usize + cy * CELL_H);
+            draw_glyph(&mut view.content[py * cw + px..], cw, term.cells[c], cursor);
+            let r = Rect { x: px as i32, y: py as i32, w: CELL_W as i32, h: CELL_H as i32 };
+            changed = Some(changed.map_or(r, |c| c.union(r)));
+        }
+        if all {
+            changed = Some(Rect { x: 0, y: 0, w: view.cw, h: view.ch });
+        }
+        changed
+    }
+
+    /// Part of a window's contents changed: copy it into the window's image and show it.
+    fn content_changed(&mut self, i: usize, r: Rect) {
+        let view = &mut self.views[i];
+        copy_content(view, r);
+        let first = !view.visible;
+        view.visible = true;
+        let shown = if first { view.bounds() } else { Rect { x: view.x + 1 + r.x, y: view.y + HEADER + r.y, w: r.w, h: r.h } };
+        self.show(shown);
+    }
+
+    /// Redraws a window's frame (focus, title or hover changed) and shows it.
+    fn refresh_frame(&mut self, i: usize) {
+        self.render_frame(i);
+        let view = &self.views[i];
+        if view.visible {
+            self.show(view.bounds());
+        }
+    }
+
+    /// Draws a window's whole image: shadow, rounded frame, header with title and close button,
+    /// and its contents.
+    fn render_frame(&mut self, i: usize) {
+        let focused = (self.focus == Some(self.views[i].window.id)) as usize;
+        let view = &mut self.views[i];
+        let (iw, ih, fw, fh) = (view.iw(), view.ih(), view.fw(), view.fh());
+        let (header, border) = (HEADER_COLOR[focused], BORDER_COLOR[focused]);
+        for iy in 0..ih {
+            for ix in 0..iw {
+                let (fx, fy) = (ix - SHADOW, iy - SHADOW);
+                // The shadow, a little below the window, fading out.
+                let ds = rounded_distance(fx, fy - SHADOW_DROP, fw, fh, RADIUS);
+                let reach = SHADOW * 16;
+                let k = (reach - ds.max(0)).max(0);
+                let mut pixel = ((SHADOW_ALPHA * k / reach * k / reach) as u32) << 24;
+                // The window itself, smoothed at its edges.
+                let d = rounded_distance(fx, fy, fw, fh, RADIUS);
+                let cover = (8 - d).clamp(0, 16) as u32;
+                if cover > 0 {
+                    let color = if d > -24 || fy == HEADER - 1 { border } else { header };
+                    pixel = over(premultiply(color, cover * 255 / 16), pixel);
+                }
+                view.image[(iy * iw + ix) as usize] = pixel;
+            }
+        }
+        // The title, centered (and cut short before the close button).
+        let room = ((fw - 2 * 44) / CELL_W as i32).max(0) as usize;
+        let title: Vec<char> = view.title.chars().take(room).collect();
+        let tx = (fw - (title.len() * CELL_W) as i32) / 2;
+        let ty = (HEADER - CELL_H as i32) / 2;
+        for (n, &c) in title.iter().enumerate() {
+            let at = ((SHADOW + ty) * iw + SHADOW + tx + (n * CELL_W) as i32) as usize;
+            let cell = Cell { ch: c as u32, fg: 0, bg: 0 };
+            draw_glyph_colors(&mut view.image[at..], iw as usize, cell, TITLE_COLOR[focused], header);
+        }
+        // The close button: a circle with an ×, red under the pointer.
+        let (cx, cy) = view.close_center();
+        let circle = if view.close_hover { CLOSE_HOVER } else { CLOSE_COLOR };
+        let mark = if view.close_hover { 0xffffff } else { TITLE_COLOR[focused] };
+        for dy in -CLOSE_RADIUS - 1..=CLOSE_RADIUS + 1 {
+            for dx in -CLOSE_RADIUS - 1..=CLOSE_RADIUS + 1 {
+                let d = isqrt(((dx * 16).pow(2) + (dy * 16).pow(2)) as u64) as i32 - CLOSE_RADIUS * 16;
+                let cover = (8 - d).clamp(0, 16) as u32;
+                if cover == 0 {
                     continue;
                 }
-                let color = if p == b'#' { 0x101010 } else { 0xffffff };
-                unsafe { self.fb.add(sy * self.pitch + sx).write_volatile(color) };
+                let on_mark = dx.abs() <= 3 && dy.abs() <= 3 && ((dx - dy).abs() <= 0 || (dx + dy).abs() <= 0);
+                let color = if on_mark { mark } else { circle };
+                let at = ((SHADOW + cy + dy) * iw + SHADOW + cx + dx) as usize;
+                view.image[at] = mix(color, header, cover * 255 / 16) | 0xff00_0000;
+            }
+        }
+        copy_content(view, Rect { x: 0, y: 0, w: view.cw, h: view.ch });
+    }
+
+    /// Puts a piece of the screen together (console, windows, pointer) and puts it on the display.
+    fn show(&mut self, r: Rect) {
+        let Some(r) = r.intersect(self.screen_rect()) else { return };
+        let w = self.width;
+        let views: Vec<usize> = (0..self.views.len()).filter(|&i| self.views[i].visible && self.views[i].bounds().intersect(r).is_some()).collect();
+        let pointer = self.mouse.shown && self.pointer_rect().intersect(r).is_some();
+        let (x0, x1) = (r.x as usize, r.right() as usize);
+        let source = if views.is_empty() && !pointer {
+            &self.layer
+        } else {
+            for y in r.y as usize..r.bottom() as usize {
+                self.back[y * w + x0..y * w + x1].copy_from_slice(&self.layer[y * w + x0..y * w + x1]);
+            }
+            for i in views {
+                let view = &self.views[i];
+                let b = view.bounds();
+                let c = b.intersect(r).unwrap();
+                let iw = view.iw();
+                for y in c.y..c.bottom() {
+                    let src = &view.image[((y - b.y) * iw + (c.x - b.x)) as usize..][..c.w as usize];
+                    let dst = &mut self.back[y as usize * w + c.x as usize..][..c.w as usize];
+                    for (d, &s) in dst.iter_mut().zip(src) {
+                        *d = over(s, *d);
+                    }
+                }
+            }
+            if pointer {
+                self.draw_pointer(r);
+            }
+            &self.back
+        };
+        for y in r.y as usize..r.bottom() as usize {
+            unsafe {
+                let from = source.as_ptr().add(y * w + x0);
+                core::ptr::copy_nonoverlapping(from, self.fb.add(y * self.pitch + x0), x1 - x0);
             }
         }
     }
+
+    fn draw_pointer(&mut self, clip: Rect) {
+        for (py, row) in POINTER.iter().enumerate() {
+            for (px, &p) in row.iter().enumerate() {
+                let (x, y) = (self.mouse.x + px as i32, self.mouse.y + py as i32);
+                if p == b'.' || !clip.contains(x, y) {
+                    continue;
+                }
+                self.back[y as usize * self.width + x as usize] = if p == b'#' { 0x101010 } else { 0xffffff };
+            }
+        }
+    }
+}
+
+/// Copies part of a window's contents into its image, leaving the rounded bottom corners alone.
+fn copy_content(view: &mut View, r: Rect) {
+    let (iw, fw, fh) = (view.iw(), view.fw(), view.fh());
+    for y in r.y..r.bottom() {
+        let fy = HEADER + y;
+        let near_bottom = fy >= fh - RADIUS - 1;
+        for x in r.x..r.right() {
+            let fx = 1 + x;
+            if near_bottom && (fx <= RADIUS || fx >= fw - RADIUS - 1) && rounded_distance(fx, fy, fw, fh, RADIUS) > -24 {
+                continue;
+            }
+            view.image[((SHADOW + fy) * iw + SHADOW + fx) as usize] = view.content[(y * view.cw + x) as usize] | 0xff00_0000;
+        }
+    }
+}
+
+/// Draws one character cell at the start of `to` (a buffer `stride` pixels wide).
+fn draw_glyph(to: &mut [u32], stride: usize, cell: Cell, cursor: bool) {
+    let (fg, bg) = (PALETTE[cell.fg as usize], PALETTE[cell.bg as usize]);
+    let glyph = crate::font::glyph(cell.ch).or_else(|| crate::font::glyph('?' as u32)).unwrap();
+    for (gy, &bits) in glyph.iter().enumerate() {
+        let underline = cursor && gy >= CELL_H - 2;
+        for gx in 0..CELL_W {
+            let on = bits >> gx & 1 == 1 || underline;
+            to[gy * stride + gx] = if on { if underline { PALETTE[7] } else { fg } } else { bg };
+        }
+    }
+}
+
+/// Draws a character's lit pixels in `fg` on `bg`, opaque (for window titles).
+fn draw_glyph_colors(to: &mut [u32], stride: usize, cell: Cell, fg: u32, bg: u32) {
+    let glyph = crate::font::glyph(cell.ch).or_else(|| crate::font::glyph('?' as u32)).unwrap();
+    for (gy, &bits) in glyph.iter().enumerate() {
+        for gx in 0..CELL_W {
+            to[gy * stride + gx] = 0xff00_0000 | if bits >> gx & 1 == 1 { fg } else { bg };
+        }
+    }
+}
+
+/// Signed distance from a pixel's center to the edge of a w x h rectangle with rounded corners of
+/// radius r, in 1/16 pixels: negative inside.
+fn rounded_distance(px: i32, py: i32, w: i32, h: i32, r: i32) -> i32 {
+    let (x, y) = (px * 16 + 8, py * 16 + 8);
+    let (hw, hh, r) = (w * 8, h * 8, r * 16);
+    let qx = (x - hw).abs() - (hw - r);
+    let qy = (y - hh).abs() - (hh - r);
+    let outside = if qx > 0 && qy > 0 { isqrt((qx as u64).pow(2) + (qy as u64).pow(2)) as i32 } else { qx.max(qy).max(0) };
+    outside + qx.max(qy).min(0) - r
+}
+
+fn isqrt(n: u64) -> u64 {
+    if n < 2 {
+        return n;
+    }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
+}
+
+/// An opaque color with an alpha (0..255), premultiplied.
+fn premultiply(color: u32, alpha: u32) -> u32 {
+    let channel = |shift: u32| ((color >> shift & 0xff) * alpha / 255) << shift;
+    alpha << 24 | channel(16) | channel(8) | channel(0)
+}
+
+/// `top` (premultiplied ARGB) over `bottom`.
+fn over(top: u32, bottom: u32) -> u32 {
+    let a = top >> 24;
+    if a == 255 {
+        return top;
+    }
+    if a == 0 {
+        return bottom;
+    }
+    let inv = 255 - a;
+    let channel = |shift: u32| ((top >> shift & 0xff) + (bottom >> shift & 0xff) * inv / 255).min(255) << shift;
+    let alpha = (a + (bottom >> 24) * inv / 255).min(255);
+    alpha << 24 | channel(16) | channel(8) | channel(0)
+}
+
+/// `a` mixed into `b`, `amount` of 255 being all `a`.
+fn mix(a: u32, b: u32, amount: u32) -> u32 {
+    let channel = |shift: u32| ((a >> shift & 0xff) * amount + (b >> shift & 0xff) * (255 - amount)) / 255 << shift;
+    channel(16) | channel(8) | channel(0)
 }
 
 // The mouse pointer: '#' outline, 'o' fill, '.' see-through. The tip is its top-left corner.

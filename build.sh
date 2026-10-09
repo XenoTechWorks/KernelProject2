@@ -26,10 +26,10 @@ mkdir -p "$stage/bin" "$stage/sbin" "$out"
 cp -r "$root/rootfs/." "$stage/"
 find "$stage" -type d -exec chmod 755 {} +
 find "$stage" -type f -exec chmod 644 {} +
-for program in init kpsh ls cat echo uname fileops kpfetch clock; do
+for program in init kpsh ls cat echo uname fileops kpfetch clock widgets; do
     dest="$stage/bin/$program"
     [[ $program == init ]] && dest="$stage/sbin/init"
-    "$zig" build-exe "$root/user/src/$program.zig" -target x86_64-linux-none -O ReleaseSmall -fstrip \
+    "$zig" build-exe "$root/user/src/$program.zig" -target x86_64-linux-none -O ${ZIG_MODE:-ReleaseSmall} -fstrip \
         -fsingle-threaded --name "$program" -femit-bin="$dest" --cache-dir "$root/user/.zig-cache" \
         --global-cache-dir "$HOME/.cache/zig"
 done
@@ -91,6 +91,16 @@ if [[ -x "$fastfetch" ]]; then
     step "fastfetch ($fastfetch)"
     add_host_program "$fastfetch"
 fi
+
+step "fonts"
+# Inter (SIL Open Font License) for graphical apps, downloaded once.
+fonts="$HOME/.cache/kernelproject2/fonts"
+mkdir -p "$fonts" "$stage/usr/share/fonts"
+if [[ ! -s "$fonts/Inter.ttf" ]]; then
+    curl -sSLf -o "$fonts/Inter.ttf" "https://github.com/google/fonts/raw/main/ofl/inter/Inter%5Bopsz%2Cwght%5D.ttf"
+    curl -sSLf -o "$fonts/Inter-OFL.txt" "https://github.com/google/fonts/raw/main/ofl/inter/OFL.txt"
+fi
+cp "$fonts/Inter.ttf" "$fonts/Inter-OFL.txt" "$stage/usr/share/fonts/"
 
 step "boot archive"
 rm -f "$out/initramfs.cpio"
