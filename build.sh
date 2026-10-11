@@ -26,7 +26,7 @@ mkdir -p "$stage/bin" "$stage/sbin" "$out"
 cp -r "$root/rootfs/." "$stage/"
 find "$stage" -type d -exec chmod 755 {} +
 find "$stage" -type f -exec chmod 644 {} +
-for program in init kpsh ls cat echo uname fileops kpfetch clock textclock widgets calc files; do
+for program in init kpsh ls cat echo uname fileops kpfetch clock textclock widgets calc files edit textedit; do
     dest="$stage/bin/$program"
     [[ $program == init ]] && dest="$stage/sbin/init"
     "$zig" build-exe "$root/user/src/$program.zig" -target x86_64-linux-none -O ${ZIG_MODE:-ReleaseSmall} -fstrip \
@@ -100,7 +100,12 @@ if [[ ! -s "$fonts/Inter.ttf" ]]; then
     curl -sSLf -o "$fonts/Inter.ttf" "https://github.com/google/fonts/raw/main/ofl/inter/Inter%5Bopsz%2Cwght%5D.ttf"
     curl -sSLf -o "$fonts/Inter-OFL.txt" "https://github.com/google/fonts/raw/main/ofl/inter/OFL.txt"
 fi
-cp "$fonts/Inter.ttf" "$fonts/Inter-OFL.txt" "$stage/usr/share/fonts/"
+# JetBrains Mono (SIL Open Font License) for the editors and other monospaced text.
+if [[ ! -s "$fonts/JetBrainsMono.ttf" ]]; then
+    curl -sSLf -o "$fonts/JetBrainsMono.ttf" "https://github.com/google/fonts/raw/main/ofl/jetbrainsmono/JetBrainsMono%5Bwght%5D.ttf"
+    curl -sSLf -o "$fonts/JetBrainsMono-OFL.txt" "https://github.com/google/fonts/raw/main/ofl/jetbrainsmono/OFL.txt"
+fi
+cp "$fonts"/Inter.ttf "$fonts"/Inter-OFL.txt "$fonts"/JetBrainsMono.ttf "$fonts"/JetBrainsMono-OFL.txt "$stage/usr/share/fonts/"
 
 step "boot archive"
 rm -f "$out/initramfs.cpio"

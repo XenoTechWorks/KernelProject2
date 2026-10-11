@@ -16,6 +16,8 @@ const Rect = canvas_mod.Rect;
 const Font = @import("font.zig").Font;
 const win = @import("window.zig");
 const sys = @import("../sys.zig");
+const textbuf = @import("../textbuf.zig");
+pub const TextView = @import("textview.zig").TextView;
 
 pub const theme = struct {
     pub const bg = 0x22262e;
@@ -35,6 +37,8 @@ pub const theme = struct {
     pub const text_size = 15;
     pub const row_height = 34;
     pub const font_path = "/usr/share/fonts/Inter.ttf";
+    pub const mono_path = "/usr/share/fonts/JetBrainsMono.ttf";
+    pub const selection = 0x2a4a75;
 };
 
 pub const Callback = struct {
@@ -63,12 +67,13 @@ pub const Widget = struct {
         slider: Slider,
         progress: Progress,
         list: List,
+        text: Text,
         separator,
     };
 
     fn focusable(w: *const Widget) bool {
         return switch (w.kind) {
-            .button, .entry, .toggle, .check, .slider, .list => true,
+            .button, .entry, .toggle, .check, .slider, .list, .text => true,
             else => false,
         };
     }
@@ -103,15 +108,46 @@ pub const Entry = struct {
     cursor: usize = 0,
     /// How far the text is scrolled left (when it's longer than the field), in pixels.
     scroll: f32 = 0,
+    /// The other end of the selection (the cursor is one end).
+    anchor: ?usize = null,
     placeholder: []const u8,
     on_activate: ?Callback = null,
 
     pub fn text(e: *const Entry) []const u8 {
         return e.buf[0..e.len];
     }
+
+    fn selection(e: *const Entry) ?[2]usize {
+        const a = e.anchor orelse return null;
+        if (a == e.cursor) return null;
+        return .{ @min(a, e.cursor), @max(a, e.cursor) };
+    }
+
+    fn deleteSelection(e: *Entry) bool {
+        const s = e.selection() orelse return false;
+        std.mem.copyForwards(u8, e.buf[s[0]..], e.buf[s[1]..e.len]);
+        e.len -= s[1] - s[0];
+        e.cursor = s[0];
+        e.anchor = null;
+        return true;
+    }
+
+    fn insert(e: *Entry, s: []const u8) void {
+        _ = e.deleteSelection();
+        for (s) |c| {
+            if (c < 32 or e.len == e.buf.len) continue; // one line: no newlines or tabs
+            std.mem.copyBackwards(u8, e.buf[e.cursor + 1 .. e.len + 1], e.buf[e.cursor..e.len]);
+            e.buf[e.cursor] = c;
+            e.len += 1;
+            e.cursor += 1;
+        }
+    }
 };
 
 pub const Toggle = struct { on: bool, on_change: ?Callback };
+
+/// A multi-line text area (gui/textview.zig). `on_change` runs after each key or click in it.
+pub const Text = struct { view: *TextView, on_change: ?Callback = null };
 
 pub const Check = struct { label: []const u8, on: bool, on_change: ?Callback };
 
@@ -175,8 +211,11 @@ pub const App = struct {
     /// The pointer, for hover effects inside a widget (list rows).
     pointer_x: i32 = -1,
     pointer_y: i32 = -1,
-    /// Sees every key first; returns true if it used it (for keyboard shortcuts).
+    /// Sees every key first (while typing in a field: only Ctrl+ keys); returns true if it used
+    /// it (for keyboard shortcuts).
     on_key: ?*const fn (app: *App, key: win.Key) bool = null,
+    /// The monospaced font, loaded when a text area needs it.
+    mono: ?*Font = null,
 
     pub fn init(title: [:0]const u8) ?*App {
         const font = Font.load(theme.font_path) orelse return null;
@@ -233,6 +272,20 @@ pub const App = struct {
     /// A list of rows; fill it with setItems.
     pub fn list(app: *App) *Widget {
         return app.new(.{ .expand = true, .kind = .{ .list = .{} } });
+    }
+
+    /// A text area for many lines (monospaced, with line numbers).
+    pub fn textView(app: *App) *Widget {
+        if (app.mono == null) app.mono = Font.load(theme.mono_path) orelse app.font;
+        const view = app.arena.allocator().create(TextView) catch @panic("out of memory");
+        view.* = TextView.init(app.mono.?);
+        return app.new(.{ .expand = true, .kind = .{ .text = .{ .view = view } } });
+    }
+
+    /// Puts the keyboard on a widget.
+    pub fn setFocus(app: *App, w: *Widget) void {
+        app.focus = w;
+        app.dirty = true;
     }
 
     /// A thin line between parts.
@@ -314,7 +367,22 @@ pub const App = struct {
                 app.pointer_x = m.x;
                 app.pointer_y = m.y;
                 app.hover = over;
-                if (app.pressed) |p| if (p.kind == .slider) app.slide(p, m.x);
+                if (app.pressed) |p| switch (p.kind) {
+                    .slider => app.slide(p, m.x),
+                    .entry => {
+                        const e = &p.kind.entry;
+                        const anchor = e.anchor orelse e.cursor;
+                        app.placeCursor(p, m.x);
+                        e.anchor = anchor;
+                        app.dirty = true;
+                    },
+                    .text => |t| {
+                        t.view.drag(p.rect, m.x, m.y);
+                        app.dirty = true;
+                        if (t.on_change) |cb| cb.f(app, cb.ctx);
+                    },
+                    else => {},
+                };
             },
             .leave => {
                 app.hover = null;
@@ -328,9 +396,16 @@ pub const App = struct {
                 if (target) |t| {
                     app.focus = t;
                     switch (t.kind) {
-                        .entry => app.placeCursor(t, p.x),
+                        .entry => {
+                            app.placeCursor(t, p.x);
+                            t.kind.entry.anchor = t.kind.entry.cursor;
+                        },
                         .slider => app.slide(t, p.x),
                         .list => app.clickRow(t, p.y),
+                        .text => |tx| {
+                            tx.view.press(t.rect, p.x, p.y, nowMs());
+                            if (tx.on_change) |cb| cb.f(app, cb.ctx);
+                        },
                         else => {},
                     }
                 }
@@ -341,9 +416,16 @@ pub const App = struct {
                 app.pressed = null;
                 app.dirty = true;
             },
-            .scroll => |s| if (hit(app.root, s.x, s.y)) |t| if (t.kind == .list) {
-                scrollList(t, s.steps * 3 * theme.row_height);
-                app.dirty = true;
+            .scroll => |s| if (hit(app.root, s.x, s.y)) |t| switch (t.kind) {
+                .list => {
+                    scrollList(t, s.steps * 3 * theme.row_height);
+                    app.dirty = true;
+                },
+                .text => |tx| {
+                    tx.view.scroll(t.rect, s.steps * 3);
+                    app.dirty = true;
+                },
+                else => {},
             },
             .resize => {
                 app.layout(app.root, app.window.canvas.bounds());
@@ -359,10 +441,11 @@ pub const App = struct {
     }
 
     fn key(app: *App, k: win.Key) void {
-        // An entry with the keyboard gets typing first; otherwise the app's shortcuts do.
-        const typing = app.focus != null and app.focus.?.kind == .entry;
-        if (!typing) if (app.on_key) |f| if (f(app, k)) return;
-        if (k.code == 9) { // Tab, Shift+Tab: the next or previous widget gets the keyboard
+        // A field with the keyboard gets typing first; otherwise the app's shortcuts do.
+        const typing = app.focus != null and (app.focus.?.kind == .entry or app.focus.?.kind == .text);
+        if (!typing or k.ctrl) if (app.on_key) |f| if (f(app, k)) return;
+        const in_text = app.focus != null and app.focus.?.kind == .text;
+        if (k.code == 9 and !in_text) { // Tab, Shift+Tab: the next or previous widget gets the keyboard
             app.focus = app.nextFocus(k.shift);
             app.focus_visible = true;
             return;
@@ -370,6 +453,10 @@ pub const App = struct {
         const f = app.focus orelse return;
         switch (f.kind) {
             .entry => |*e| editEntry(app, e, k),
+            .text => |t| if (t.view.key(k, f.rect.h)) {
+                t.view.ensureVisible(f.rect);
+                if (t.on_change) |cb| cb.f(app, cb.ctx);
+            },
             .button, .toggle, .check => if (k.code == 13 or k.code == ' ') app.activate(f),
             .slider => |*s| {
                 const delta: f32 = switch (k.code) {
@@ -490,6 +577,7 @@ pub const App = struct {
             .slider => .{ 160, 24 },
             .progress => .{ 160, 8 },
             .list => .{ 220, 6 * theme.row_height + 8 },
+            .text => .{ 420, 260 },
             .separator => .{ 1, 1 },
             .box => |b| blk: {
                 var main: i32 = 0;
@@ -550,7 +638,7 @@ pub const App = struct {
             const want = if (b.vertical) s[0] else s[1];
             // Across a row: buttons, lists and boxes fill its height; the rest are centered.
             const fills_row = switch (c.kind) {
-                .box, .button, .list, .separator => true,
+                .box, .button, .list, .text, .separator => true,
                 else => false,
             };
             const alignment = if (!b.vertical and c.alignment == .fill and !fills_row) Align.center else c.alignment;
@@ -627,6 +715,11 @@ pub const App = struct {
                 const saved = c.clip;
                 c.clip = inner.intersect(saved);
                 const x0 = @as(f32, @floatFromInt(inner.x)) - e.scroll;
+                if (e.selection()) |sel| if (focused) {
+                    const a = x0 + canvas_mod.measure(app.font, theme.text_size, e.buf[0..sel[0]]);
+                    const z = x0 + canvas_mod.measure(app.font, theme.text_size, e.buf[0..sel[1]]);
+                    c.rect(.{ .x = @intFromFloat(@round(a)), .y = r.y + 7, .w = @intFromFloat(@round(z - a)), .h = r.h - 14 }, theme.selection);
+                };
                 if (e.len == 0 and !focused) {
                     _ = c.text(app.font, theme.text_size, @floatFromInt(inner.x), app.baseline(r), e.placeholder, theme.dim);
                 } else {
@@ -680,6 +773,7 @@ pub const App = struct {
                 if (filled > 0) c.roundRect(.{ .x = bar.x, .y = bar.y, .w = @max(filled, 8), .h = 8 }, 4, theme.accent);
             },
             .list => |*l| app.drawList(w, l, c, focused),
+            .text => |t| t.view.draw(c, r, focused),
             .separator => c.rect(if (r.w >= r.h) .{ .x = r.x, .y = r.y + @divTrunc(r.h, 2), .w = r.w, .h = 1 } else .{ .x = r.x + @divTrunc(r.w, 2), .y = r.y, .w = 1, .h = r.h }, theme.field_border),
         }
     }
@@ -737,6 +831,7 @@ pub fn setText(w: *Widget, s: []const u8) void {
             e.len = @min(s.len, e.buf.len);
             @memcpy(e.buf[0..e.len], s[0..e.len]);
             e.cursor = e.len;
+            e.anchor = null;
         },
         else => {},
     }
@@ -828,15 +923,49 @@ fn collectFocusable(w: *Widget, found: *[64]*Widget, n: *usize) void {
 }
 
 fn editEntry(app: *App, e: *Entry, k: win.Key) void {
+    // Moving with shift held stretches the selection; without it, the selection ends.
+    const moves = k.code == win.Key.left or k.code == win.Key.right or k.code == win.Key.home or k.code == win.Key.end;
+    if (moves) {
+        if (k.shift) {
+            if (e.anchor == null) e.anchor = e.cursor;
+        } else if (e.selection()) |sel| {
+            e.anchor = null;
+            if (k.code == win.Key.left) e.cursor = sel[0];
+            if (k.code == win.Key.right) e.cursor = sel[1];
+            if (k.code == win.Key.left or k.code == win.Key.right) return;
+        } else {
+            e.anchor = null;
+        }
+    }
+    if (k.ctrl) {
+        switch (k.code) {
+            'a' => {
+                e.anchor = 0;
+                e.cursor = e.len;
+            },
+            'c', 'x' => if (e.selection()) |sel| {
+                textbuf.copyToClipboard(e.buf[sel[0]..sel[1]]);
+                if (k.code == 'x') _ = e.deleteSelection();
+            },
+            'v' => {
+                var clip: [1024]u8 = undefined;
+                const text = textbuf.readClipboard(&clip);
+                // Only the first line of what was copied.
+                e.insert(text[0 .. std.mem.indexOfScalar(u8, text, '\n') orelse text.len]);
+            },
+            else => {},
+        }
+        return;
+    }
     switch (k.code) {
-        8 => if (e.cursor > 0) { // Backspace: the character before the cursor
-            var start = e.cursor - 1;
-            while (start > 0 and e.buf[start] & 0xC0 == 0x80) start -= 1;
-            std.mem.copyForwards(u8, e.buf[start..], e.buf[e.cursor..e.len]);
-            e.len -= e.cursor - start;
-            e.cursor = start;
+        8 => if (!e.deleteSelection() and e.cursor > 0) { // Backspace: the character before the cursor
+            var from = e.cursor - 1;
+            while (from > 0 and e.buf[from] & 0xC0 == 0x80) from -= 1;
+            std.mem.copyForwards(u8, e.buf[from..], e.buf[e.cursor..e.len]);
+            e.len -= e.cursor - from;
+            e.cursor = from;
         },
-        127 => if (e.cursor < e.len) { // Delete: the character after it
+        127 => if (!e.deleteSelection() and e.cursor < e.len) { // Delete: the character after it
             var end = e.cursor + 1;
             while (end < e.len and e.buf[end] & 0xC0 == 0x80) end += 1;
             std.mem.copyForwards(u8, e.buf[e.cursor..], e.buf[end..e.len]);
@@ -853,11 +982,6 @@ fn editEntry(app: *App, e: *Entry, k: win.Key) void {
         win.Key.home => e.cursor = 0,
         win.Key.end => e.cursor = e.len,
         13 => if (e.on_activate) |cb| cb.f(app, cb.ctx),
-        else => if (k.code >= 32 and k.code < 127 and !k.ctrl and e.len < e.buf.len) {
-            std.mem.copyBackwards(u8, e.buf[e.cursor + 1 .. e.len + 1], e.buf[e.cursor..e.len]);
-            e.buf[e.cursor] = @intCast(k.code);
-            e.len += 1;
-            e.cursor += 1;
-        },
+        else => if (k.code >= 32 and k.code < 127) e.insert(&.{@intCast(k.code)}),
     }
 }

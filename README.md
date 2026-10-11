@@ -90,6 +90,22 @@ a `.exe` goes back through `winload`), file mappings, console modes and colors, 
 Tools for this: `tools/winimports.sh program.exe` lists what a program imports, and
 `WINLOAD_TRACE=1` prints every call it makes into our DLLs.
 
+## Editing text
+
+`edit FILE` is a text editor for the terminal, in the spirit of nano: arrows, Home/End and Page
+Up/Down move, Ctrl+S saves, Ctrl+Q quits (twice with unsaved changes), Ctrl+F finds, Ctrl+G goes to
+a line, Ctrl+Z undoes (a typed word at a time), Ctrl+K cuts a line, Ctrl+C copies one and Ctrl+U
+pastes. `textedit` is the same editor in a window, with selection by dragging or shift and the
+arrows, double-click to pick a word, and Ctrl+C/X/V/Z/A.
+
+Both keep the text in `user/src/lib/textbuf.zig`, and both share one clipboard: `/dev/clipboard`.
+Anything can use it, so text moves between the terminal, the windows and the shell:
+
+```sh
+echo -n hello > /dev/clipboard   # then Ctrl+U in edit, or Ctrl+V in textedit
+cat /dev/clipboard               # what a window copied
+```
+
 ## The command line
 
 The same layout as Linux:
@@ -109,15 +125,16 @@ Programs can open windows that float over the console, with a header, a close bu
 shadow. It isn't a desktop: the command line stays the whole screen, and windows sit on top of it.
 
 ```sh
-clock &        # the time, big
-calc &         # a calculator (click, or type: 7*6 Enter)
-files /etc &   # browse folders, peek into files
-widgets &      # a tour of the widgets
-textclock &    # a text app in a window
+clock &            # the time, big
+calc &             # a calculator (click, or type: 7*6 Enter)
+files /etc &       # browse folders, peek into files
+textedit notes &   # a text editor
+widgets &          # a tour of the widgets
+textclock &        # a text app in a window
 ```
 
-The shell keeps the keyboard. Drag a window by its header with the mouse, resize it by its right
-or bottom edge, scroll lists with the wheel. `run.sh` gives QEMU a virtio tablet, so the pointer
+The shell keeps the keyboard. Drag a window by its header with the mouse, resize it by any edge or
+corner, scroll with the wheel. `run.sh` gives QEMU a virtio tablet, so the pointer
 sits exactly under your mouse; without one the PS/2 mouse works too (click into the QEMU window to
 use it, Ctrl+Alt+G lets go), but QEMU's idea of where it is can drift from yours. Click a window to give it the keyboard, or press F12 to move the keyboard between
 the console and the windows. × closes a window: its program reads end-of-file and exits.
@@ -141,9 +158,11 @@ The graphical toolkit (`user/src/lib/gui.zig`, Zig, a working name) is our own, 
   [Inter](https://rsms.me/inter/) (SIL Open Font License), downloaded at build time;
 - `gui/canvas.zig` draws rounded rectangles, circles and text into a picture;
 - `gui/widgets.zig` has the widgets (labels, buttons, text entries, switches, checkboxes,
-  sliders, progress bars, lists, separators) in vertical and horizontal boxes that share out the
-  room as the window is resized, with hover, press, keyboard focus (Tab), timers and a dark theme
-  like GNOME's. `widgets`, `clock`, `calc` and `files` are the examples.
+  sliders, progress bars, lists, separators, and a text area for many lines) in vertical and
+  horizontal boxes that share out the room as the window is resized, with hover, press, keyboard
+  focus (Tab), selection and the clipboard, timers and a dark theme like GNOME's.
+  `widgets`, `clock`, `calc`, `files` and `textedit` are the examples. Monospaced text uses
+  [JetBrains Mono](https://www.jetbrains.com/lp/mono/) (SIL Open Font License).
 - `user/src/lib/ui.zig` is the smaller helper for text windows (`textclock`).
 
 ## Layout
@@ -164,7 +183,8 @@ user/src/        init, the shell, the commands and apps (Zig); lib/gui is the to
 windows/src/     the Windows layer: PE loader, kernel32, msvcrt (C++)
 rootfs/          files copied into the root file system (/etc ...)
 disk/            what a new disk starts with (out/disk.img is made from it once)
-tests/           test programs (C, and Windows ones in windows/), smoke.py, persist.py, windows.py, session.sh
+tests/           test programs (C, and Windows ones in windows/) and the test scripts:
+                 smoke.py, persist.py, windows.py, edit.py, textedit.py, session.sh
 ```
 
 ## Building and running
@@ -185,6 +205,8 @@ make -C ~/tools/limine
 python3 tests/smoke.py    # boot, run commands one after another, check the answers
 python3 tests/persist.py  # save files and a git repo, reboot, find them again
 python3 tests/windows.py  # open text and graphical windows, use them with the mouse
+python3 tests/edit.py     # type in the text editor, undo, cut and paste, save
+python3 tests/textedit.py # the same in a window, through the shared clipboard
 ```
 
 ## Roadmap
@@ -206,4 +228,7 @@ Roughly in order; each step is checked by running a real program.
 - Rust crates: `limine`, `spin`, `linked_list_allocator` (MIT/Apache-2.0).
 - The console font is [Spleen](https://github.com/fcambus/spleen) 8x16 (BSD-2-Clause, `kernel/src/font-LICENSE`),
   converted by `tools/bdf2rs.py`.
+- The apps' fonts, downloaded at build time: [Inter](https://rsms.me/inter/) and
+  [JetBrains Mono](https://www.jetbrains.com/lp/mono/), both SIL Open Font License (their OFL.txt
+  is copied next to them in `/usr/share/fonts`).
 - The test programs link against glibc (LGPL) from the build machine.

@@ -26,6 +26,8 @@ pub const Key = struct {
     pub const left = 0x103;
     pub const home = 0x104;
     pub const end = 0x105;
+    pub const page_up = 0x106;
+    pub const page_down = 0x107;
 };
 
 pub const Event = union(enum) {

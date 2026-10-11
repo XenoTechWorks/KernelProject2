@@ -19,3 +19,6 @@ pub const getText = widgets.getText;
 pub const setItems = widgets.setItems;
 pub const selected = widgets.selected;
 pub const setProgress = widgets.setProgress;
+pub const TextView = widgets.TextView;
+pub const textbuf = @import("textbuf.zig");
+pub const textbuf_tab = @import("gui/textview.zig").tab;
