@@ -144,6 +144,26 @@ pub fn mremap(addr: u64, old_len: u64, new_len: u64, flags: u64) -> SysResult {
     Ok(start)
 }
 
+/// mincore: which pages of a range are in memory. We never page anything out, so every page
+/// that's mapped is there. Answering properly matters: a caller given a success but no answer
+/// reads whatever was in the buffer.
+pub fn mincore(addr: u64, len: u64, vec: u64) -> SysResult {
+    if addr % PAGE_SIZE != 0 {
+        return Err(EINVAL);
+    }
+    let pages = len.div_ceil(PAGE_SIZE);
+    let p = proc::current();
+    let mut out = alloc::vec![0u8; pages as usize];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = p.space().translate(addr + i as u64 * PAGE_SIZE).is_some() as u8;
+    }
+    if out.iter().any(|&resident| resident == 0) {
+        return Err(ENOMEM); // the range has a hole in it, as Linux reports
+    }
+    crate::mm::user::write(p.space(), vec, &out)?;
+    Ok(0)
+}
+
 pub fn munmap(addr: u64, len: u64) -> SysResult {
     if addr % PAGE_SIZE != 0 || addr.saturating_add(len) > USER_END {
         return Err(EINVAL);

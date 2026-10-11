@@ -106,6 +106,30 @@ echo -n hello > /dev/clipboard   # then Ctrl+U in edit, or Ctrl+V in textedit
 cat /dev/clipboard               # what a window copied
 ```
 
+## Trying other programs
+
+Anything on the build machine can be brought along, unchanged, with the libraries it needs:
+
+```sh
+EXTRA_PROGRAMS="jq bc sed grep dash less nano make" ./build.sh
+```
+
+These all run as they are, which is the point of the whole exercise:
+
+| | |
+|---|---|
+| `jq`, `bc`, `sed`, `grep` | work on the system's own files |
+| `dash` | another shell, loops and all |
+| `less`, `nano` | full-screen terminal programs |
+| `make` | reads a Makefile and runs the recipes |
+| `git`, `fastfetch` | already in the image |
+| `busybox64.exe` | a Windows program, through the Windows layer |
+
+Two things to know. Everything in the image is unpacked into the kernel heap at boot, so the
+image has to fit in it (`HEAP_SIZE` in `kernel/src/mm/mod.rs`, 256 MiB). And a program that
+carries a tree of its own files alongside the binary — Python and its standard library, say —
+needs that tree copied in too, which `EXTRA_PROGRAMS` doesn't do yet.
+
 ## Archives and packages
 
 `gzip` (with `gunzip` and `zcat`), `tar` and `zip` (with `unzip`) are our own, built on a DEFLATE

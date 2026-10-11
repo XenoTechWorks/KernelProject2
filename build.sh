@@ -90,6 +90,20 @@ add_host_program /usr/bin/git
 mkdir -p "$stage/usr/share/git-core"
 cp -r /usr/share/git-core/templates "$stage/usr/share/git-core/"
 
+# Anything else you want to try, by name or path, as in:
+#     EXTRA_PROGRAMS="jq bc sed" ./build.sh
+# Each is copied in with the shared libraries it needs. A good way to find out whether a program
+# runs here: if it does, nothing about it was changed to make it.
+for extra in ${EXTRA_PROGRAMS:-}; do
+    found="$(command -v "$extra" 2>/dev/null || true)"
+    if [[ -n "$found" ]]; then
+        step "$extra ($found)"
+        add_host_program "$(readlink -f "$found")"
+    else
+        echo "  (no $extra on this machine, skipping)"
+    fi
+done
+
 fastfetch="${FASTFETCH:-$HOME/src/fastfetch/build/fastfetch}"
 if [[ -x "$fastfetch" ]]; then
     step "fastfetch ($fastfetch)"

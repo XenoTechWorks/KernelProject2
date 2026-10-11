@@ -19,7 +19,9 @@ pub fn phys_to_virt(phys: u64) -> *mut u8 {
 #[global_allocator]
 static HEAP: LockedHeap = LockedHeap::empty();
 
-const HEAP_SIZE: u64 = 64 * 1024 * 1024;
+/// The kernel heap. The boot archive is unpacked into it, so this is also the ceiling on how much
+/// can be packed into the image.
+const HEAP_SIZE: u64 = 256 * 1024 * 1024;
 
 pub fn init(hhdm: u64, memmap: &[&limine::memmap::Entry]) {
     HHDM.store(hhdm, Ordering::Relaxed);

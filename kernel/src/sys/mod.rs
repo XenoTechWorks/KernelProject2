@@ -55,6 +55,7 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         22 => fs::pipe2(a[0], 0),
         23 => fs::select(a[0] as usize, a[1], a[2], a[3], a[4], false),
         24 => process::sched_yield(),
+        27 => mem::mincore(a[0], a[1], a[2]),
         28 => Ok(0), // madvise: advice only
         32 => fs::dup(a[0] as i32),
         33 => fs::dup3(a[0] as i32, a[1] as i32, 0, true),
