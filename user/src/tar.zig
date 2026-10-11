@@ -12,6 +12,7 @@ const std = @import("std");
 const rt = @import("lib/rt.zig");
 const file = @import("lib/file.zig");
 const gzip = @import("lib/gzip.zig");
+const tarlib = @import("lib/tar.zig");
 const sys = rt.sys;
 pub const _start = rt._start;
 comptime {
@@ -301,75 +302,22 @@ fn readArchive(path: []const u8, mode: u8, dir: ?[]const u8) u8 {
         };
         data = unpacked.?;
     }
+    if (mode == 't') {
+        var r = tarlib.Reader{ .data = data };
+        defer r.deinit();
+        while (r.next()) |e| {
+            rt.out.print("{s}\n", .{e.name});
+            r.clearLong();
+        }
+        return 0;
+    }
     if (dir) |d| {
         file.makePath(d);
         chdir(d);
     }
-
-    var at: usize = 0;
-    var long_name: ?[]u8 = null;
-    defer if (long_name) |l| gpa.free(l);
-    var status: u8 = 0;
-    while (at + block <= data.len) {
-        const h = data[at..][0..block];
-        at += block;
-        if (h[0] == 0) break; // the empty blocks at the end
-        const size = readOctal(h[124..136]);
-        const kind = h[156];
-        const body_blocks = (size + block - 1) / block * block;
-        const name = long_name orelse std.mem.sliceTo(h[0..100], 0);
-        // A GNU long name: the next header's real name is in this entry's body.
-        if (kind == 'L') {
-            if (long_name) |l| gpa.free(l);
-            const n = @min(size, data.len - at);
-            long_name = gpa.dupe(u8, std.mem.sliceTo(data[at..][0..@intCast(n)], 0)) catch null;
-            at += @intCast(body_blocks);
-            continue;
-        }
-        defer {
-            if (long_name) |l| gpa.free(l);
-            long_name = null;
-        }
-        if (name.len == 0) continue;
-        if (mode == 't') {
-            rt.out.print("{s}\n", .{name});
-            at += @intCast(body_blocks);
-            continue;
-        }
-        if (verbose) rt.out.print("{s}\n", .{name});
-        // Never write outside where we were pointed.
-        if (name[0] == '/' or std.mem.indexOf(u8, name, "..") != null) {
-            rt.err.print("tar: skipping {s}\n", .{name});
-            at += @intCast(body_blocks);
-            status = 1;
-            continue;
-        }
-        switch (kind) {
-            '5' => file.makePath(std.mem.trimEnd(u8, name, "/")),
-            '2' => {
-                const target = std.mem.sliceTo(h[157..257], 0);
-                var tbuf: [256]u8 = undefined;
-                var nbuf: [1100]u8 = undefined;
-                if (rt.cstr(&tbuf, target)) |t| if (rt.cstr(&nbuf, name)) |n| {
-                    _ = sys.syscall3(266, @intFromPtr(t), @bitCast(@as(isize, -100)), @intFromPtr(n)); // symlinkat
-                };
-            },
-            else => {
-                if (at + size > data.len) break;
-                file.makeParents(name);
-                var nbuf: [1100]u8 = undefined;
-                const dest = rt.cstr(&nbuf, name) orelse continue;
-                const mode_bits = readOctal(h[100..108]);
-                file.write(dest, data[at..][0..@intCast(size)], if (mode_bits == 0) 0o644 else mode_bits) catch {
-                    rt.err.print("tar: can't write {s}\n", .{name});
-                    status = 1;
-                };
-            },
-        }
-        at += @intCast(body_blocks);
-    }
-    return status;
+    return if (tarlib.extract(data, null, verbose) > 0) 1 else 0;
 }
+
 
 fn chdir(path: []const u8) void {
     var buf: [1100]u8 = undefined;

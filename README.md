@@ -106,6 +106,34 @@ echo -n hello > /dev/clipboard   # then Ctrl+U in edit, or Ctrl+V in textedit
 cat /dev/clipboard               # what a window copied
 ```
 
+## Archives and packages
+
+`gzip` (with `gunzip` and `zcat`), `tar` and `zip` (with `unzip`) are our own, built on a DEFLATE
+of our own in `user/src/lib/deflate.zig`. They write the real formats and read other people's:
+`tests/archive.py` checks every one of them both ways round against BusyBox.
+
+```sh
+tar -czf etc.tar.gz /etc     # pack        tar -tzf etc.tar.gz   # look inside
+tar -xzf etc.tar.gz -C /tmp  # unpack      zip -r notes.zip notes/ ; unzip notes.zip
+```
+
+`pkg` installs things and remembers what each one left behind, so it can take it away again:
+
+```sh
+pkg info /usr/share/examples/hello_1.0_all.deb   # what's in it
+pkg install /usr/share/examples/hello_1.0_all.deb
+hello                                            # the program it brought
+pkg list ; pkg files hello ; pkg remove hello
+```
+
+- **`.deb`** — a Linux package: an `ar` archive of `control.tar.gz` and `data.tar.gz`, unpacked
+  onto the system. Debian's tools now compress with zstd by default, which we don't read yet; a
+  package built with `dpkg-deb -Zgzip` (what the sample one is) works, and real `dpkg` reads those
+  too.
+- **`.zip`** — a Windows program kept as it is. It goes into `/opt/NAME`, and each `.exe` gets its
+  plain name in `/bin`, so `winapi` runs `/opt/demo/winapi.exe` through the Windows layer.
+- **`.exe`** — one Windows program, into `/bin`.
+
 ## The command line
 
 The same layout as Linux:
@@ -129,6 +157,7 @@ clock &            # the time, big
 calc &             # a calculator (click, or type: 7*6 Enter)
 files /etc &       # browse folders, peek into files
 textedit notes &   # a text editor
+eyes &             # two eyes that follow the mouse, after X11's xeyes
 widgets &          # a tour of the widgets
 textclock &        # a text app in a window
 ```
@@ -184,7 +213,8 @@ windows/src/     the Windows layer: PE loader, kernel32, msvcrt (C++)
 rootfs/          files copied into the root file system (/etc ...)
 disk/            what a new disk starts with (out/disk.img is made from it once)
 tests/           test programs (C, and Windows ones in windows/) and the test scripts:
-                 smoke.py, persist.py, windows.py, edit.py, textedit.py, session.sh
+                 smoke.py, persist.py, windows.py, edit.py, textedit.py, archive.py,
+                 pkg.py, session.sh
 ```
 
 ## Building and running
@@ -207,6 +237,8 @@ python3 tests/persist.py  # save files and a git repo, reboot, find them again
 python3 tests/windows.py  # open text and graphical windows, use them with the mouse
 python3 tests/edit.py     # type in the text editor, undo, cut and paste, save
 python3 tests/textedit.py # the same in a window, through the shared clipboard
+python3 tests/archive.py  # gzip, tar and zip, checked against BusyBox both ways
+python3 tests/pkg.py      # a real .deb, and a Windows program in a .zip, on and off again
 ```
 
 ## Roadmap

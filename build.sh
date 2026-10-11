@@ -26,7 +26,7 @@ mkdir -p "$stage/bin" "$stage/sbin" "$out"
 cp -r "$root/rootfs/." "$stage/"
 find "$stage" -type d -exec chmod 755 {} +
 find "$stage" -type f -exec chmod 644 {} +
-for program in init kpsh ls cat echo uname fileops kpfetch clock textclock widgets calc files edit textedit eyes gzip tar zip; do
+for program in init kpsh ls cat echo uname fileops kpfetch clock textclock widgets calc files edit textedit eyes gzip tar zip pkg; do
     dest="$stage/bin/$program"
     [[ $program == init ]] && dest="$stage/sbin/init"
     "$zig" build-exe "$root/user/src/$program.zig" -target x86_64-linux-none -O ${ZIG_MODE:-ReleaseSmall} -fstrip \
@@ -92,6 +92,27 @@ fastfetch="${FASTFETCH:-$HOME/src/fastfetch/build/fastfetch}"
 if [[ -x "$fastfetch" ]]; then
     step "fastfetch ($fastfetch)"
     add_host_program "$fastfetch"
+fi
+
+step "a sample package"
+# A real .deb, built by dpkg-deb, for `pkg install` to chew on. Debian's tools default to zstd
+# these days, which we don't unpack, so this one is made with gzip (dpkg reads it either way).
+if command -v dpkg-deb >/dev/null; then
+    pkgdir="$(mktemp -d)"
+    mkdir -p "$pkgdir/DEBIAN" "$pkgdir/usr/bin" "$pkgdir/usr/share/doc/hello"
+    cat > "$pkgdir/DEBIAN/control" <<'CONTROL'
+Package: hello
+Version: 1.0
+Architecture: all
+Maintainer: KernelProject2
+Description: a sample package, to try `pkg install` with
+CONTROL
+    printf '#!/bin/kpsh\necho "Hello from a package!"\n' > "$pkgdir/usr/bin/hello"
+    echo "Installed by pkg(1)." > "$pkgdir/usr/share/doc/hello/README"
+    chmod 755 "$pkgdir/usr/bin/hello"
+    mkdir -p "$stage/usr/share/examples"
+    dpkg-deb --build -Zgzip "$pkgdir" "$stage/usr/share/examples/hello_1.0_all.deb" >/dev/null
+    rm -rf "$pkgdir"
 fi
 
 step "fonts"
