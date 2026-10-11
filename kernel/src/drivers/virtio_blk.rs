@@ -25,7 +25,7 @@ pub static DISK: Mutex<Option<Disk>> = Mutex::new(None);
 
 /// Finds the first virtio block device and sets it up.
 pub fn init() {
-    let Some(mut dev) = virtio::start(&[0x1001, 0x1042], "virtio-blk") else { return };
+    let Some(mut dev) = virtio::start(&[0x1001, 0x1042], "virtio-blk", 0) else { return };
     let (Some(queue), Some(request_page)) = (dev.queue(0, QUEUE_SIZE), frame::alloc()) else {
         crate::log!("virtio-blk: out of memory");
         return;

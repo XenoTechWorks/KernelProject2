@@ -14,6 +14,7 @@ mod fs;
 mod keyboard;
 mod mm;
 mod mouse;
+mod net;
 mod proc;
 mod smbios;
 mod sys;
@@ -134,6 +135,7 @@ extern "C" fn kmain() -> ! {
     // Home lives on the disk when there is one, so what you make there survives a reboot.
     drivers::virtio_blk::init();
     drivers::virtio_input::init();
+    drivers::virtio_net::init();
     fs::mount_disk("/root");
     mouse::init();
     irq::init();

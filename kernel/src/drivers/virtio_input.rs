@@ -44,7 +44,7 @@ unsafe impl Send for Tablet {}
 static TABLET: Mutex<Option<Tablet>> = Mutex::new(None);
 
 pub fn init() {
-    let Some(mut dev) = virtio::start(&[0x1052], "virtio-input") else { return };
+    let Some(mut dev) = virtio::start(&[0x1052], "virtio-input", 0) else { return };
     let (Some(queue), Some(page)) = (dev.queue(0, EVENTS), frame::alloc()) else { return };
     // Ask the device for each axis's range (select ABS_INFO, subselect the axis).
     let mut range = [(0, 32767); 2];

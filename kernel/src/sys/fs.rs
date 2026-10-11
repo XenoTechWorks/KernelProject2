@@ -18,7 +18,7 @@ const O_EXCL: u32 = 0o200;
 const O_NOCTTY: u32 = 0o400;
 const O_TRUNC: u32 = 0o1000;
 const O_APPEND: u32 = 0o2000;
-const O_NONBLOCK: u32 = 0o4000;
+pub const O_NONBLOCK: u32 = 0o4000;
 const O_DIRECTORY: u32 = 0o200000;
 const O_NOFOLLOW: u32 = 0o400000;
 const O_CLOEXEC: u32 = 0o2000000;
@@ -128,6 +128,17 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
             }
             proc::sleep()?;
         },
+        Handle::Socket(sock) => loop {
+            if let Some(packet) = sock.queue.lock().pop_front() {
+                let n = packet.data.len().min(buf.len());
+                buf[..n].copy_from_slice(&packet.data[..n]);
+                return Ok(n as u64);
+            }
+            if nonblocking(file) {
+                return Err(EAGAIN);
+            }
+            proc::sleep()?;
+        },
         Handle::PipeRead(pipe) => loop {
             {
                 let mut q = pipe.buffer.lock();
@@ -195,6 +206,14 @@ fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
         },
         Handle::Window(window) => {
             crate::console::window_write(window.id, data);
+            Ok(data.len() as u64)
+        }
+        Handle::Socket(sock) => {
+            let Some((ip, port)) = *sock.peer.lock() else { return Err(EDESTADDRREQ) };
+            if *sock.port.lock() == 0 {
+                *sock.port.lock() = crate::net::socket::free_port();
+            }
+            crate::net::socket::send(sock, ip, port, data);
             Ok(data.len() as u64)
         }
         Handle::PipeWrite(pipe) => {
@@ -459,6 +478,7 @@ fn stat_of(handle: &Handle) -> Stat {
         }
         Handle::PipeRead(_) | Handle::PipeWrite(_) => Stat { dev: 2, mode: fs::S_IFIFO | 0o600, nlink: 1, blksize: 4096, ..Default::default() },
         Handle::Window(_) => Stat { mode: fs::S_IFCHR | 0o666, nlink: 1, blksize: 4096, ..Default::default() },
+        Handle::Socket(_) => Stat { mode: 0o140666, nlink: 1, blksize: 4096, ..Default::default() }, // S_IFSOCK
     }
 }
 
@@ -481,6 +501,7 @@ fn handle_for(dirfd: i32, path_ptr: u64, flags: u32) -> Result<Handle, Errno> {
                 Handle::PipeRead(pp) => Handle::PipeRead(pp.clone()),
                 Handle::PipeWrite(pp) => Handle::PipeWrite(pp.clone()),
                 Handle::Window(w) => Handle::Window(w.clone()),
+                Handle::Socket(s) => Handle::Socket(s.clone()),
             },
             None => Handle::Node(fs::lookup(&p.files().cwd, true)?),
         });
@@ -578,6 +599,9 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
             return Ok(0);
         }
         _ => {}
+    }
+    if let Handle::Socket(_) = &file.handle {
+        return super::net::net_ioctl(request, arg);
     }
     if let Handle::Window(window) = &file.handle {
         return match request {
@@ -903,6 +927,7 @@ fn readiness(fd: i32) -> i16 {
             }
             r
         }
+        Handle::Socket(sock) => POLLOUT | if sock.queue.lock().is_empty() { 0 } else { POLLIN },
         Handle::Window(window) => {
             let closed = window.closed.load(Ordering::Relaxed);
             let input = !window.input.lock().is_empty();

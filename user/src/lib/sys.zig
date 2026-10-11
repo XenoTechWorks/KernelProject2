@@ -84,6 +84,31 @@ pub inline fn syscall4(n: usize, a: usize, b: usize, c: usize, d: usize) usize {
         : .{ .rcx = true, .r11 = true, .memory = true });
 }
 
+pub inline fn syscall5(n: usize, a: usize, b: usize, c: usize, d: usize, e: usize) usize {
+    return asm volatile ("syscall"
+        : [ret] "={rax}" (-> usize),
+        : [n] "{rax}" (n),
+          [a] "{rdi}" (a),
+          [b] "{rsi}" (b),
+          [c] "{rdx}" (c),
+          [d] "{r10}" (d),
+          [e] "{r8}" (e),
+        : .{ .rcx = true, .r11 = true, .memory = true });
+}
+
+pub inline fn syscall6(n: usize, a: usize, b: usize, c: usize, d: usize, e: usize, f: usize) usize {
+    return asm volatile ("syscall"
+        : [ret] "={rax}" (-> usize),
+        : [n] "{rax}" (n),
+          [a] "{rdi}" (a),
+          [b] "{rsi}" (b),
+          [c] "{rdx}" (c),
+          [d] "{r10}" (d),
+          [e] "{r8}" (e),
+          [f] "{r9}" (f),
+        : .{ .rcx = true, .r11 = true, .memory = true });
+}
+
 /// A system call result: a value, or a Linux error number.
 pub const Result = union(enum) {
     ok: usize,

@@ -8,6 +8,7 @@ pub mod errno;
 pub mod fs;
 pub mod mem;
 pub mod misc;
+pub mod net;
 pub mod process;
 
 use crate::arch::idt::TrapFrame;
@@ -111,6 +112,15 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         119 => process::set_regid(a[0] as u32, a[1] as u32),
         118 | 120 => process::get_res(n, a[0], a[1], a[2]),
         92 | 93 | 260 => fs::chown(n, a),
+        41 => net::socket(a[0] as u32, a[1] as u32, a[2] as u32),
+        42 => net::connect(a[0] as i32, a[1], a[2]),
+        44 => net::sendto(a[0] as i32, a[1], a[2] as usize, a[4], a[5]),
+        45 => net::recvfrom(a[0] as i32, a[1], a[2] as usize, a[4], a[5]),
+        49 => net::bind(a[0] as i32, a[1], a[2]),
+        51 => net::getsockname(a[0] as i32, a[1], a[2]),
+        52 => net::getpeername(a[0] as i32, a[1], a[2]),
+        54 => net::setsockopt(),
+        55 => net::getsockopt(a[3], a[4]),
         109 => process::setpgid(a[0] as u32, a[1] as u32),
         110 => Ok(crate::proc::current().ppid as u64),
         111 => Ok(crate::proc::current().pgid as u64),

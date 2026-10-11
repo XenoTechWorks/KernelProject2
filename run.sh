@@ -18,4 +18,5 @@ if [[ -f "$root/out/disk.img" ]]; then
 fi
 exec qemu-system-x86_64 -M q35 -m 1G -cdrom "$root/out/kernelproject2.iso" \
     -device virtio-tablet-pci,disable-legacy=on \
+    -netdev user,id=n0 -device virtio-net-pci,netdev=n0,disable-legacy=on \
     -serial stdio -no-reboot "${display[@]}" "${disk[@]}" "$@"

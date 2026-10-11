@@ -77,6 +77,8 @@ pub struct Device {
     notify_multiplier: u32,
     /// The device-specific configuration (what it is: a disk's size, an input device's name...).
     pub config: *mut u8,
+    /// The feature bits (0..31) both sides agreed on.
+    pub features: u32,
 }
 
 /// A queue: the descriptor table, the available ring (ours) and the used ring (the device's).
@@ -119,8 +121,9 @@ impl Queue {
 }
 
 /// Finds the first virtio device with one of these PCI device ids (legacy and modern), resets it
-/// and agrees on features (only VIRTIO_F_VERSION_1). `name` is for the log.
-pub fn start(ids: &[u16], name: &str) -> Option<Device> {
+/// and agrees on features: VIRTIO_F_VERSION_1, plus any of `wanted` (the device's own feature
+/// bits 0..31) that it offers. `name` is for the log. The features agreed on are in `features`.
+pub fn start(ids: &[u16], name: &str, wanted: u32) -> Option<Device> {
     let dev = pci::devices().into_iter().find(|d| d.vendor == 0x1AF4 && ids.contains(&d.device))?;
     dev.enable();
 
@@ -158,8 +161,10 @@ pub fn start(ids: &[u16], name: &str) -> Option<Device> {
         crate::log!("{name}: device lacks VIRTIO_F_VERSION_1");
         return None;
     }
+    w32(common, DEVICE_FEATURE_SELECT, 0);
+    let features = r32(common, DEVICE_FEATURE) & wanted;
     w32(common, DRIVER_FEATURE_SELECT, 0);
-    w32(common, DRIVER_FEATURE, 0);
+    w32(common, DRIVER_FEATURE, features);
     w32(common, DRIVER_FEATURE_SELECT, 1);
     w32(common, DRIVER_FEATURE, 1);
     w8(common, DEVICE_STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK);
@@ -167,7 +172,7 @@ pub fn start(ids: &[u16], name: &str) -> Option<Device> {
         crate::log!("{name}: features not accepted");
         return None;
     }
-    Some(Device { common, notify_base, notify_multiplier, config })
+    Some(Device { common, notify_base, notify_multiplier, config, features })
 }
 
 impl Device {

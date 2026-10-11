@@ -15,6 +15,8 @@ pub enum Handle {
     PipeWrite(Arc<Pipe>),
     /// A window on the screen, made by opening /dev/window.
     Window(Arc<crate::console::Window>),
+    /// A network socket (net/socket.rs).
+    Socket(Arc<crate::net::socket::Socket>),
 }
 
 pub struct OpenFile {
@@ -55,6 +57,7 @@ impl Drop for OpenFile {
             Handle::Node(_) => return,
             // The last descriptor for a window is gone: take it off the screen.
             Handle::Window(w) => crate::console::close_window(w.id),
+            Handle::Socket(s) => crate::net::socket::remove(s),
         }
         crate::proc::wake_all();
     }

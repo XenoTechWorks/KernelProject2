@@ -37,7 +37,8 @@ class Machine:
         if disk:
             args += ["-drive", f"file={disk},if=none,id=home,format=raw",
                      "-device", "virtio-blk-pci,drive=home,disable-legacy=on"]
-        args += ["-device", "virtio-tablet-pci,disable-legacy=on"]
+        args += ["-device", "virtio-tablet-pci,disable-legacy=on",
+                 "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0,disable-legacy=on"]
         self.qemu = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self._wait_for_prompt(60)
 
