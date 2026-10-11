@@ -6,6 +6,77 @@ use crate::arch::idt::TrapFrame;
 use crate::mm::user;
 use crate::proc::{self, SigAction};
 
+/// Changing who we are. Only root may become somebody else; anyone may go back to their real id
+/// (which is how a set-user-id program drops the privilege it was given).
+pub fn set_uid(uid: u32) -> SysResult {
+    let p = proc::current();
+    if !p.creds.is_root() && uid != p.creds.uid {
+        return Err(EPERM);
+    }
+    set_all(proc::Credentials { uid, euid: uid, ..p.creds });
+    Ok(0)
+}
+
+pub fn set_gid(gid: u32) -> SysResult {
+    let p = proc::current();
+    if !p.creds.is_root() && gid != p.creds.gid {
+        return Err(EPERM);
+    }
+    set_all(proc::Credentials { gid, egid: gid, ..p.creds });
+    Ok(0)
+}
+
+/// setreuid and setresuid: -1 (as an unsigned number) means "leave this one alone".
+pub fn set_reuid(real: u32, effective: u32) -> SysResult {
+    let p = proc::current();
+    let mut creds = p.creds;
+    if real != u32::MAX {
+        creds.uid = real;
+    }
+    if effective != u32::MAX {
+        creds.euid = effective;
+    }
+    if !p.creds.is_root() && (creds.uid != p.creds.uid || (creds.euid != p.creds.uid && creds.euid != p.creds.euid)) {
+        return Err(EPERM);
+    }
+    set_all(creds);
+    Ok(0)
+}
+
+pub fn set_regid(real: u32, effective: u32) -> SysResult {
+    let p = proc::current();
+    let mut creds = p.creds;
+    if real != u32::MAX {
+        creds.gid = real;
+    }
+    if effective != u32::MAX {
+        creds.egid = effective;
+    }
+    if !p.creds.is_root() && (creds.gid != p.creds.gid || (creds.egid != p.creds.gid && creds.egid != p.creds.egid)) {
+        return Err(EPERM);
+    }
+    set_all(creds);
+    Ok(0)
+}
+
+/// getresuid and getresgid: the real, effective and saved ids (we keep no separate saved one).
+pub fn get_res(n: u64, real: u64, effective: u64, saved: u64) -> SysResult {
+    let p = proc::current();
+    let (r, e) = if n == 118 { (p.creds.uid, p.creds.euid) } else { (p.creds.gid, p.creds.egid) };
+    for (at, value) in [(real, r), (effective, e), (saved, e)] {
+        user::write_struct(p.space(), at, &value)?;
+    }
+    Ok(0)
+}
+
+/// Credentials belong to the whole process, so every thread of it moves together.
+fn set_all(creds: proc::Credentials) {
+    let tgid = proc::current().tgid;
+    for t in proc::threads(tgid) {
+        t.creds = creds;
+    }
+}
+
 pub fn clone(frame: &TrapFrame, flags: u64, new_sp: u64, parent_tid: u64, child_tid: u64, tls: u64) -> SysResult {
     Ok(proc::fork(frame, flags, new_sp, parent_tid, child_tid, tls)? as u64)
 }
@@ -145,16 +216,6 @@ pub fn setsid() -> SysResult {
     Ok(tgid as u64)
 }
 
-/// getresuid / getresgid: everyone is root for now.
-pub fn getresid(a: [u64; 6]) -> SysResult {
-    let p = proc::current();
-    for ptr in &a[..3] {
-        if *ptr != 0 {
-            user::write_struct(p.space(), *ptr, &0u32)?;
-        }
-    }
-    Ok(0)
-}
 
 pub fn arch_prctl(code: u32, addr: u64) -> SysResult {
     const ARCH_SET_GS: u32 = 0x1001;

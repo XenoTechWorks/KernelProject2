@@ -319,6 +319,15 @@ pub fn open_path(path: &str, flags: u32, mode: u32) -> SysResult {
         Err(e) => return Err(e),
     };
     if flags & O_PATH == 0 {
+        // Read, write, or both: 4 and 2 of the permission bits.
+        let want = match flags & O_ACCMODE {
+            O_WRONLY => 2,
+            O_RDWR => 6,
+            _ => 4,
+        } | if flags & O_TRUNC != 0 { 2 } else { 0 };
+        if !allowed(&node, want) {
+            return Err(EACCES);
+        }
         if flags & O_DIRECTORY != 0 && !node.is_dir() {
             return Err(ENOTDIR);
         }
@@ -339,6 +348,12 @@ pub fn open_path(path: &str, flags: u32, mode: u32) -> SysResult {
         OpenFile::node(node, kept, String::from(path))
     };
     Ok(p.files().fds.insert(file, flags & O_CLOEXEC != 0, 0)? as u64)
+}
+
+/// May this process touch the file that way? `want` is 4 to read, 2 to write, 1 to run.
+pub fn allowed(node: &Node, want: u32) -> bool {
+    let (uid, gid) = node.owner();
+    proc::current().creds.allows(node.st_mode() & 0o7777, uid, gid, want)
 }
 
 pub fn close(fd: i32) -> SysResult {
@@ -424,9 +439,12 @@ fn stat_of(handle: &Handle) -> Stat {
         Handle::Node(node) => {
             let size = node.size() as i64;
             let mtime = node.mtime() as i64;
+            let (uid, gid) = node.owner();
             Stat {
                 dev: node.dev(),
                 ino: node.inode_number(),
+                uid,
+                gid,
                 nlink: node.nlink(),
                 mode: node.st_mode(),
                 rdev: rdev(node),
@@ -794,7 +812,31 @@ pub fn chmod(n: u64, a: [u64; 6]) -> SysResult {
         },
         _ => (fs::lookup(&resolve(a[0] as i32, a[1])?, true)?, a[2]),
     };
+    let p = proc::current();
+    let (owner, _) = node.owner();
+    if !p.creds.is_root() && p.creds.euid != owner {
+        return Err(EPERM);
+    }
     node.set_mode(mode as u32 & 0o7777)?;
+    Ok(0)
+}
+
+/// chown, fchown, fchownat: only root may hand a file to somebody else.
+pub fn chown(n: u64, a: [u64; 6]) -> SysResult {
+    let p = proc::current();
+    let (node, uid, gid) = match n {
+        92 => (fs::lookup(&resolve(AT_FDCWD, a[0])?, true)?, a[1] as u32, a[2] as u32),
+        93 => match &p.files().fds.get(a[0] as i32)?.handle {
+            Handle::Node(node) => (node.clone(), a[1] as u32, a[2] as u32),
+            _ => return Ok(0),
+        },
+        _ => (fs::lookup(&resolve(a[0] as i32, a[1])?, a[4] as u32 & AT_SYMLINK_NOFOLLOW == 0)?, a[2] as u32, a[3] as u32),
+    };
+    if !p.creds.is_root() {
+        return Err(EPERM);
+    }
+    let (old_uid, old_gid) = node.owner();
+    node.set_owner(if uid == u32::MAX { old_uid } else { uid }, if gid == u32::MAX { old_gid } else { gid })?;
     Ok(0)
 }
 

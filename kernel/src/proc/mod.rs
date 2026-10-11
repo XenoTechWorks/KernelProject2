@@ -99,6 +99,41 @@ pub struct Files {
     pub umask: u32,
 }
 
+/// Who a process is. The real id is who started it; the effective one is what permissions are
+/// checked against, and what a set-user-id program runs as. uid 0 is root, who may do anything.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Credentials {
+    pub uid: u32,
+    pub gid: u32,
+    pub euid: u32,
+    pub egid: u32,
+}
+
+impl Credentials {
+    pub const ROOT: Credentials = Credentials { uid: 0, gid: 0, euid: 0, egid: 0 };
+
+    pub fn is_root(&self) -> bool {
+        self.euid == 0
+    }
+
+    /// What a file's permission bits have to allow, given who owns it: the owner's digit, the
+    /// group's, or everyone else's.
+    pub fn allows(&self, mode: u32, owner: u32, group: u32, want: u32) -> bool {
+        if self.is_root() {
+            // root may read and write anything, but still needs a least one execute bit set.
+            return want != 1 || mode & 0o111 != 0;
+        }
+        let bits = if self.euid == owner {
+            mode >> 6
+        } else if self.egid == group {
+            mode >> 3
+        } else {
+            mode
+        };
+        bits & want == want
+    }
+}
+
 pub type Handlers = [SigAction; 65];
 
 pub struct Process {
@@ -110,6 +145,8 @@ pub struct Process {
     pub pgid: u32,
     pub sid: u32,
     pub state: State,
+    /// Who it runs as.
+    pub creds: Credentials,
     pub name: String,
     pub exe: String,
     /// The arguments it was started with, NUL-separated (/proc/<pid>/cmdline).
@@ -275,6 +312,7 @@ fn new_task(pid: u32, mem: Arc<Shared<Memory>>, files: Arc<Shared<Files>>, handl
     Box::new(Process {
         pid,
         tgid: pid,
+        creds: Credentials::ROOT,
         ppid: 0,
         pgid: pid,
         sid: pid,
@@ -518,6 +556,7 @@ pub fn fork(frame: &TrapFrame, flags: u64, new_sp: u64, parent_tid: u64, child_t
     s.next_pid += 1;
     let mut child = new_task(pid, mem, files, handlers);
     let thread = flags & CLONE_THREAD != 0;
+    child.creds = parent.creds;
     child.tgid = if thread { parent.tgid } else { pid };
     child.ppid = if thread || flags & CLONE_PARENT != 0 { parent.ppid } else { parent.tgid };
     child.pgid = parent.pgid;
@@ -565,6 +604,19 @@ pub fn fork(frame: &TrapFrame, flags: u64, new_sp: u64, parent_tid: u64, child_t
 
 /// Replaces the current program (execve). On success the system call "returns" into the new program.
 pub fn exec(frame: &mut TrapFrame, path: &str, args: &[String], env: &[String]) -> Result<(), Errno> {
+    // A set-user-id program runs as whoever owns it: that's how `su` reads /etc/shadow without
+    // the person running it being able to.
+    let grant = match crate::fs::lookup(path, true) {
+        Ok(node) => {
+            let mode = node.st_mode();
+            let (uid, gid) = node.owner();
+            (
+                (mode & crate::fs::S_ISUID != 0).then_some(uid),
+                (mode & crate::fs::S_ISGID != 0).then_some(gid),
+            )
+        }
+        Err(_) => (None, None),
+    };
     let mut image = Some(elf::load(path, args, env)?);
     let p = current();
     // Other threads end, as on Linux.
@@ -600,6 +652,12 @@ pub fn exec(frame: &mut TrapFrame, path: &str, args: &[String], env: &[String]) 
         }
     }
     p.handlers = Shared::new(handlers);
+    if let Some(uid) = grant.0 {
+        p.creds.euid = uid;
+    }
+    if let Some(gid) = grant.1 {
+        p.creds.egid = gid;
+    }
     p.name = elf::short_name(args.first().map_or(path, |a| a.as_str()));
     p.exe = exe;
     p.cmdline = cmdline_of(args);

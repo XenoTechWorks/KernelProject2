@@ -134,6 +134,36 @@ pkg list ; pkg files hello ; pkg remove hello
   plain name in `/bin`, so `winapi` runs `/opt/demo/winapi.exe` through the Windows layer.
 - **`.exe`** — one Windows program, into `/bin`.
 
+## Accounts
+
+The machine boots straight into a root shell, as a thing you're building should. Beside that
+there are real accounts:
+
+```sh
+useradd jax        # make one (root only)
+passwd jax         # give them a password
+su jax             # become them
+whoami ; id        # who you are
+login              # ask for a name and password
+```
+
+Accounts live in `/etc/passwd` and their passwords, hashed, in `/etc/shadow`, which only root can
+read. The hashing is sha256crypt (`$5$...`), worked out byte for byte the same as glibc, so a line
+copied from a Linux machine works here and the other way round.
+
+The permissions are real, not for show. The kernel gives every process a user and group, checks a
+file's mode bits against them when it's opened, and honours the set-user-id bit: `su` is owned by
+root with that bit set, which is how it reads `/etc/shadow` when you can't. Try it:
+
+```sh
+su jax
+cat /etc/shadow    # Permission denied
+useradd bob        # useradd: only root can add users
+```
+
+**No SSH yet**: there's no networking at all (no network card driver, no TCP/IP), so SSH, `curl`
+and anything else over a wire are a separate piece of work still to come.
+
 ## The command line
 
 The same layout as Linux:
@@ -214,7 +244,7 @@ rootfs/          files copied into the root file system (/etc ...)
 disk/            what a new disk starts with (out/disk.img is made from it once)
 tests/           test programs (C, and Windows ones in windows/) and the test scripts:
                  smoke.py, persist.py, windows.py, edit.py, textedit.py, archive.py,
-                 pkg.py, session.sh
+                 pkg.py, accounts.py, session.sh
 ```
 
 ## Building and running
@@ -239,6 +269,7 @@ python3 tests/edit.py     # type in the text editor, undo, cut and paste, save
 python3 tests/textedit.py # the same in a window, through the shared clipboard
 python3 tests/archive.py  # gzip, tar and zip, checked against BusyBox both ways
 python3 tests/pkg.py      # a real .deb, and a Windows program in a .zip, on and off again
+python3 tests/accounts.py # a user, a password, and what they're not allowed to do
 ```
 
 ## Roadmap

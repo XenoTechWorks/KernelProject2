@@ -234,6 +234,23 @@ impl Ext2 {
         fs.write_inode(ino, &raw)
     }
 
+    /// The owner and group recorded in an inode.
+    pub fn owner(&self, ino: u32) -> (u32, u32) {
+        let mut fs = self.inner.lock();
+        match fs.read_inode(ino) {
+            Ok(raw) => (get16(&raw, 2) as u32, get16(&raw, 24) as u32),
+            Err(_) => (0, 0),
+        }
+    }
+
+    pub fn set_owner(&self, ino: u32, uid: u32, gid: u32) -> Result<(), Errno> {
+        let mut fs = self.inner.lock();
+        let mut raw = fs.read_inode(ino)?;
+        put16(&mut raw, 2, uid as u16);
+        put16(&mut raw, 24, gid as u16);
+        fs.write_inode(ino, &raw)
+    }
+
     pub fn set_mode(&self, ino: u32, mode: u32) -> Result<(), Errno> {
         let mut fs = self.inner.lock();
         let mut raw = fs.read_inode(ino)?;

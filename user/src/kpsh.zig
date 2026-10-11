@@ -658,7 +658,10 @@ fn prompt() void {
         dir = dir[home.len..];
         tilde = true;
     }
-    rt.out.print("\x1b[1;32mroot\x1b[0m:\x1b[1;34m{s}{s}\x1b[0m# ", .{ if (tilde) "~" else "", dir });
+    // Who we are, and the usual # for root, $ for everyone else.
+    const uid = sys.syscall0(102); // the real user id
+    const who = getVar("USER") orelse if (uid == 0) "root" else "user";
+    rt.out.print("\x1b[1;32m{s}\x1b[0m:\x1b[1;34m{s}{s}\x1b[0m{s} ", .{ who, if (tilde) "~" else "", dir, if (uid == 0) "#" else "$" });
     rt.out.flush();
 }
 

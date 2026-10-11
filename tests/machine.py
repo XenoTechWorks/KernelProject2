@@ -11,7 +11,8 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]")
-PROMPT = re.compile(rb"root:[^\r\n#]*# $")
+# Any user's prompt: "root:~# " or "jax:~$ ".
+PROMPT = re.compile(rb"[A-Za-z0-9_.-]+:[^\r\n]*[#$] $")
 
 
 class Machine:

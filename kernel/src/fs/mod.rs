@@ -67,6 +67,8 @@ pub enum New<'a> {
 pub struct Node {
     ino: u64,
     mode: Mutex<u32>, // permission bits, for in-memory nodes
+    /// Who owns it, for in-memory nodes (an ext2 file keeps this in its inode).
+    owner: Mutex<(u32, u32)>,
     pub kind: Kind,
     mtime: AtomicU64,
 }
@@ -77,6 +79,9 @@ pub const S_IFLNK: u32 = 0o120000;
 pub const S_IFCHR: u32 = 0o020000;
 pub const S_IFIFO: u32 = 0o010000;
 pub const S_IFMT_MASK: u32 = 0o170000;
+/// Set-user-id and set-group-id: running the file takes on its owner's identity.
+pub const S_ISUID: u32 = 0o4000;
+pub const S_ISGID: u32 = 0o2000;
 
 /// Device numbers reported by stat: the in-memory file system and the first disk (like /dev/vda).
 const DEV_MEMORY: u64 = 1;
@@ -89,6 +94,7 @@ impl Node {
         Arc::new(Node {
             ino: NEXT_INO.fetch_add(1, Ordering::Relaxed),
             mode: Mutex::new(mode & 0o7777),
+            owner: Mutex::new((0, 0)),
             kind,
             mtime: AtomicU64::new(crate::time::realtime().0),
         })
@@ -103,7 +109,7 @@ impl Node {
     }
 
     pub fn ext2(fs: Arc<Ext2>, ino: u32) -> Arc<Node> {
-        Arc::new(Node { ino: ino as u64, mode: Mutex::new(0), kind: Kind::Ext2(fs, ino), mtime: AtomicU64::new(0) })
+        Arc::new(Node { ino: ino as u64, mode: Mutex::new(0), owner: Mutex::new((0, 0)), kind: Kind::Ext2(fs, ino), mtime: AtomicU64::new(0) })
     }
 
     fn ext2_info(&self) -> Option<ext2::Info> {
@@ -147,6 +153,24 @@ impl Node {
         match self.ext2_info() {
             Some(info) => info.mode as u32 & 0o7777,
             None => *self.mode.lock(),
+        }
+    }
+
+    /// Who owns it: (user, group).
+    pub fn owner(&self) -> (u32, u32) {
+        match &self.kind {
+            Kind::Ext2(fs, ino) => fs.owner(*ino),
+            _ => *self.owner.lock(),
+        }
+    }
+
+    pub fn set_owner(&self, uid: u32, gid: u32) -> Result<(), Errno> {
+        match &self.kind {
+            Kind::Ext2(fs, ino) => fs.set_owner(*ino, uid, gid),
+            _ => {
+                *self.owner.lock() = (uid, gid);
+                Ok(())
+            }
         }
     }
 
