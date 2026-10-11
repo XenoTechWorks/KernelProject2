@@ -32,7 +32,12 @@ pub enum Device {
     Random,
     /// /dev/window: each open makes a new window on the screen (console.rs).
     Window,
+    /// /dev/clipboard: what was copied, shared by every program. Writing replaces it (from the
+    /// start of the file), reading returns it.
+    Clipboard,
 }
+
+pub static CLIPBOARD: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
 pub enum Kind {
     Dir(Mutex<BTreeMap<String, Arc<Node>>>),
@@ -530,6 +535,7 @@ pub fn init_devices() {
         ("random", Device::Random, 0o666),
         ("urandom", Device::Random, 0o666),
         ("window", Device::Window, 0o666),
+        ("clipboard", Device::Clipboard, 0o666),
     ] {
         install(&alloc::format!("/dev/{name}"), Node::new(Kind::Device(device), mode));
     }

@@ -347,7 +347,7 @@ impl Term {
     fn clear(&mut self, range: core::ops::Range<usize>) {
         let blank = self.blank();
         for i in range {
-            if i < self.cells.len() {
+            if i < self.cells.len() && self.cells[i] != blank {
                 self.cells[i] = blank;
                 self.dirty[i] = true;
             }
@@ -356,8 +356,11 @@ impl Term {
 
     fn put(&mut self, x: usize, y: usize, cell: Cell) {
         let i = y * self.cols + x;
-        self.cells[i] = cell;
-        self.dirty[i] = true;
+        // Writing what's already there (a full-screen program redrawing) changes nothing.
+        if self.cells[i] != cell {
+            self.cells[i] = cell;
+            self.dirty[i] = true;
+        }
     }
 
     fn move_to(&mut self, x: usize, y: usize) {

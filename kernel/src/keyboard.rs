@@ -21,6 +21,8 @@ pub const KEY_RIGHT: u32 = 0x102;
 pub const KEY_LEFT: u32 = 0x103;
 pub const KEY_HOME: u32 = 0x104;
 pub const KEY_END: u32 = 0x105;
+pub const KEY_PAGE_UP: u32 = 0x106;
+pub const KEY_PAGE_DOWN: u32 = 0x107;
 
 const NORMAL: &[u8; 58] = b"\0\x1b1234567890-=\x7f\tqwertyuiop[]\r\0asdfghjkl;'`\0\\zxcvbnm,./\0*\0 ";
 const SHIFTED: &[u8; 58] = b"\0\x1b!@#$%^&*()_+\x7f\tQWERTYUIOP{}\r\0ASDFGHJKL:\"~\0|ZXCVBNM<>?\0*\0 ";
@@ -68,6 +70,8 @@ pub fn scancode(code: u8) {
             0x4B => (b"\x1b[D", KEY_LEFT),
             0x47 => (b"\x1b[H", KEY_HOME),
             0x4F => (b"\x1b[F", KEY_END),
+            0x49 => (b"\x1b[5~", KEY_PAGE_UP),
+            0x51 => (b"\x1b[6~", KEY_PAGE_DOWN),
             0x53 => (b"\x1b[3~", 127),
             0x1C => (b"\r", 13), // keypad enter
             _ => return,

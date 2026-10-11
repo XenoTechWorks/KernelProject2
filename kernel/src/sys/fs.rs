@@ -91,6 +91,17 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
                 Ok(buf.len() as u64)
             }
             Type::Device(Device::Window) => Err(ENXIO),
+            Type::Device(Device::Clipboard) => {
+                let clip = fs::CLIPBOARD.lock();
+                let mut offset = file.offset.lock();
+                let pos = at.unwrap_or(*offset).min(clip.len() as u64) as usize;
+                let n = buf.len().min(clip.len() - pos);
+                buf[..n].copy_from_slice(&clip[pos..pos + n]);
+                if at.is_none() {
+                    *offset += n as u64;
+                }
+                Ok(n as u64)
+            }
         },
         // What was typed into the window (and mouse clicks); end of file once the user closes it.
         Handle::Window(window) => loop {
@@ -165,6 +176,19 @@ fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
             Type::Symlink => Err(EINVAL),
             Type::Device(Device::Tty) => {
                 crate::tty::write(data);
+                Ok(data.len() as u64)
+            }
+            Type::Device(Device::Clipboard) => {
+                // A write at the start replaces what was there; later writes add to it.
+                let mut clip = fs::CLIPBOARD.lock();
+                let mut offset = file.offset.lock();
+                let pos = at.unwrap_or(*offset) as usize;
+                let keep = pos.min(clip.len());
+                clip.truncate(keep);
+                clip.extend_from_slice(data);
+                if at.is_none() {
+                    *offset = (pos + data.len()) as u64;
+                }
                 Ok(data.len() as u64)
             }
             Type::Device(_) => Ok(data.len() as u64),
@@ -390,6 +414,7 @@ fn rdev(node: &Node) -> u64 {
         Type::Device(Device::Null) => makedev(1, 3),
         Type::Device(Device::Zero) => makedev(1, 5),
         Type::Device(Device::Random) => makedev(1, 9),
+        Type::Device(Device::Clipboard) => makedev(10, 240),
         _ => 0,
     }
 }

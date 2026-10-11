@@ -3,8 +3,8 @@
 
 - a `textclock` (text) window is dragged by its header and closed with its × button;
 - another one is clicked to get the keyboard, and quit with q;
-- the `widgets` (graphical) app draws, its switch turns on when clicked, it gets wider when its
-  right edge is dragged, and × closes it.
+- the `widgets` (graphical) app draws, its switch turns on when clicked, it resizes by its right
+  and left edges, and × closes it.
 
     python3 tests/windows.py      (OUT=dir saves screenshots there)
 """
@@ -173,11 +173,20 @@ with Machine() as m:
     time.sleep(2)
     if out:
         m.screenshot(os.path.join(out, "windows-3.png"))
+
+    # Drag the left edge right by 80: the window shrinks and its right edge (and ×) stays put.
+    p.to(x, y + 200)
+    m.mouse(buttons=1)
+    p.to(x + 80, y + 200)
+    m.mouse(buttons=0)
+    time.sleep(2)
+    x += 80
+    widgets_w -= 80
     widgets_w += 100
     p.click(*close_button(x, y, widgets_w))
     time.sleep(1)
     done = m.run("true")
-    check("resized graphical window closes with × where it is now", done is not None and "[1] Done" in done, done)
+    check("window resized by its right and left edges closes with × where it is now", done is not None and "[1] Done" in done, done)
 
 print(f"{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

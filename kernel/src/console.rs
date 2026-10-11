@@ -4,8 +4,7 @@
 //! to get a window floating over the console, in a frame with a title, a close button and a soft
 //! shadow. A window shows either a small terminal of its own (what the program writes), or pixels
 //! the program draws itself (after the WINDOW_PIXELS ioctl), which is what graphical apps use.
-//! Windows are dragged by their header with the mouse and resized by their right and bottom
-//! edges; clicking one raises it and gives it the keyboard. It's not a desktop: the command line stays underneath.
+//! Windows are dragged by their header with the mouse and resized by their edges; clicking one raises it and gives it the keyboard. It's not a desktop: the command line stays underneath.
 //!
 //! This is a small compositor. The console is drawn into its own layer of pixels, and each window
 //! into its own image (frame, shadow and contents, with alpha at the edges). Showing part of the
@@ -41,7 +40,7 @@ const SHADOW_DROP: i32 = 3;
 const SHADOW_ALPHA: i32 = 100;
 const PAD: i32 = 6; // around a text window's cells
 const CLOSE_RADIUS: i32 = 9;
-/// How far outside a window's right and bottom edges the pointer can grab them to resize.
+/// How far outside a window's edges the pointer can grab them to resize.
 const GRIP: i32 = 6;
 const MIN_SIZE: (i32, i32) = (120, 60);
 
@@ -147,9 +146,9 @@ impl View {
     fn ih(&self) -> i32 {
         self.fh() + 2 * SHADOW
     }
-    /// Where the pointer reaches the window: its frame and a little past its resizable edges.
+    /// Where the pointer reaches the window: its frame and a little past its edges (to resize).
     fn reach(&self) -> Rect {
-        Rect { x: self.x, y: self.y, w: self.fw() + GRIP, h: self.fh() + GRIP }
+        Rect { x: self.x - GRIP, y: self.y - GRIP, w: self.fw() + 2 * GRIP, h: self.fh() + 2 * GRIP }
     }
     fn bounds(&self) -> Rect {
         Rect { x: self.x - SHADOW, y: self.y - SHADOW, w: self.iw(), h: self.ih() }
@@ -168,7 +167,7 @@ enum Part {
     Close,
     Header,
     Border,
-    /// An edge that resizes the window: bit 0 the right one, bit 1 the bottom one.
+    /// Edges that resize the window: bit 0 right, 1 bottom, 2 left, 3 top (two at a corner).
     Resize(u8),
     /// In the contents, at these pixel coordinates.
     Content(i32, i32),
@@ -187,8 +186,9 @@ struct Mouse {
     grab: Option<u32>,
     /// The graphical window the pointer is over (to tell it when the pointer leaves).
     hover: Option<u32>,
-    /// Resizing a window: its id, which edges, and the pointer and contents size at the start.
-    resize: Option<(u32, u8, i32, i32, i32, i32)>,
+    /// Resizing a window: its id, which edges, and at the start: the pointer, the contents size and
+    /// where the window was.
+    resize: Option<(u32, u8, (i32, i32), (i32, i32), (i32, i32))>,
     /// Over a resizable edge: the pointer shows that.
     resize_shape: bool,
     /// Buttons held on each pointing device (the PS/2 mouse, the tablet): QEMU sends moves to one
@@ -453,7 +453,13 @@ impl Screen {
     fn part(view: &View, x: i32, y: i32) -> Part {
         let (fx, fy) = (x - view.x, y - view.y);
         let (cx, cy) = view.close_center();
-        let edges = (fx >= view.fw() - 3 && fy >= HEADER) as u8 | ((fy >= view.fh() - 3) as u8) << 1;
+        let (right, bottom) = (fx >= view.fw() - 3, fy >= view.fh() - 3);
+        let (left, top) = (fx < 3, fy < 3);
+        // The sides below the header (its sides are for dragging); the top only at its very edge.
+        let edges = (right && (fy >= HEADER || top)) as u8
+            | (bottom as u8) << 1
+            | ((left && (fy >= HEADER || top)) as u8) << 2
+            | (top as u8) << 3;
         if (fx - cx).pow(2) + (fy - cy).pow(2) <= (CLOSE_RADIUS + 2).pow(2) {
             Part::Close
         } else if edges != 0 {
@@ -593,11 +599,28 @@ impl Screen {
         let released = self.mouse.buttons & !buttons;
         self.mouse.buttons = buttons;
 
-        if let Some((id, edges, sx, sy, cw, ch)) = self.mouse.resize {
+        if let Some((id, edges, (sx, sy), (cw, ch), (x0, y0))) = self.mouse.resize {
             if let Some(i) = self.index_of(id) {
-                let w = if edges & 1 != 0 { cw + mx - sx } else { cw };
-                let h = if edges & 2 != 0 { ch + my - sy } else { ch };
+                let (dx, dy) = (mx - sx, my - sy);
+                let w = if edges & 1 != 0 { cw + dx } else if edges & 4 != 0 { cw - dx } else { cw };
+                let mut h = if edges & 2 != 0 { ch + dy } else if edges & 8 != 0 { ch - dy } else { ch };
+                if edges & 8 != 0 {
+                    h = h.min(ch + y0); // the top stops at the top of the screen
+                }
                 self.user_resize(i, w, h);
+                // Left and top edges: the opposite edge stays where it was.
+                if edges & 12 != 0 {
+                    let view = &mut self.views[i];
+                    let old = view.bounds();
+                    if edges & 4 != 0 {
+                        view.x = x0 + cw - view.cw;
+                    }
+                    if edges & 8 != 0 {
+                        view.y = y0 + ch - view.ch;
+                    }
+                    let new = view.bounds();
+                    self.show(old.union(new));
+                }
             }
             if released & 1 != 0 {
                 self.mouse.resize = None;
@@ -719,7 +742,7 @@ impl Screen {
             }
             Part::Resize(edges) if pressed & 1 != 0 => {
                 let view = &self.views[i];
-                self.mouse.resize = Some((id, edges, mx, my, view.cw, view.ch));
+                self.mouse.resize = Some((id, edges, (mx, my), (view.cw, view.ch), (view.x, view.y)));
             }
             Part::Header | Part::Border if pressed & 1 != 0 => {
                 let view = &mut self.views[i];

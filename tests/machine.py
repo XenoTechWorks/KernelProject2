@@ -50,6 +50,12 @@ class Machine:
         self.output += chunk
         return True
 
+    def drain(self, quiet=0.3):
+        """Reads what's been printed so far (until nothing comes for `quiet` seconds), so the next
+        command's output doesn't include an earlier program's."""
+        while self._read(quiet):
+            pass
+
     def _wait_for_prompt(self, timeout, start=0):
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -62,6 +68,7 @@ class Machine:
     def run(self, command, timeout=60):
         """Types `command` and returns its output (without the echoed command and the next prompt).
         None if the prompt didn't come back in time."""
+        self.drain()
         start = len(self.output)
         self.qemu.stdin.write(command.encode() + b"\r")
         self.qemu.stdin.flush()
