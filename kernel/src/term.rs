@@ -81,9 +81,14 @@ impl Term {
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
+        // The cursor was painted over this cell at the last flush, and will be painted over the
+        // one we end on: both need repainting, even if their characters don't change (writing a
+        // space over a space used to leave the cursor's underline behind).
+        self.touch_cursor();
         for &b in bytes {
             self.feed(b);
         }
+        self.touch_cursor();
     }
 
     /// Where the cursor is drawn (it may sit just past the last column).

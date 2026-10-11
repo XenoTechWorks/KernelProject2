@@ -422,6 +422,16 @@ pub fn mouse_at(at: Option<(i32, i32)>, buttons: u8, wheel: i32) {
     }
 }
 
+/// Where the pointer is, relative to a window's contents (outside it the numbers go negative or
+/// past its size). For apps that follow the pointer, like `eyes`.
+pub fn window_pointer(id: u32) -> (i32, i32) {
+    let guard = CONSOLE.lock();
+    let Some(screen) = guard.as_ref() else { return (0, 0) };
+    let Some(i) = screen.index_of(id) else { return (0, 0) };
+    let c = screen.views[i].content_rect();
+    (screen.mouse.x - c.x, screen.mouse.y - c.y)
+}
+
 /// The screen's size in pixels.
 pub fn pixel_size() -> (usize, usize) {
     CONSOLE.lock().as_ref().map_or((0, 0), |s| (s.width, s.height))

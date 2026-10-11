@@ -10,6 +10,7 @@ const Rect = @import("canvas.zig").Rect;
 const WINDOW_PIXELS = 0x5701;
 const WINDOW_TITLE = 0x5702;
 const WINDOW_BLIT = 0x5703;
+const WINDOW_POINTER = 0x5704;
 
 const Blit = extern struct { x: u32, y: u32, w: u32, h: u32, stride: u32, pad: u32 = 0, pixels: u64 };
 const Raw = extern struct { kind: u32, x: i32, y: i32, data: u32 };
@@ -85,6 +86,14 @@ pub const Window = struct {
         const start = @as(usize, @intCast(a.y)) * self.canvas.w + @as(usize, @intCast(a.x));
         var b = Blit{ .x = @intCast(a.x), .y = @intCast(a.y), .w = @intCast(a.w), .h = @intCast(a.h), .stride = self.canvas.w, .pixels = @intFromPtr(&self.canvas.pixels[start]) };
         _ = ioctl(self.fd, WINDOW_BLIT, @intFromPtr(&b));
+    }
+
+    /// Where the pointer is, in the window's pixels (outside it the numbers go negative or past
+    /// its size). For following the pointer wherever it goes.
+    pub fn pointer(self: *Window) struct { x: i32, y: i32 } {
+        var at = [2]i32{ 0, 0 };
+        _ = ioctl(self.fd, WINDOW_POINTER, @intFromPtr(&at));
+        return .{ .x = at[0], .y = at[1] };
     }
 
     /// Events waiting to be read right now (to skip redrawing for each of many pointer moves).

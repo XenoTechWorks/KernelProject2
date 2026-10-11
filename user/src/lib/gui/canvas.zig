@@ -117,6 +117,25 @@ pub const Canvas = struct {
         }
     }
 
+    /// An oval `rx` by `ry` across, smoothed at its edge.
+    pub fn ellipse(c: *Canvas, cx: f32, cy: f32, rx: f32, ry: f32, color: u32) void {
+        const x0: i32 = @intFromFloat(@floor(cx - rx - 1));
+        const y0: i32 = @intFromFloat(@floor(cy - ry - 1));
+        const x1: i32 = @intFromFloat(@ceil(cx + rx + 1));
+        const y1: i32 = @intFromFloat(@ceil(cy + ry + 1));
+        var y = y0;
+        while (y <= y1) : (y += 1) {
+            var x = x0;
+            while (x <= x1) : (x += 1) {
+                const dx = (@as(f32, @floatFromInt(x)) + 0.5 - cx) / rx;
+                const dy = (@as(f32, @floatFromInt(y)) + 0.5 - cy) / ry;
+                // Distance in pixels, near enough: how far past the edge, scaled back up.
+                const d = (@sqrt(dx * dx + dy * dy) - 1) * @min(rx, ry);
+                c.blend(x, y, color, coverage(d));
+            }
+        }
+    }
+
     pub fn circle(c: *Canvas, cx: f32, cy: f32, radius: f32, color: u32) void {
         const x0: i32 = @intFromFloat(@floor(cx - radius - 1));
         const y0: i32 = @intFromFloat(@floor(cy - radius - 1));

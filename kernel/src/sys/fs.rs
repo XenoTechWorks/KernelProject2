@@ -581,6 +581,11 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
                 crate::console::window_set_title(window.id, &title);
                 Ok(0)
             }
+            WINDOW_POINTER => {
+                let (x, y) = crate::console::window_pointer(window.id);
+                user::write_struct(p.space(), arg, &[x, y])?;
+                Ok(0)
+            }
             WINDOW_BLIT => {
                 let b: Blit = user::read_struct(p.space(), arg)?;
                 if b.w > 4096 || b.h > 4096 || b.stride < b.w {
@@ -645,6 +650,7 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
 const WINDOW_PIXELS: u32 = 0x5701;
 const WINDOW_TITLE: u32 = 0x5702;
 const WINDOW_BLIT: u32 = 0x5703;
+const WINDOW_POINTER: u32 = 0x5704;
 
 /// The WINDOW_BLIT argument: a w x h piece of a picture in the program's memory (rows `stride`
 /// pixels apart), for (x, y) in the window.
