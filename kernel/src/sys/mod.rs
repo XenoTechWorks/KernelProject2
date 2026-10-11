@@ -42,6 +42,7 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         10 => mem::mprotect(a[0], a[1], a[2] as u32),
         11 => mem::munmap(a[0], a[1]),
         12 => mem::brk(a[0]),
+        25 => mem::mremap(a[0], a[1], a[2], a[3]),
         13 => process::rt_sigaction(a[0] as usize, a[1], a[2]),
         14 => process::rt_sigprocmask(a[0] as u32, a[1], a[2]),
         15 => crate::proc::signal::sigreturn(frame),

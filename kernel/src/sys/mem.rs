@@ -100,6 +100,50 @@ pub fn mmap(addr: u64, len: u64, prot: u32, flags: u32, fd: i32, offset: u64) ->
     Ok(start)
 }
 
+/// Grows or shrinks a mapping, moving it when it has to (what a C library's allocator uses to
+/// resize its heap). Shrinking frees the tail; growing finds room elsewhere and copies.
+pub fn mremap(addr: u64, old_len: u64, new_len: u64, flags: u64) -> SysResult {
+    const MREMAP_MAYMOVE: u64 = 1;
+    if addr % PAGE_SIZE != 0 || new_len == 0 {
+        return Err(EINVAL);
+    }
+    let old_len = old_len.checked_next_multiple_of(PAGE_SIZE).ok_or(ENOMEM)?;
+    let new_len = new_len.checked_next_multiple_of(PAGE_SIZE).ok_or(ENOMEM)?;
+    let p = proc::current();
+    if new_len <= old_len {
+        if new_len < old_len {
+            p.space_mut().unmap_range(addr + new_len, addr + old_len);
+        }
+        return Ok(addr);
+    }
+    if flags & MREMAP_MAYMOVE == 0 {
+        return Err(ENOMEM);
+    }
+    // Somewhere new, the way mmap picks a place.
+    let start = p.mem().mmap_next.checked_sub(new_len).ok_or(ENOMEM)?;
+    if start < p.mem().brk + (64 << 20) {
+        return Err(ENOMEM);
+    }
+    p.mem().mmap_next = start;
+    let end = start.checked_add(new_len).filter(|&e| e <= USER_END).ok_or(ENOMEM)?;
+    let space = p.space_mut();
+    if !space.map_zeroed(start, end, USER | WRITABLE | NO_EXECUTE) {
+        space.unmap_range(start, end);
+        return Err(ENOMEM);
+    }
+    let mut at = 0;
+    while at < old_len {
+        if let (Some((from, _)), Some((to, _))) = (space.translate(addr + at), space.translate(start + at)) {
+            unsafe {
+                core::ptr::copy_nonoverlapping(crate::mm::phys_to_virt(from), crate::mm::phys_to_virt(to), PAGE_SIZE as usize)
+            };
+        }
+        at += PAGE_SIZE;
+    }
+    space.unmap_range(addr, addr + old_len);
+    Ok(start)
+}
+
 pub fn munmap(addr: u64, len: u64) -> SysResult {
     if addr % PAGE_SIZE != 0 || addr.saturating_add(len) > USER_END {
         return Err(EINVAL);

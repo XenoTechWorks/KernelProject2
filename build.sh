@@ -26,7 +26,7 @@ mkdir -p "$stage/bin" "$stage/sbin" "$out"
 cp -r "$root/rootfs/." "$stage/"
 find "$stage" -type d -exec chmod 755 {} +
 find "$stage" -type f -exec chmod 644 {} +
-for program in init kpsh ls cat echo uname fileops kpfetch clock textclock widgets calc files edit textedit eyes; do
+for program in init kpsh ls cat echo uname fileops kpfetch clock textclock widgets calc files edit textedit eyes gzip tar zip; do
     dest="$stage/bin/$program"
     [[ $program == init ]] && dest="$stage/sbin/init"
     "$zig" build-exe "$root/user/src/$program.zig" -target x86_64-linux-none -O ${ZIG_MODE:-ReleaseSmall} -fstrip \
@@ -34,6 +34,8 @@ for program in init kpsh ls cat echo uname fileops kpfetch clock textclock widge
         --global-cache-dir "$HOME/.cache/zig"
 done
 for name in mkdir rm touch clear; do ln -sf fileops "$stage/bin/$name"; done
+for name in gunzip zcat; do ln -sf gzip "$stage/bin/$name"; done
+ln -sf zip "$stage/bin/unzip"
 ln -sf kpsh "$stage/bin/sh"
 
 step "Linux test programs (built with gcc, copied in unchanged)"
