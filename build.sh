@@ -104,6 +104,20 @@ for extra in ${EXTRA_PROGRAMS:-}; do
     fi
 done
 
+# Python needs its standard library beside the binary, so it gets a step of its own. It adds
+# about 30 MiB to the image, so ask for it:  WITH_PYTHON=1 ./build.sh
+if [[ -n "${WITH_PYTHON:-}" ]] && command -v python3 >/dev/null; then
+    py_bin="$(readlink -f "$(command -v python3)")"
+    py_lib="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')"
+    step "python3 ($py_bin)"
+    add_host_program "$py_bin"
+    ln -sf "$(basename "$py_bin")" "$stage/bin/python3"
+    mkdir -p "$stage$(dirname "$py_lib")"
+    # Everything but the test suite, which is a third of it and of no use here.
+    rsync -a --exclude 'test' --exclude 'idlelib' --exclude '__pycache__' "$py_lib/" "$stage$py_lib/" 2>/dev/null ||
+        cp -r "$py_lib" "$stage$(dirname "$py_lib")/"
+fi
+
 fastfetch="${FASTFETCH:-$HOME/src/fastfetch/build/fastfetch}"
 if [[ -x "$fastfetch" ]]; then
     step "fastfetch ($fastfetch)"
