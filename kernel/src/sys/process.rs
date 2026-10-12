@@ -87,6 +87,7 @@ pub fn execve(frame: &mut TrapFrame, dirfd: i32, path_ptr: u64, argv: u64, envp:
     let args = user::read_cstr_array(p.space(), argv)?;
     let env = user::read_cstr_array(p.space(), envp)?;
     proc::exec(frame, &path, &args, &env)?;
+    proc::ptrace::after_exec(proc::current().pid);
     Ok(0)
 }
 

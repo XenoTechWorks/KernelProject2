@@ -21,14 +21,22 @@ use errno::*;
 pub type SysResult = Result<u64, Errno>;
 
 pub fn dispatch(frame: &mut TrapFrame) {
-    let number = frame.rax;
-    let a = [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9];
+    let mut number = frame.rax;
     frame.error = number; // kept so a signal handler can restart the call (SA_RESTART)
-    let result = call(frame, number, a);
+    let traced = crate::proc::current().trace.is_some();
+    if traced {
+        // Its tracer may stop it here, and change the call or its arguments (-1: skip it).
+        number = crate::proc::ptrace::syscall_entry(frame, number);
+    }
+    let a = [frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9];
+    let result = if number == u64::MAX { Err(ENOSYS) } else { call(frame, number, a) };
     frame.rax = match result {
         Ok(v) => v,
         Err(e) => (-e) as u64,
     };
+    if traced {
+        crate::proc::ptrace::syscall_exit(frame);
+    }
     crate::proc::signal::deliver(frame);
 }
 
@@ -70,6 +78,7 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         37 => misc::alarm(a[0]),
         38 => misc::setitimer(a[0] as u32, a[1], a[2]),
         39 => Ok(crate::proc::current().tgid as u64),
+        101 => crate::proc::ptrace::ptrace(a[0], a[1] as u32, a[2], a[3]),
         73 => fs::flock(a[0] as i32, a[1] as u32),
         57 => process::clone(frame, 17, 0, 0, 0, 0),
         58 => process::clone(frame, 0x100 | 0x4000 | 17, 0, 0, 0, 0),
@@ -198,6 +207,8 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         293 => fs::pipe2(a[0], a[1] as u32),
         302 => misc::prlimit64(a[1] as u32, a[3]),
         316 => fs::renameat(a[0] as i32, a[1], a[2] as i32, a[3]),
+        310 => crate::proc::ptrace::process_vm(a[0] as u32, a[1], a[2], a[3], a[4], a[5], false),
+        311 => crate::proc::ptrace::process_vm(a[0] as u32, a[1], a[2], a[3], a[4], a[5], true),
         318 => misc::getrandom(a[0], a[1] as usize),
         332 => fs::statx(a[0] as i32, a[1], a[2] as u32, a[4]),
         334 => Err(ENOSYS), // rseq: glibc works without it

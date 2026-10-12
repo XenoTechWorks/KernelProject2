@@ -125,14 +125,20 @@ const CLD_CONTINUED: i32 = 6;
 /// Stops every thread of the calling process (a stop signal's default action) and lets its parent
 /// know; returns once something continues it.
 fn stop_group(sig: usize) {
-    let tgid = current().tgid;
+    let (tgid, me) = (current().tgid, current().pid);
     for t in super::threads(tgid) {
-        if matches!(t.state, State::Runnable | State::Sleeping) {
+        if t.pid != me && matches!(t.state, State::Runnable | State::Sleeping) {
             t.state = State::Stopped;
         }
     }
     report(tgid, JobEvent::Stopped(sig as u8));
-    while current().state == State::Stopped {
+    // A traced thread's part of the stop is a stop for its tracer, who lets it go.
+    if super::ptrace::group_stop(sig) {
+        return;
+    }
+    current().state = State::Stopped;
+    // (PTRACE_INTERRUPT can turn the stop into a stop for a tracer meanwhile.)
+    while matches!(current().state, State::Stopped | State::Traced) {
         super::yield_now();
     }
 }
@@ -145,6 +151,8 @@ fn continue_group(tgid: u32) {
         t.pending &= !STOP_SIGNALS;
         if t.state == State::Stopped {
             t.state = State::Runnable;
+            was_stopped = true;
+        } else if super::ptrace::group_continued(t) {
             was_stopped = true;
         }
     }
@@ -204,8 +212,10 @@ pub fn send_info(p: &mut Process, sig: usize, info: Info) {
     }
     // An ignored signal is dropped, unless it's blocked: the program may change its mind by the
     // time it unblocks it, or be waiting for it in sigwait (Linux keeps it too).
+    // A traced process's tracer sees even the signals it would ignore by default.
     let blocked = p.sigmask & bit(sig) != 0;
-    if sig != SIGKILL && !blocked && (handler == SIG_IGN || (handler == SIG_DFL && ignored_by_default(sig))) {
+    let default_ignored = handler == SIG_DFL && ignored_by_default(sig) && p.trace.is_none();
+    if sig != SIGKILL && !blocked && (handler == SIG_IGN || default_ignored) {
         return;
     }
     // An ordinary signal already pending isn't queued again; the first one's details stay.
@@ -214,17 +224,26 @@ pub fn send_info(p: &mut Process, sig: usize, info: Info) {
     }
     p.pending |= bit(sig);
     // Wake it either way: a sigwait waits for blocked signals too. SIGKILL ends a stop as well.
-    if p.state == State::Sleeping || (sig == SIGKILL && p.state == State::Stopped) {
+    if p.state == State::Sleeping || (sig == SIGKILL && matches!(p.state, State::Stopped | State::Traced)) {
         p.state = State::Runnable;
     }
 }
 
 /// Acts on pending signals before returning to the program described by `frame`.
 pub fn deliver(frame: &mut TrapFrame) {
+    super::ptrace::interrupted(frame);
+    let mut acted = false;
     loop {
         let p = current();
         let ready = ready(p);
         if ready == 0 {
+            // A system call cut short by signals that, in the end, ran no handler (ignored, dropped
+            // by a tracer, or a stop that's over) starts again, as on Linux: the program never
+            // sees the EINTR.
+            if acted && frame.vector == SYSCALL_VECTOR && frame.rax as i64 == -EINTR {
+                frame.rax = frame.error; // the system call number, saved on entry
+                frame.rip -= 2; // back onto the `syscall` instruction
+            }
             // A call that waited with a mask of its own (sigsuspend, ppoll ...) and no handler to
             // run: the program's own mask comes back now. (A handler restores it on return.)
             if let Some(mask) = p.saved_mask.take() {
@@ -234,6 +253,13 @@ pub fn deliver(frame: &mut TrapFrame) {
         }
         let sig = ready.trailing_zeros() as usize + 1;
         let info = take(p, sig);
+        acted = true;
+        // A tracer sees it first, and may let it through, change it, or drop it.
+        let sig = super::ptrace::signal_stop(frame, sig, info);
+        if sig == 0 {
+            continue;
+        }
+        let p = current();
         let action = p.handlers()[sig];
         match action.handler {
             SIG_IGN => continue,

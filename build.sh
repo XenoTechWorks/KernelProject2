@@ -63,6 +63,7 @@ gcc -O2 -pthread -o "$stage/bin/thread-test" "$root/tests/threads.c"
 gcc -O2 -Wno-unused-result -o "$stage/bin/events-test" "$root/tests/events.c"
 gcc -O2 -Wno-unused-result -o "$stage/bin/pty-test" "$root/tests/ptys.c"
 gcc -O2 -Wno-unused-result -o "$stage/bin/jail-test" "$root/tests/jail.c"
+gcc -O2 -Wno-unused-result -o "$stage/bin/trace-test" "$root/tests/trace.c"
 
 step "Windows layer (winload) and Windows test programs"
 g++ -std=c++20 -O2 -static -fno-exceptions -fno-rtti -Wall -Wextra -o "$stage/bin/winload" "$root"/windows/src/*.cpp
@@ -132,6 +133,12 @@ add_host_program "$sshd_bin"
 mv "$stage/bin/sshd" "$stage/sbin/sshd"
 mkdir -p "$stage/run/sshd" "$stage/var/log"
 chmod 755 "$stage/run/sshd" "$stage/var/log"
+
+# strace, from Ubuntu: it watches another program's system calls through ptrace.
+if [[ -x /usr/bin/strace ]]; then
+    step "strace (/usr/bin/strace)"
+    add_host_program /usr/bin/strace
+fi
 
 # Programs that run others in a pseudo-terminal: script (records a session) and tmux. With them,
 # the terminfo entries that tell full-screen programs how to drive the console (linux) and the

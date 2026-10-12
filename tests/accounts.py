@@ -26,7 +26,8 @@ def typed(m, *parts, wait=0.6):
 
 def answer(m, command, *exchange):
     """Types a command, then answers its prompts: (prompt, reply) pairs, each reply typed once
-    its prompt is on the screen."""
+    its prompt is on the screen; returns once a shell's prompt is back (checking a password takes
+    a moment)."""
     start = len(m.output)
     m.type(command)
     for prompt, reply in exchange:
@@ -35,6 +36,7 @@ def answer(m, command, *exchange):
             m.drain(0.2)
         start = len(m.output)
         m.type(reply)
+    m._wait_for_prompt(30, start)
 
 
 with Machine() as m:
@@ -67,19 +69,15 @@ with Machine() as m:
 
     # Becoming themselves again does ask for the password, and the right one works.
     answer(m, "su jax\r", ("Password: ", "wrong\r"))
-    time.sleep(1)
-    m.drain()
     out = m.run("whoami")
     check("a wrong password is refused", out == "jax", out)
 
     # And the right one lets them through, into a shell inside the first.
     answer(m, "su jax\r", ("Password: ", "secret\r"))
-    time.sleep(2)
-    m.drain()
     check("the right password is accepted", m.run("whoami") == "jax")
-    typed(m, "exit\r", wait=2.0)
+    m.run("exit")
 
-    typed(m, "exit\r", wait=2.5)
+    m.run("exit")
     check("leaving their shell puts root back", m.run("whoami") == "root")
 
 print(f"{sum(results)}/{len(results)} passed")

@@ -14,6 +14,7 @@
 pub mod elf;
 pub mod fd;
 pub mod futex;
+pub mod ptrace;
 pub mod signal;
 pub mod timer;
 
@@ -52,11 +53,13 @@ pub enum State {
     Dead,
     /// Stopped by SIGSTOP, Ctrl+Z (SIGTSTP) and the like, until SIGCONT (or SIGKILL).
     Stopped,
+    /// Stopped for its tracer (ptrace.rs), until the tracer lets it go (or SIGKILL).
+    Traced,
 }
 
 impl State {
     fn alive(self) -> bool {
-        matches!(self, State::Runnable | State::Sleeping | State::Stopped)
+        matches!(self, State::Runnable | State::Sleeping | State::Stopped | State::Traced)
     }
 }
 
@@ -195,6 +198,8 @@ pub struct Process {
     pub vfork_parent: Option<u32>,
     /// For the first thread of a process: a stop or continue its parent hasn't waited for yet.
     pub job_event: Option<JobEvent>,
+    /// Its tracer, and how it's being traced (ptrace.rs).
+    pub trace: Option<Box<ptrace::Trace>>,
     /// The terminal that controls it (its session's), if any: /dev/tty, and where Ctrl+C comes from.
     pub ctty: Option<Arc<crate::tty::Tty>>,
     /// The futex this task waits on, if any.
@@ -371,6 +376,7 @@ fn new_task(pid: u32, mem: Arc<Shared<Memory>>, files: Arc<Shared<Files>>, handl
         fault_addr: None,
         vfork_parent: None,
         job_event: None,
+        trace: None,
         ctty: None,
         futex: None,
         start_ticks: crate::arch::irq::ticks(),
@@ -465,6 +471,7 @@ pub fn sleep() -> Result<(), Errno> {
     }
     p.state = State::Sleeping;
     yield_now();
+    ptrace::interrupted_while_waiting();
     if signal::interrupted(current()) { Err(EINTR) } else { Ok(()) }
 }
 
@@ -510,6 +517,7 @@ fn clear_tid(p: &mut Process) {
 
 /// exit(): ends the current thread; the process ends with its last thread.
 pub fn exit_thread(status: i32) -> ! {
+    ptrace::before_exit(status);
     let p = current();
     clear_tid(p);
     let others = threads(p.tgid).any(|t| t.pid != p.pid && t.state.alive());
@@ -525,6 +533,7 @@ pub fn exit_thread(status: i32) -> ! {
 
 /// exit_group(), or a fatal signal: ends every thread of the current process.
 pub fn exit(status: i32) -> ! {
+    ptrace::before_exit(status);
     let p = current();
     let (me, tgid) = (p.pid, p.tgid);
     // The other threads are parked in the kernel (one CPU), so they can simply be dropped.
@@ -554,6 +563,7 @@ fn finish_process(status: i32) -> ! {
     p.vfork_parent = None;
     let tgid = p.tgid;
     timer::remove(tgid);
+    ptrace::tracer_gone(tgid);
     for child in all() {
         if child.ppid == tgid {
             child.ppid = 1;
@@ -569,8 +579,14 @@ fn finish_process(status: i32) -> ! {
         }
     }
     let uid = p.creds.uid;
+    let info = signal::Info::child_ended(tgid, uid, status);
     if let Some(parent) = get(ppid) {
-        signal::send_info(parent, signal::SIGCHLD, signal::Info::child_ended(tgid, uid, status));
+        signal::send_info(parent, signal::SIGCHLD, info);
+    }
+    // A tracer that isn't the parent hears about it too.
+    let tracer = get(tgid).and_then(|leader| leader.trace.as_ref().map(|t| t.tracer)).filter(|&t| t != ppid);
+    if let Some(tracer) = tracer.and_then(get) {
+        signal::send_info(tracer, signal::SIGCHLD, info);
     }
     wake_all();
     yield_now();
@@ -649,7 +665,12 @@ pub fn fork(frame: &TrapFrame, flags: u64, new_sp: u64, parent_tid: u64, child_t
     if vfork {
         child.vfork_parent = Some(parent.pid);
     }
+    let frame_at = child.kstack_top() - size_of::<TrapFrame>() as u64;
+    let traced = ptrace::on_fork(&mut child, flags, frame_at);
     s.procs.insert(pid, child);
+    if let Some(event) = traced {
+        ptrace::after_fork(event, pid);
+    }
 
     // vfork: the parent waits until the child has exec'd or exited (it may be using our memory).
     if vfork {
@@ -743,21 +764,28 @@ pub fn wait(target: i64, want: WaitFor) -> Result<Option<(u32, i32, u32)>, Errno
     loop {
         let s = sched();
         let me = current();
-        let matches = |p: &Process| {
-            p.ppid == me.tgid
-                && p.pid == p.tgid
-                && p.state != State::Dead
-                && match target {
-                    -1 => true,
-                    0 => p.pgid == me.pgid,
-                    t if t > 0 => p.pid as i64 == t,
-                    t => p.pgid as i64 == -t,
-                }
+        let (my_tgid, my_pgid) = (me.tgid, me.pgid);
+        let chosen = |p: &Process| match target {
+            -1 => true,
+            0 => p.pgid == my_pgid,
+            t if t > 0 => p.pid as i64 == t,
+            t => p.pgid as i64 == -t,
         };
-        if !s.procs.values().any(|p| matches(p)) {
+        // Its children, and the threads it traces (which may be anyone's).
+        let mine = |p: &Process| p.ppid == my_tgid && p.pid == p.tgid && p.state != State::Dead && chosen(p);
+        let traced = |p: &Process| p.trace.as_ref().is_some_and(|t| t.tracer == my_tgid) && p.state != State::Dead && chosen(p);
+        if !s.procs.values().any(|p| mine(p) || traced(p)) {
             return Err(ECHILD);
         }
-        let done = s.procs.values().find(|p| want.exited && matches(p) && matches!(p.state, State::Zombie(_))).map(|p| p.pid);
+        // A tracee stopped for it, whether or not asked for stops.
+        for p in s.procs.values_mut() {
+            if traced(p) {
+                if let Some(status) = ptrace::unreported_stop(p, my_tgid, want.keep) {
+                    return Ok(Some((p.pid, status, p.creds.uid)));
+                }
+            }
+        }
+        let done = s.procs.values().find(|p| want.exited && mine(p) && matches!(p.state, State::Zombie(_))).map(|p| p.pid);
         if let Some(pid) = done {
             let child = s.procs.get(&pid).unwrap();
             let (State::Zombie(status), uid) = (child.state, child.creds.uid) else { unreachable!() };
@@ -766,6 +794,18 @@ pub fn wait(target: i64, want: WaitFor) -> Result<Option<(u32, i32, u32)>, Errno
             }
             return Ok(Some((pid, status, uid)));
         }
+        // A tracee of someone else's that ended: its tracer is told too (once); its parent reaps it.
+        let ended = s.procs.values_mut().find(|p| {
+            traced(p) && !mine(p) && matches!(p.state, State::Zombie(_)) && p.trace.as_ref().is_some_and(|t| !t.exit_reported)
+        });
+        if let Some(p) = ended {
+            let State::Zombie(status) = p.state else { unreachable!() };
+            if !want.keep {
+                p.trace.as_mut().unwrap().exit_reported = true;
+            }
+            return Ok(Some((p.pid, status, p.creds.uid)));
+        }
+        let matches = mine;
         let event = |p: &Process| match p.job_event {
             Some(JobEvent::Stopped(sig)) if want.stopped => Some((sig as i32) << 8 | 0x7f),
             Some(JobEvent::Continued) if want.continued => Some(0xffff),

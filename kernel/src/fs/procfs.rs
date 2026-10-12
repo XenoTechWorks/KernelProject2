@@ -106,6 +106,7 @@ fn state_letter(state: State) -> char {
         State::Zombie(_) | State::Lingering => 'Z',
         State::Dead => 'X',
         State::Stopped => 'T',
+        State::Traced => 't',
     }
 }
 

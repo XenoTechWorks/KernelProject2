@@ -33,6 +33,8 @@ kernel answers those calls the way Linux does, the program can't tell the differ
   which also take a signal mask to wait with), `sigwaitinfo`, and `flock`.
   Signals carry who sent them and why (a child's exit status for `SIGCHLD`). Python's `asyncio`
   runs on them.
+- `ptrace`, so one program can watch and steer another: Ubuntu's own `strace` runs (`strace -f`
+  follows a whole pipeline), stopping at each system call, signal, exec and fork.
 - About 150 Linux system calls (see `kernel/src/sys/mod.rs`). Missing ones return `ENOSYS` and are
   logged once on the serial port, which shows what a new program needs next.
 
@@ -43,8 +45,9 @@ kernel answers those calls the way Linux does, the program can't tell the differ
 The proof: `hello-static` and `hello-dynamic` are ordinary C programs built by gcc against glibc and
 copied in unchanged, and they run. So do **fastfetch** (built from its own unchanged source) and
 **git** (Ubuntu's own `/usr/bin/git`): init, add, commit, branches, merges, diff, stash, log --graph.
-`signal-test`, `thread-test` and `events-test` check signals, glibc pthreads, and epoll, eventfd,
-Unix sockets and timers, against the same results as on Linux.
+`signal-test`, `thread-test`, `events-test` and `trace-test` check signals (and job control),
+glibc pthreads, epoll, eventfd, Unix sockets and timers, and ptrace, against the same results as
+on Linux.
 
 ## Real Linux programs
 
@@ -404,7 +407,8 @@ disk/            what a new disk starts with (out/disk.img is made from it once)
 tests/           test programs (C, and Windows ones in windows/) and the test scripts:
                  smoke.py, persist.py, windows.py, edit.py, textedit.py, archive.py,
                  pkg.py, accounts.py, net.py, tcp.py, ssh.py, terminals.py, doom.py,
-                 session.sh; events.c is events-test, ptys.c pty-test, jail.c jail-test
+                 session.sh; events.c is events-test, ptys.c pty-test, jail.c jail-test,
+                 trace.c trace-test
 ```
 
 ## Building and running
@@ -441,7 +445,8 @@ python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
 
 Roughly in order; each step is checked by running a real program.
 
-1. **More of Linux for real tools**: `ptrace` (for strace and gdb), and `inotify`.
+1. **More of Linux for real tools**: `inotify`, and what gdb needs beyond ptrace (single-stepping
+   and breakpoints in read-only code).
 2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
    archive), interrupt-driven I/O, and AHCI for real PCs.
 3. **Run the targets**: fastfetch and git run; next then coreutils as a compatibility test.

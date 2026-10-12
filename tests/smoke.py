@@ -31,6 +31,8 @@ CHECKS = [
     ("events-test", "events: 38/38 passed"),
     ("pty-test", "ptys: 15/15 passed"),
     ("jail-test", "jail: 5/5 passed"),
+    ("trace-test", "trace: 10/10 passed"),
+    ("strace -o /tmp/strace.txt echo traced > /dev/null; cat /tmp/strace.txt", 'write(1, "traced\\n", 7) '),
     ("hello.exe one", "Hello from Windows! 2 argument(s)"),
     ("winapi.exe", "winapi: 9/9 passed"),
     ("winapi.exe > /dev/null; echo windows exit $?", "windows exit 0"),
