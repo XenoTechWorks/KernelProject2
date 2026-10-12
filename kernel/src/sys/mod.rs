@@ -4,6 +4,7 @@
 //! Calls that aren't written yet return ENOSYS and are logged on the serial port once, which is how
 //! to find out what a new program needs next.
 
+pub mod epoll;
 pub mod errno;
 pub mod fs;
 pub mod mem;
@@ -62,10 +63,9 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         33 => fs::dup3(a[0] as i32, a[1] as i32, 0, true),
         34 => crate::proc::signal::suspend(crate::proc::current().sigmask), // pause
         35 => misc::nanosleep(a[0]),
-        // Interval timers and alarm(): accepted but never fire yet (git uses one only to pace its
-        // progress display). Real timers come with signal delivery.
-        36 | 38 => misc::itimer(a[if n == 36 { 1 } else { 2 }]),
-        37 => Ok(0),
+        36 => misc::getitimer(a[0] as u32, a[1]),
+        37 => misc::alarm(a[0]),
+        38 => misc::setitimer(a[0] as u32, a[1], a[2]),
         39 => Ok(crate::proc::current().tgid as u64),
         57 => process::clone(frame, 17, 0, 0, 0, 0),
         58 => process::clone(frame, 0x100 | 0x4000 | 17, 0, 0, 0, 0),
@@ -124,6 +124,7 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         50 => net::listen(a[0] as i32, a[1] as u32),
         51 => net::getsockname(a[0] as i32, a[1], a[2]),
         52 => net::getpeername(a[0] as i32, a[1], a[2]),
+        53 => net::socketpair(a[0] as u32, a[1] as u32, a[2] as u32, a[3]),
         54 => net::setsockopt(),
         55 => net::getsockopt(a[0] as i32, a[1] as u32, a[2] as u32, a[3], a[4]),
         288 => net::accept(a[0] as i32, a[1], a[2], a[3] as u32),
@@ -150,6 +151,7 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         201 => misc::time(a[0]),
         202 => crate::proc::futex::futex(a[0], a[1] as u32, a[2] as u32, a[3], a[4], a[5] as u32),
         204 => misc::sched_getaffinity(a[1] as usize, a[2]),
+        213 => if (a[0] as i32) > 0 { epoll::create(0) } else { Err(EINVAL) }, // epoll_create(size)
         217 => fs::getdents64(a[0] as i32, a[1], a[2] as usize),
         218 => {
             crate::proc::current().clear_child_tid = a[0];
@@ -158,6 +160,9 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         228 => misc::clock_gettime(a[0] as u32, a[1]),
         229 => misc::clock_getres(a[1]),
         230 => misc::clock_nanosleep(a[2]),
+        // epoll_wait and epoll_pwait; the signal mask isn't applied (as with ppoll).
+        232 | 281 => epoll::wait(a[0] as i32, a[1], a[2] as i32, a[3] as i32 as i64),
+        233 => epoll::ctl(a[0] as i32, a[1] as u32, a[2] as i32, a[3]),
         257 => fs::openat(a[0] as i32, a[1], a[2] as u32, a[3] as u32),
         258 => fs::mkdirat(a[0] as i32, a[1], a[2] as u32),
         262 => fs::fstatat(a[0] as i32, a[1], a[2], a[3] as u32),
@@ -168,9 +173,12 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         267 => fs::readlinkat(a[0] as i32, a[1], a[2], a[3] as usize),
         269 | 439 => fs::faccessat(a[0] as i32, a[1], a[2] as u32),
         270 => fs::select(a[0] as usize, a[1], a[2], a[3], a[4], true),
-        271 => fs::poll(a[0], a[1] as usize, -1),
+        271 => fs::ppoll(a[0], a[1] as usize, a[2]),
         273 => Ok(0), // set_robust_list
         280 => Ok(0), // utimensat
+        284 => fs::eventfd(a[0], 0),
+        290 => fs::eventfd(a[0], a[1] as u32),
+        291 => epoll::create(a[0] as u32),
         292 => fs::dup3(a[0] as i32, a[1] as i32, a[2] as u32, false),
         293 => fs::pipe2(a[0], a[1] as u32),
         302 => misc::prlimit64(a[1] as u32, a[3]),
@@ -178,7 +186,10 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         318 => misc::getrandom(a[0], a[1] as usize),
         332 => fs::statx(a[0] as i32, a[1], a[2] as u32, a[4]),
         334 => Err(ENOSYS), // rseq: glibc works without it
+        434 => Err(ENOSYS), // pidfd_open: Python's asyncio watches children another way without it
         435 => Err(ENOSYS), // clone3: glibc falls back to clone
+        436 => fs::close_range(a[0] as u32, a[1] as u32, a[2] as u32),
+        441 => epoll::wait_timespec(a[0] as i32, a[1], a[2] as i32, a[3]),
         _ => {
             unimplemented(n);
             Err(ENOSYS)

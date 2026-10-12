@@ -9,6 +9,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
 
+#[derive(Clone)]
 pub enum Handle {
     Node(Arc<Node>),
     PipeRead(Arc<Pipe>),
@@ -19,6 +20,13 @@ pub enum Handle {
     Socket(Arc<crate::net::socket::Socket>),
     /// A TCP connection, or one waiting to be (net/tcp.rs).
     Tcp(Arc<crate::net::tcp::Conn>),
+    /// Unix sockets (net/unix.rs): a stream (connected, listening or neither) or datagrams.
+    UnixStream(Arc<crate::net::unix::Stream>),
+    UnixDatagram(Arc<crate::net::unix::Datagram>),
+    /// eventfd (fs/eventfd.rs).
+    EventFd(Arc<crate::fs::eventfd::EventFd>),
+    /// epoll (sys/epoll.rs).
+    Epoll(Arc<crate::sys::epoll::Epoll>),
 }
 
 pub struct OpenFile {
@@ -61,6 +69,8 @@ impl Drop for OpenFile {
             Handle::Window(w) => crate::console::close_window(w.id),
             Handle::Socket(s) => crate::net::socket::remove(s),
             Handle::Tcp(c) => crate::net::tcp::close(c),
+            // These let go when the last reference to them goes (their Drop).
+            Handle::UnixStream(_) | Handle::UnixDatagram(_) | Handle::EventFd(_) | Handle::Epoll(_) => {}
         }
         crate::proc::wake_all();
     }
@@ -104,6 +114,17 @@ impl FdTable {
 
     pub fn close(&mut self, fd: i32) -> Result<(), Errno> {
         self.slots.get_mut(fd as usize).and_then(|s| s.take()).map(|_| ()).ok_or(EBADF)
+    }
+
+    /// Closes every descriptor from `first` to `last`, or with `cloexec` only marks them
+    /// close-on-exec (close_range).
+    pub fn close_range(&mut self, first: usize, last: usize, cloexec: bool) {
+        for slot in self.slots.iter_mut().skip(first).take(last.saturating_sub(first).saturating_add(1)) {
+            match slot {
+                Some(fd) if cloexec => fd.cloexec = true,
+                _ => *slot = None,
+            }
+        }
     }
 
     pub fn close_on_exec(&mut self) {

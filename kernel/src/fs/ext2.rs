@@ -22,6 +22,7 @@ const S_IFMT: u16 = 0o170000;
 const S_IFDIR: u16 = 0o040000;
 const S_IFREG: u16 = 0o100000;
 const S_IFLNK: u16 = 0o120000;
+const S_IFSOCK: u16 = 0o140000;
 
 const INDEX_FL: u32 = 0x1000; // hashed directory index (we keep directories linear and clear it)
 const INCOMPAT_FILETYPE: u32 = 0x2;
@@ -66,6 +67,7 @@ pub enum New<'a> {
     File(u16),
     Dir(u16),
     Symlink(&'a str),
+    Socket(u16),
 }
 
 fn get16(b: &[u8], at: usize) -> u16 {
@@ -287,7 +289,7 @@ impl Ext2 {
         fs.entries(dir)?.into_iter().find(|e| e.name == name).map(|e| e.ino).ok_or(ENOENT)
     }
 
-    /// Creates a file, directory or symlink in `dir`. Returns its inode number.
+    /// Creates a file, directory, symlink or socket in `dir`. Returns its inode number.
     pub fn create(&self, dir: u32, name: &str, new: New) -> Result<u32, Errno> {
         let mut fs = self.inner.lock();
         if fs.entries(dir)?.iter().any(|e| e.name == name) {
@@ -301,6 +303,7 @@ impl Ext2 {
             New::File(m) => (S_IFREG | (m & 0o7777), 1),
             New::Dir(m) => (S_IFDIR | (m & 0o7777), 2),
             New::Symlink(_) => (S_IFLNK | 0o777, 1),
+            New::Socket(m) => (S_IFSOCK | (m & 0o7777), 1),
         };
         put16(&mut raw, 0, mode);
         put32(&mut raw, 8, t);
@@ -339,11 +342,12 @@ impl Ext2 {
                 put16(&mut parent, 26, links);
                 fs.write_inode(dir, &parent)?;
             }
-            New::File(_) => fs.write_inode(ino, &raw)?,
+            New::File(_) | New::Socket(_) => fs.write_inode(ino, &raw)?,
         }
         let dtype = match mode & S_IFMT {
             S_IFDIR => 2,
             S_IFLNK => 7,
+            S_IFSOCK => 6,
             _ => 1,
         };
         fs.add_entry(dir, name, ino, dtype)?;

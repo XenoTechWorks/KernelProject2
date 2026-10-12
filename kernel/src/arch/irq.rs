@@ -62,6 +62,7 @@ pub fn handle(frame: &mut TrapFrame) {
             crate::drivers::virtio_input::poll();
             crate::drivers::virtio_net::poll();
             crate::net::tcp::tick();
+            crate::proc::timer::tick();
         }
         1 => {
             let scancode = unsafe { inb(0x60) };

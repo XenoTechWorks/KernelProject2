@@ -26,6 +26,11 @@ mkdir -p "$stage/bin" "$stage/sbin" "$out"
 cp -r "$root/rootfs/." "$stage/"
 find "$stage" -type d -exec chmod 755 {} +
 find "$stage" -type f -exec chmod 644 {} +
+# /usr/bin and /usr/sbin are /bin and /sbin, as on today's Linux distributions ("merged /usr"),
+# so programs that start others by their full path find them (scp runs /usr/bin/ssh).
+mkdir -p "$stage/usr"
+ln -s ../bin "$stage/usr/bin"
+ln -s ../sbin "$stage/usr/sbin"
 for program in init kpsh ls cat echo uname fileops kpfetch clock textclock widgets calc files edit textedit eyes gzip tar zip pkg users ping ifconfig host nc doom; do
     dest="$stage/bin/$program"
     [[ $program == init ]] && dest="$stage/sbin/init"
@@ -55,6 +60,7 @@ add_host_program() {
 add_host_program "$stage/bin/hello-dynamic"
 gcc -O2 -o "$stage/bin/signal-test" "$root/tests/signals.c"
 gcc -O2 -pthread -o "$stage/bin/thread-test" "$root/tests/threads.c"
+gcc -O2 -o "$stage/bin/events-test" "$root/tests/events.c"
 
 step "Windows layer (winload) and Windows test programs"
 g++ -std=c++20 -O2 -static -fno-exceptions -fno-rtti -Wall -Wextra -o "$stage/bin/winload" "$root"/windows/src/*.cpp
@@ -94,6 +100,15 @@ cp -r /usr/share/git-core/templates "$stage/usr/share/git-core/"
 if [[ -x /usr/bin/curl ]]; then
     step "curl (/usr/bin/curl)"
     add_host_program /usr/bin/curl
+fi
+
+# OpenSSH's client side from Ubuntu: ssh and scp, key making, and the agent that keeps keys
+# (it talks over a Unix socket).
+if [[ -x /usr/bin/ssh ]]; then
+    step "OpenSSH client (/usr/bin/ssh)"
+    for program in ssh scp ssh-keygen ssh-agent ssh-add; do
+        add_host_program "/usr/bin/$program"
+    done
 fi
 
 # Anything else you want to try, by name or path, as in:

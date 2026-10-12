@@ -8,6 +8,7 @@
 
 pub mod socket;
 pub mod tcp;
+pub mod unix;
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;

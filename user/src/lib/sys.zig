@@ -227,3 +227,4 @@ pub const S_IFREG = 0o100000;
 pub const S_IFLNK = 0o120000;
 pub const S_IFCHR = 0o020000;
 pub const S_IFIFO = 0o010000;
+pub const S_IFSOCK = 0o140000;

@@ -10,6 +10,7 @@
 //! are worked out before walking the tree.
 
 pub mod cpio;
+pub mod eventfd;
 pub mod ext2;
 pub mod pipe;
 pub mod procfs;
@@ -44,7 +45,9 @@ pub enum Kind {
     File(Mutex<Vec<u8>>),
     Symlink(String),
     Device(Device),
-    /// An inode on an ext2 disk (a file, directory or symlink).
+    /// A Unix socket's name: what a program bound connects to it (net/unix.rs).
+    Socket,
+    /// An inode on an ext2 disk (a file, directory, symlink or socket).
     Ext2(Arc<Ext2>, u32),
 }
 
@@ -55,6 +58,7 @@ pub enum Type {
     File,
     Symlink,
     Device(Device),
+    Socket,
 }
 
 /// What to create in a directory.
@@ -62,6 +66,7 @@ pub enum New<'a> {
     File(u32),
     Dir(u32),
     Symlink(&'a str),
+    Socket(u32),
 }
 
 pub struct Node {
@@ -78,6 +83,7 @@ pub const S_IFREG: u32 = 0o100000;
 pub const S_IFLNK: u32 = 0o120000;
 pub const S_IFCHR: u32 = 0o020000;
 pub const S_IFIFO: u32 = 0o010000;
+pub const S_IFSOCK: u32 = 0o140000;
 pub const S_IFMT_MASK: u32 = 0o170000;
 /// Set-user-id and set-group-id: running the file takes on its owner's identity.
 pub const S_ISUID: u32 = 0o4000;
@@ -125,9 +131,11 @@ impl Node {
             Kind::File(_) => Type::File,
             Kind::Symlink(_) => Type::Symlink,
             Kind::Device(d) => Type::Device(*d),
+            Kind::Socket => Type::Socket,
             Kind::Ext2(..) => match self.ext2_info().map_or(0, |i| i.mode as u32 & S_IFMT_MASK) {
                 S_IFDIR => Type::Dir,
                 S_IFLNK => Type::Symlink,
+                S_IFSOCK => Type::Socket,
                 _ => Type::File,
             },
         }
@@ -191,6 +199,7 @@ impl Node {
             Type::File => S_IFREG,
             Type::Symlink => S_IFLNK,
             Type::Device(_) => S_IFCHR,
+            Type::Socket => S_IFSOCK,
         };
         kind | self.mode_bits()
     }
@@ -200,7 +209,7 @@ impl Node {
             Kind::File(data) => data.lock().len() as u64,
             Kind::Symlink(target) => target.len() as u64,
             Kind::Dir(entries) => entries.lock().len() as u64 * 32,
-            Kind::Device(_) => 0,
+            Kind::Device(_) | Kind::Socket => 0,
             Kind::Ext2(..) => self.ext2_info().map_or(0, |i| i.size),
         }
     }
@@ -308,6 +317,7 @@ impl Node {
                         Type::File => 8,
                         Type::Symlink => 10,
                         Type::Device(_) => 2,
+                        Type::Socket => 12,
                     };
                     out.push((name.clone(), child.ino, dtype));
                 }
@@ -331,7 +341,7 @@ impl Node {
         }
     }
 
-    /// Creates a file, directory or symlink called `name` here.
+    /// Creates a file, directory, symlink or socket called `name` here.
     pub fn create(&self, name: &str, new: New) -> Result<Arc<Node>, Errno> {
         match &self.kind {
             Kind::Dir(entries) => {
@@ -343,6 +353,7 @@ impl Node {
                         d
                     }
                     New::Symlink(target) => Node::new(Kind::Symlink(target.to_string()), 0o777),
+                    New::Socket(mode) => Node::new(Kind::Socket, mode),
                 };
                 let mut entries = entries.lock();
                 if entries.contains_key(name) {
@@ -357,6 +368,7 @@ impl Node {
                     New::File(mode) => ext2::New::File(mode as u16),
                     New::Dir(mode) => ext2::New::Dir(mode as u16),
                     New::Symlink(target) => ext2::New::Symlink(target),
+                    New::Socket(mode) => ext2::New::Socket(mode as u16),
                 };
                 Ok(Node::ext2(fs.clone(), fs.create(*ino, name, new)?))
             }

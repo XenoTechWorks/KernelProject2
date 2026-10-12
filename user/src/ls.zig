@@ -42,6 +42,7 @@ fn modeString(mode: u32, out: *[10]u8) void {
         sys.S_IFLNK => 'l',
         sys.S_IFCHR => 'c',
         sys.S_IFIFO => 'p',
+        sys.S_IFSOCK => 's',
         else => '-',
     };
     const chars = "rwxrwxrwx";

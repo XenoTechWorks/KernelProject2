@@ -24,7 +24,10 @@ kernel answers those calls the way Linux does, the program can't tell the differ
   The disk is made by the real `mkfs.ext2`, and Linux's `e2fsck` checks it stays consistent.
 - Terminal: Linux's line discipline (editing, echo, Ctrl+C/D/U/W, raw mode via `termios`) on the
   screen and on the serial port. The screen understands the usual escape codes and 16 colors.
-- About 90 Linux system calls (see `kernel/src/sys/mod.rs`). Missing ones return `ENOSYS` and are
+- What event loops and servers are built on: `epoll` (level- and edge-triggered, one-shot),
+  `eventfd`, Unix sockets (see Networking), and timers that really go off (`alarm`, `setitimer`,
+  and the timeouts of `poll`, `ppoll` and `epoll_wait`). Python's `asyncio` runs on them.
+- About 150 Linux system calls (see `kernel/src/sys/mod.rs`). Missing ones return `ENOSYS` and are
   logged once on the serial port, which shows what a new program needs next.
 
 - `/proc` (meminfo, cpuinfo, uptime, stat, mounts, and each process's stat, status, cmdline, exe, fd)
@@ -34,7 +37,8 @@ kernel answers those calls the way Linux does, the program can't tell the differ
 The proof: `hello-static` and `hello-dynamic` are ordinary C programs built by gcc against glibc and
 copied in unchanged, and they run. So do **fastfetch** (built from its own unchanged source) and
 **git** (Ubuntu's own `/usr/bin/git`): init, add, commit, branches, merges, diff, stash, log --graph.
-`signal-test` and `thread-test` check signals and glibc pthreads against the same results as on Linux.
+`signal-test`, `thread-test` and `events-test` check signals, glibc pthreads, and epoll, eventfd,
+Unix sockets and timers, against the same results as on Linux.
 
 ## Real Linux programs
 
@@ -141,6 +145,35 @@ resolver finds names through `/etc/resolv.conf`. A `SOCK_DGRAM` socket on `IPPRO
 
 Not there yet: IPv6, DHCP, and a loopback (`127.0.0.1`). Pinging something beyond the gateway
 fails, but that's QEMU's user-mode network not passing ICMP on, not the stack.
+
+### Unix sockets
+
+Programs on the same machine talk through Unix sockets: `socketpair` for two already connected,
+or a server that binds a name and clients that connect to it. A name is a socket file (`bind`
+makes one; `ls -l` shows it with an `s`), or an "abstract" name that lives only in the kernel.
+Streams and datagrams both work, and `SO_PEERCRED` tells a server which process and user is on
+the other end. `kernel/src/net/unix.rs` is all of it: a stream connection is two pipes, one each
+way, so end-of-file and `EPIPE` behave exactly as they do for pipes. Passing descriptors along
+(`SCM_RIGHTS`) isn't done yet; it fails plainly instead of losing them.
+
+### SSH
+
+Ubuntu's own OpenSSH client is in the image: `ssh`, `scp`, `ssh-keygen`, `ssh-agent` and
+`ssh-add`.
+
+```sh
+ssh-keygen -t ed25519            # a key pair in ~/.ssh (on the disk, so it stays)
+ssh you@10.0.2.2                 # log in to the machine QEMU runs on (if it runs an SSH server)
+scp notes.txt you@10.0.2.2:      # copy a file there
+ssh-agent -a /tmp/agent.sock     # keep keys unlocked; it listens on a Unix socket
+export SSH_AUTH_SOCK=/tmp/agent.sock
+ssh-add                          # hand it your key
+```
+
+`tests/ssh.py` runs an SSH server on the build machine (Ubuntu's `sshd`, as you, on a spare port)
+and does all of the above against it, an interactive login included. `/usr/bin` is the same
+folder as `/bin`, as on today's Linux distributions, since `scp` starts `/usr/bin/ssh` by that
+name. An SSH server inside KernelProject2 needs pseudo-terminals first.
 
 ## Trying other programs
 
@@ -315,7 +348,7 @@ kernel/          the kernel (Rust)
   src/mm/          physical pages, page tables, kernel heap, safe access to user memory
   src/fs/          the VFS, ext2, /proc, /sys, the initramfs reader, pipes
   src/drivers/     PCI, virtio (the disk, the tablet for the pointer, the network card)
-  src/net/         Ethernet, ARP, IPv4, ICMP, UDP, TCP, and sockets
+  src/net/         Ethernet, ARP, IPv4, ICMP, UDP, TCP, sockets, and Unix sockets
   src/proc/        processes, scheduler, fork/exec/wait, the ELF loader
   src/sys/         the Linux system calls
   src/tty.rs       terminal line discipline
@@ -329,7 +362,8 @@ rootfs/          files copied into the root file system (/etc ...)
 disk/            what a new disk starts with (out/disk.img is made from it once)
 tests/           test programs (C, and Windows ones in windows/) and the test scripts:
                  smoke.py, persist.py, windows.py, edit.py, textedit.py, archive.py,
-                 pkg.py, accounts.py, net.py, tcp.py, doom.py, session.sh
+                 pkg.py, accounts.py, net.py, tcp.py, ssh.py, doom.py, session.sh;
+                 events.c is events-test
 ```
 
 ## Building and running
@@ -357,6 +391,7 @@ python3 tests/pkg.py      # a real .deb, and a Windows program in a .zip, on and
 python3 tests/accounts.py # a user, a password, and what they're not allowed to do
 python3 tests/net.py      # the card, ping through ARP, and a DNS lookup
 python3 tests/tcp.py      # curl over TCP (a big file byte for byte), a server in the guest, HTTPS
+python3 tests/ssh.py      # ssh, scp and ssh-agent against an SSH server on this machine
 python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
 ```
 
@@ -364,8 +399,9 @@ python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
 
 Roughly in order; each step is checked by running a real program.
 
-1. **More of Linux for real tools**: real interval timers (`setitimer`/`alarm` are accepted but
-   don't fire yet), `socketpair` and Unix sockets, `eventfd`, `epoll`.
+1. **More of Linux for real tools**: pseudo-terminals (for an SSH server, `script`, tmux), passing
+   descriptors over Unix sockets (`SCM_RIGHTS`), `timerfd`, `signalfd` and `pidfd`, and signal
+   masks in `ppoll`/`epoll_pwait`.
 2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
    archive), interrupt-driven I/O, and AHCI for real PCs.
 3. **Run the targets**: fastfetch and git run; next then coreutils as a compatibility test.

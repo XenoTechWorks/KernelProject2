@@ -1,8 +1,9 @@
-//! File system calls: open, read, write, stat, directories, pipes, terminal ioctls, poll.
+//! File system calls: open, read, write, stat, directories, pipes, eventfd, terminal ioctls, poll.
 
 use super::SysResult;
 use super::errno::*;
-use crate::fs::{self, Device, New, Node, Type, pipe};
+use crate::fs::{self, Device, New, Node, Type, eventfd, pipe};
+use crate::net::unix;
 use crate::mm::user;
 use crate::proc::{self, fd::Handle, fd::OpenFile};
 use alloc::string::String;
@@ -31,7 +32,7 @@ pub fn resolve(dirfd: i32, path_ptr: u64) -> Result<String, Errno> {
     resolve_str(dirfd, &path)
 }
 
-fn resolve_str(dirfd: i32, path: &str) -> Result<String, Errno> {
+pub fn resolve_str(dirfd: i32, path: &str) -> Result<String, Errno> {
     let p = proc::current();
     if path.is_empty() {
         return Err(ENOENT);
@@ -72,6 +73,7 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
             }
             Type::Dir => Err(EISDIR),
             Type::Symlink => Err(EINVAL),
+            Type::Socket => Err(ENXIO),
             Type::Device(Device::Tty) => loop {
                 if let Some(n) = crate::tty::try_read(buf) {
                     return Ok(n as u64);
@@ -140,28 +142,18 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
             }
             proc::sleep()?;
         },
-        Handle::PipeRead(pipe) => loop {
-            {
-                let mut q = pipe.buffer.lock();
-                if !q.is_empty() {
-                    let n = q.len().min(buf.len());
-                    for (i, b) in q.drain(..n).enumerate() {
-                        buf[i] = b;
-                    }
-                    drop(q);
-                    proc::wake_all();
-                    return Ok(n as u64);
-                }
-            }
-            if *pipe.writers.lock() == 0 {
-                return Ok(0);
-            }
-            if nonblocking(file) {
-                return Err(EAGAIN);
-            }
-            proc::sleep()?;
-        },
+        Handle::PipeRead(pipe) => Ok(pipe::read(pipe, buf, nonblocking(file), false)? as u64),
         Handle::PipeWrite(_) => Err(EBADF),
+        Handle::UnixStream(s) => Ok(unix::read(s, buf, nonblocking(file), false)? as u64),
+        Handle::UnixDatagram(d) => Ok(unix::recv(d, buf, nonblocking(file), false)?.0 as u64),
+        Handle::EventFd(e) => {
+            if buf.len() < 8 {
+                return Err(EINVAL);
+            }
+            buf[..8].copy_from_slice(&eventfd::read(e, nonblocking(file))?.to_le_bytes());
+            Ok(8)
+        }
+        Handle::Epoll(_) => Err(EINVAL),
     }
 }
 
@@ -186,6 +178,7 @@ fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
             }
             Type::Dir => Err(EISDIR),
             Type::Symlink => Err(EINVAL),
+            Type::Socket => Err(ENXIO),
             Type::Device(Device::Tty) => {
                 crate::tty::write(data);
                 Ok(data.len() as u64)
@@ -218,31 +211,22 @@ fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
             crate::net::socket::send(sock, ip, port, data);
             Ok(data.len() as u64)
         }
-        Handle::PipeWrite(pipe) => {
-            let mut written = 0;
-            while written < data.len() {
-                if *pipe.readers.lock() == 0 {
-                    proc::signal::send(proc::current(), proc::SIGPIPE);
-                    return if written > 0 { Ok(written as u64) } else { Err(EPIPE) };
-                }
-                {
-                    let mut q = pipe.buffer.lock();
-                    let room = pipe::CAPACITY.saturating_sub(q.len());
-                    let n = room.min(data.len() - written);
-                    q.extend(&data[written..written + n]);
-                    written += n;
-                }
-                proc::wake_all();
-                if written < data.len() {
-                    if nonblocking(file) {
-                        return if written > 0 { Ok(written as u64) } else { Err(EAGAIN) };
-                    }
-                    proc::sleep()?;
-                }
+        Handle::PipeWrite(pipe) => match pipe::write(pipe, data, nonblocking(file)) {
+            Err(EPIPE) => {
+                proc::signal::send(proc::current(), proc::SIGPIPE);
+                Err(EPIPE)
             }
-            Ok(written as u64)
-        }
+            result => Ok(result? as u64),
+        },
         Handle::PipeRead(_) => Err(EBADF),
+        Handle::UnixStream(s) => super::net::unix_write(file, s, data, 0),
+        Handle::UnixDatagram(d) => Ok(unix::send(d, None, data, nonblocking(file))? as u64),
+        Handle::EventFd(e) => {
+            let value = u64::from_le_bytes(data.get(..8).ok_or(EINVAL)?.try_into().unwrap());
+            eventfd::write(e, value, nonblocking(file))?;
+            Ok(8)
+        }
+        Handle::Epoll(_) => Err(EINVAL),
     }
 }
 
@@ -358,6 +342,9 @@ pub fn open_path(path: &str, flags: u32, mode: u32) -> SysResult {
         if node.kind_of() == Type::Symlink {
             return Err(ELOOP);
         }
+        if node.kind_of() == Type::Socket {
+            return Err(ENXIO);
+        }
         if flags & O_TRUNC != 0 && flags & O_ACCMODE != 0 && node.kind_of() == Type::File {
             node.truncate(0)?;
         }
@@ -379,6 +366,18 @@ pub fn allowed(node: &Node, want: u32) -> bool {
 
 pub fn close(fd: i32) -> SysResult {
     proc::current().files().fds.close(fd)?;
+    Ok(0)
+}
+
+/// close_range: what a program does before running another, so the other inherits nothing.
+pub fn close_range(first: u32, last: u32, flags: u32) -> SysResult {
+    // "Get a table of your own first": not done, but programs ask right after fork, when theirs is.
+    const CLOSE_RANGE_UNSHARE: u32 = 2;
+    const CLOSE_RANGE_CLOEXEC: u32 = 4;
+    if first > last || flags & !(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC) != 0 {
+        return Err(EINVAL);
+    }
+    proc::current().files().fds.close_range(first as usize, last as usize, flags & CLOSE_RANGE_CLOEXEC != 0);
     Ok(0)
 }
 
@@ -480,7 +479,11 @@ fn stat_of(handle: &Handle) -> Stat {
         }
         Handle::PipeRead(_) | Handle::PipeWrite(_) => Stat { dev: 2, mode: fs::S_IFIFO | 0o600, nlink: 1, blksize: 4096, ..Default::default() },
         Handle::Window(_) => Stat { mode: fs::S_IFCHR | 0o666, nlink: 1, blksize: 4096, ..Default::default() },
-        Handle::Socket(_) | Handle::Tcp(_) => Stat { mode: 0o140666, nlink: 1, blksize: 4096, ..Default::default() }, // S_IFSOCK
+        Handle::Socket(_) | Handle::Tcp(_) | Handle::UnixStream(_) | Handle::UnixDatagram(_) => {
+            Stat { mode: fs::S_IFSOCK | 0o777, nlink: 1, blksize: 4096, ..Default::default() }
+        }
+        // Like Linux's "anonymous inodes": no file type, only permissions.
+        Handle::EventFd(_) | Handle::Epoll(_) => Stat { mode: 0o600, nlink: 1, blksize: 4096, ..Default::default() },
     }
 }
 
@@ -498,14 +501,7 @@ fn handle_for(dirfd: i32, path_ptr: u64, flags: u32) -> Result<Handle, Errno> {
         let file = if dirfd == AT_FDCWD { None } else { Some(p.files().fds.get(dirfd)?) };
         // A bare Handle doesn't count as a pipe end (only OpenFile does), so cloning one is harmless.
         return Ok(match file {
-            Some(f) => match &f.handle {
-                Handle::Node(n) => Handle::Node(n.clone()),
-                Handle::PipeRead(pp) => Handle::PipeRead(pp.clone()),
-                Handle::PipeWrite(pp) => Handle::PipeWrite(pp.clone()),
-                Handle::Window(w) => Handle::Window(w.clone()),
-                Handle::Socket(s) => Handle::Socket(s.clone()),
-                Handle::Tcp(c) => Handle::Tcp(c.clone()),
-            },
+            Some(f) => f.handle.clone(),
             None => Handle::Node(fs::lookup(&p.files().cwd, true)?),
         });
     }
@@ -603,7 +599,7 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
         }
         _ => {}
     }
-    if let Handle::Socket(_) | Handle::Tcp(_) = &file.handle {
+    if let Handle::Socket(_) | Handle::Tcp(_) | Handle::UnixStream(_) | Handle::UnixDatagram(_) = &file.handle {
         return super::net::net_ioctl(&file.handle, request, arg);
     }
     if let Handle::Window(window) = &file.handle {
@@ -906,15 +902,38 @@ pub fn pipe2(fds_ptr: u64, flags: u32) -> SysResult {
     Ok(0)
 }
 
+/// eventfd and eventfd2: a counter to wake on (fs/eventfd.rs).
+pub fn eventfd(initial: u64, flags: u32) -> SysResult {
+    const EFD_SEMAPHORE: u32 = 1;
+    if flags & !(EFD_SEMAPHORE | O_NONBLOCK | O_CLOEXEC) != 0 {
+        return Err(EINVAL);
+    }
+    let file = alloc::sync::Arc::new(OpenFile {
+        handle: Handle::EventFd(eventfd::new(initial as u32 as u64, flags & EFD_SEMAPHORE != 0)),
+        offset: spin::Mutex::new(0),
+        flags: spin::Mutex::new(O_RDWR | flags & O_NONBLOCK),
+        path: String::from("anon_inode:[eventfd]"),
+    });
+    Ok(proc::current().files().fds.insert(file, flags & O_CLOEXEC != 0, 0)? as u64)
+}
+
 const POLLIN: i16 = 1;
 const POLLOUT: i16 = 4;
 const POLLERR: i16 = 8;
 const POLLHUP: i16 = 0x10;
 const POLLNVAL: i16 = 0x20;
+const POLLRDHUP: i16 = 0x2000;
 
 /// What is ready on a descriptor right now, as poll() bits.
 fn readiness(fd: i32) -> i16 {
-    let Ok(file) = proc::current().files().fds.get(fd) else { return POLLNVAL };
+    match proc::current().files().fds.get(fd) {
+        Ok(file) => file_readiness(&file),
+        Err(_) => POLLNVAL,
+    }
+}
+
+/// What is ready on an open file right now, as poll() bits (epoll's are the same).
+pub fn file_readiness(file: &OpenFile) -> i16 {
     match &file.handle {
         Handle::Node(n) => match n.kind_of() {
             Type::Device(Device::Tty) => POLLOUT | if crate::tty::available() > 0 { POLLIN } else { 0 },
@@ -926,7 +945,7 @@ fn readiness(fd: i32) -> i16 {
                 r |= POLLIN;
             }
             if *pipe.writers.lock() == 0 {
-                r |= POLLHUP;
+                r |= POLLHUP | POLLRDHUP;
             }
             r
         }
@@ -949,11 +968,27 @@ fn readiness(fd: i32) -> i16 {
                 0
             }
         }
+        Handle::UnixStream(s) => {
+            let r = unix::stream_readiness(s);
+            (if r.read { POLLIN } else { 0 })
+                | (if r.write { POLLOUT } else { 0 })
+                | (if r.read_closed { POLLRDHUP } else { 0 })
+                | (if r.hangup { POLLHUP } else { 0 })
+        }
+        Handle::UnixDatagram(d) => {
+            let (read, write) = unix::datagram_readiness(d);
+            (if read { POLLIN } else { 0 }) | (if write { POLLOUT } else { 0 })
+        }
+        Handle::EventFd(e) => {
+            let (read, write) = eventfd::readiness(e);
+            (if read { POLLIN } else { 0 }) | (if write { POLLOUT } else { 0 })
+        }
+        Handle::Epoll(ep) => if super::epoll::has_ready(ep) { POLLIN } else { 0 },
     }
 }
 
 /// Waits until `check` reports something ready or `timeout_ms` passes (negative: forever).
-fn wait_ready(timeout_ms: i64, mut check: impl FnMut() -> Result<u64, Errno>) -> SysResult {
+pub fn wait_ready(timeout_ms: i64, mut check: impl FnMut() -> Result<u64, Errno>) -> SysResult {
     let deadline = (timeout_ms >= 0).then(|| crate::arch::irq::ticks() + (timeout_ms as u64).div_ceil(10));
     loop {
         let n = check()?;
@@ -962,6 +997,19 @@ fn wait_ready(timeout_ms: i64, mut check: impl FnMut() -> Result<u64, Errno>) ->
         }
         proc::sleep()?;
     }
+}
+
+/// ppoll: poll with a timespec timeout (none: forever). The signal mask isn't applied.
+pub fn ppoll(fds_ptr: u64, count: usize, timeout: u64) -> SysResult {
+    let timeout_ms = if timeout == 0 {
+        -1
+    } else {
+        let space = proc::current().space();
+        let secs = user::read_u64(space, timeout)? as i64;
+        let nanos = user::read_u64(space, timeout + 8)? as i64;
+        (secs * 1000 + (nanos as u64).div_ceil(1_000_000) as i64).min(i32::MAX as i64) as i32
+    };
+    poll(fds_ptr, count, timeout_ms)
 }
 
 pub fn poll(fds_ptr: u64, count: usize, timeout_ms: i32) -> SysResult {

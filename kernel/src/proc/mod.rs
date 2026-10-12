@@ -15,6 +15,7 @@ pub mod elf;
 pub mod fd;
 pub mod futex;
 pub mod signal;
+pub mod timer;
 
 use crate::arch::idt::{self, TrapFrame};
 use crate::arch::{cpu, gdt};
@@ -27,6 +28,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::{asm, global_asm};
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU64, Ordering};
 use fd::FdTable;
 
 pub use signal::{SIGINT, SIGKILL, SIGPIPE, SIGQUIT, SIGSEGV, SIGSTOP};
@@ -426,7 +428,21 @@ pub fn sleep() -> Result<(), Errno> {
     if signal::interrupted(current()) { Err(EINTR) } else { Ok(()) }
 }
 
+/// Counts the times something happened that could make a waiter ready (every wake_all), so
+/// edge-triggered epoll can tell whether anything has happened since it last reported.
+static CHANGES: AtomicU64 = AtomicU64::new(0);
+
+pub fn changes() -> u64 {
+    CHANGES.load(Ordering::Relaxed)
+}
+
+/// Something changed: everyone waiting looks again.
 pub fn wake_all() {
+    CHANGES.fetch_add(1, Ordering::Relaxed);
+    wake_sleepers();
+}
+
+fn wake_sleepers() {
     for p in sched().procs.values_mut() {
         if p.state == State::Sleeping {
             p.state = State::Runnable;
@@ -435,7 +451,8 @@ pub fn wake_all() {
 }
 
 pub fn timer_tick(frame: &TrapFrame) {
-    wake_all();
+    // Time passing wakes sleepers (for timeouts) but isn't a change in anything they watch.
+    wake_sleepers();
     if frame.from_user() && sched().current.is_some() {
         yield_now();
     }
@@ -496,6 +513,7 @@ fn finish_process(status: i32) -> ! {
     p.mem = Shared::new(Memory { space: None, brk_start: 0, brk: 0, mmap_next: MMAP_TOP });
     p.vfork_parent = None;
     let tgid = p.tgid;
+    timer::remove(tgid);
     for child in all() {
         if child.ppid == tgid {
             child.ppid = 1;

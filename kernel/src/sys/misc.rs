@@ -3,7 +3,7 @@
 use super::SysResult;
 use super::errno::*;
 use crate::mm::user;
-use crate::proc;
+use crate::proc::{self, timer};
 use crate::time;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -149,12 +149,54 @@ pub fn times(out: u64) -> SysResult {
     Ok(crate::arch::irq::ticks())
 }
 
-/// getitimer / setitimer: reports "no timer set" in the old-value struct.
-pub fn itimer(old: u64) -> SysResult {
+const ITIMER_REAL: u32 = 0;
+
+/// `struct itimerval`: the interval, then the time left, each as seconds and microseconds.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+struct ItimerVal {
+    every_secs: u64,
+    every_micros: u64,
+    left_secs: u64,
+    left_micros: u64,
+}
+
+fn itimerval(left: u64, every: u64) -> ItimerVal {
+    let (left, every) = (timer::micros_for(left), timer::micros_for(every));
+    ItimerVal { every_secs: every / 1_000_000, every_micros: every % 1_000_000, left_secs: left / 1_000_000, left_micros: left % 1_000_000 }
+}
+
+/// getitimer. Only the real-time timer counts; the CPU-time ones (virtual, profiling) are
+/// accepted but never go off, so they always read as not set.
+pub fn getitimer(which: u32, out: u64) -> SysResult {
+    let (left, every) = if which == ITIMER_REAL { timer::get(proc::current().tgid) } else { (0, 0) };
+    user::write_struct(proc::current().space(), out, &itimerval(left, every))?;
+    Ok(0)
+}
+
+pub fn setitimer(which: u32, new: u64, old: u64) -> SysResult {
+    let p = proc::current();
+    let want: ItimerVal = if new != 0 { user::read_struct(p.space(), new)? } else { ItimerVal::default() };
+    if want.every_micros >= 1_000_000 || want.left_micros >= 1_000_000 {
+        return Err(EINVAL);
+    }
+    let (left, every) = if which == ITIMER_REAL {
+        let micros = |secs: u64, us: u64| secs.saturating_mul(1_000_000).saturating_add(us);
+        let after = timer::ticks_for(micros(want.left_secs, want.left_micros));
+        timer::set(p.tgid, after, timer::ticks_for(micros(want.every_secs, want.every_micros)))
+    } else {
+        (0, 0)
+    };
     if old != 0 {
-        user::write(proc::current().space(), old, &[0u8; 32])?;
+        user::write_struct(p.space(), old, &itimerval(left, every))?;
     }
     Ok(0)
+}
+
+/// alarm(): SIGALRM in so many seconds (0 cancels); returns the seconds the last one had left.
+pub fn alarm(secs: u64) -> SysResult {
+    let (left, _) = timer::set(proc::current().tgid, timer::ticks_for(secs.saturating_mul(1_000_000)), 0);
+    Ok(timer::micros_for(left).div_ceil(1_000_000))
 }
 
 pub fn sched_getaffinity(size: usize, mask: u64) -> SysResult {
