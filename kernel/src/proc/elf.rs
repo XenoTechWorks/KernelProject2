@@ -17,6 +17,8 @@ pub struct Image {
     pub stack: u64,
     pub brk: u64,
     pub path: String,
+    /// The auxiliary vector given to the program (/proc/<pid>/auxv; debuggers read it).
+    pub auxv: Vec<u8>,
 }
 
 const PROGRAM_BASE: u64 = 0x0000_5555_5560_0000; // for position-independent executables
@@ -202,11 +204,19 @@ fn load_depth(path: &str, args: &[String], env: &[String], depth: u32) -> Result
         interp_base = interp.base;
     }
     let brk = program.end.next_multiple_of(PAGE_SIZE);
-    let stack = build_stack(&mut space, path, args, env, &program, interp_base)?;
-    Ok(Image { space, entry, stack, brk, path: String::from(path) })
+    let (stack, auxv) = build_stack(&mut space, path, args, env, &program, interp_base)?;
+    Ok(Image { space, entry, stack, brk, path: String::from(path), auxv })
 }
 
-fn build_stack(space: &mut AddressSpace, path: &str, args: &[String], env: &[String], program: &Loaded, interp_base: u64) -> Result<u64, Errno> {
+/// Builds the starting stack; returns the stack pointer and the auxiliary vector's bytes.
+fn build_stack(
+    space: &mut AddressSpace,
+    path: &str,
+    args: &[String],
+    env: &[String],
+    program: &Loaded,
+    interp_base: u64,
+) -> Result<(u64, Vec<u8>), Errno> {
     use super::{STACK_TOP, STACK_LIMIT};
     // Map the top 256 KiB now; the page fault handler grows it further on demand.
     let initial = 256 * 1024;
@@ -284,5 +294,6 @@ fn build_stack(space: &mut AddressSpace, path: &str, args: &[String], env: &[Str
     }
     let bytes: Vec<u8> = table.iter().flat_map(|w| w.to_le_bytes()).collect();
     poke(space, sp, &bytes)?;
-    Ok(sp)
+    let auxv_bytes = auxv.iter().flat_map(|(k, v)| k.to_le_bytes().into_iter().chain(v.to_le_bytes())).collect();
+    Ok((sp, auxv_bytes))
 }

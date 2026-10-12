@@ -99,6 +99,18 @@ fn mounts() -> String {
     s
 }
 
+/// The state as /proc/<pid>/status spells it out (debuggers compare these words).
+fn state_name(state: State) -> &'static str {
+    match state {
+        State::Runnable => "R (running)",
+        State::Sleeping => "S (sleeping)",
+        State::Zombie(_) | State::Lingering => "Z (zombie)",
+        State::Dead => "X (dead)",
+        State::Stopped => "T (stopped)",
+        State::Traced => "t (tracing stop)",
+    }
+}
+
 fn state_letter(state: State) -> char {
     match state {
         State::Runnable => 'R',
@@ -110,7 +122,18 @@ fn state_letter(state: State) -> char {
     }
 }
 
+/// /proc/<pid>: a process; and inside it, task/<tid> for each of its threads, which looks the same
+/// (without task/ of its own).
 fn process_dir(p: &proc::Process) -> Arc<Node> {
+    let tasks: Vec<(String, Arc<Node>)> = proc::threads(p.tgid).map(|t| (t.pid.to_string(), thread_dir(t))).collect();
+    let me = thread_dir(p);
+    if let Kind::Dir(entries) = &me.kind {
+        entries.lock().insert(String::from("task"), dir(tasks));
+    }
+    me
+}
+
+fn thread_dir(p: &proc::Process) -> Arc<Node> {
     let state = state_letter(p.state);
     // The controlling terminal's device number (/dev/console is 5,1; /dev/pts/N is 136,N), and
     // its foreground process group.
@@ -129,12 +152,24 @@ fn process_dir(p: &proc::Process) -> Arc<Node> {
         tpgid,
         p.start_ticks,
     );
+    let c = &p.creds;
+    let tracer = p.trace.as_ref().map_or(0, |t| t.tracer);
     let status = format!(
-        "Name:\t{}\nState:\t{state}\nTgid:\t{pid}\nPid:\t{pid}\nPPid:\t{}\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nThreads:\t{}\n",
+        "Name:\t{}\nState:\t{}\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nTracerPid:\t{tracer}\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nThreads:\t{}\n",
         p.name,
+        state_name(p.state),
+        p.tgid,
+        p.pid,
         p.ppid,
+        c.uid,
+        c.euid,
+        c.euid,
+        c.euid,
+        c.gid,
+        c.egid,
+        c.egid,
+        c.egid,
         proc::threads(p.tgid).count(),
-        pid = p.pid,
     );
     let fds = p
         .files().fds.iter()
@@ -147,6 +182,13 @@ fn process_dir(p: &proc::Process) -> Arc<Node> {
         ("cmdline".into(), file(p.cmdline.clone())),
         ("environ".into(), file(Vec::new())),
         ("maps".into(), file(Vec::new())),
+        ("auxv".into(), file(p.auxv.clone())),
+        ("mem".into(), {
+            // Its own user's, like the process (the kernel checks who may trace it, too).
+            let mem = Node::new(Kind::ProcMem(p.pid), 0o600);
+            let _ = mem.set_owner(p.creds.euid, p.creds.egid);
+            mem
+        }),
         ("mounts".into(), file(mounts())),
         ("exe".into(), path_link(&p.exe)),
         ("cwd".into(), path_link(&p.files().cwd)),

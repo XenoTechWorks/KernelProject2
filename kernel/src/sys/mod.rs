@@ -159,6 +159,7 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         128 => crate::proc::signal::timed_wait(a[0], a[1], a[2]),
         130 => crate::proc::signal::suspend(crate::mm::user::read_u64(crate::proc::current().space(), a[0])?),
         131 => Ok(0), // sigaltstack
+        135 => process::personality(a[0] as u32),
         137 => fs::statfs_path(a[0], a[1]),
         138 => fs::fstatfs(a[0] as i32, a[1]),
         157 => Ok(0), // prctl: accept and ignore (PR_SET_NAME etc.)

@@ -60,6 +60,8 @@ pub enum Kind {
     Device(Device),
     /// A Unix socket's name: what a program bound connects to it (net/unix.rs).
     Socket,
+    /// /proc/<pid>/mem: that process's memory, by address.
+    ProcMem(u32),
     /// An inode on an ext2 disk (a file, directory, symlink or socket).
     Ext2(Arc<Ext2>, u32),
 }
@@ -145,6 +147,7 @@ impl Node {
             Kind::Symlink(_) => Type::Symlink,
             Kind::Device(d) => Type::Device(*d),
             Kind::Socket => Type::Socket,
+            Kind::ProcMem(_) => Type::File,
             Kind::Ext2(..) => match self.ext2_info().map_or(0, |i| i.mode as u32 & S_IFMT_MASK) {
                 S_IFDIR => Type::Dir,
                 S_IFLNK => Type::Symlink,
@@ -222,7 +225,7 @@ impl Node {
             Kind::File(data) => data.lock().len() as u64,
             Kind::Symlink(target) => target.len() as u64,
             Kind::Dir(entries) => entries.lock().len() as u64 * 32,
-            Kind::Device(_) | Kind::Socket => 0,
+            Kind::Device(_) | Kind::Socket | Kind::ProcMem(_) => 0,
             Kind::Ext2(..) => self.ext2_info().map_or(0, |i| i.size),
         }
     }
@@ -257,6 +260,7 @@ impl Node {
                 Ok(n)
             }
             Kind::Ext2(fs, ino) if self.kind_of() == Type::File => fs.read_at(*ino, offset, buf),
+            Kind::ProcMem(pid) => crate::proc::ptrace::mem_read(*pid, offset, buf),
             _ if self.is_dir() => Err(EISDIR),
             _ => Err(EINVAL),
         }
@@ -264,6 +268,7 @@ impl Node {
 
     pub fn write_at(&self, offset: u64, data: &[u8]) -> Result<usize, Errno> {
         match &self.kind {
+            Kind::ProcMem(pid) => crate::proc::ptrace::mem_write(*pid, offset, data),
             Kind::File(contents) => {
                 let mut contents = contents.lock();
                 let pos = offset as usize;

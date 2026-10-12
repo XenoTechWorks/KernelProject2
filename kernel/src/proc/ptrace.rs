@@ -27,8 +27,12 @@ const POKETEXT: u64 = 4;
 const POKEDATA: u64 = 5;
 const CONT: u64 = 7;
 const KILL: u64 = 8;
+const SINGLESTEP: u64 = 9;
 const GETREGS: u64 = 12;
 const SETREGS: u64 = 13;
+const GETFPREGS: u64 = 14;
+const SETFPREGS: u64 = 15;
+const POKEUSER: u64 = 6;
 const ATTACH: u64 = 16;
 const DETACH: u64 = 17;
 const SYSCALL: u64 = 24;
@@ -63,6 +67,10 @@ const EVENT_STOP: u32 = 128;
 
 const SIGTRAP: usize = 5;
 const NT_PRSTATUS: u64 = 1;
+const NT_PRFPREG: u64 = 2;
+/// Where the debug registers start in `struct user` (debuggers read and write them there).
+const DEBUGREG_OFFSET: u64 = 848;
+const TRAP_FLAG: u64 = 0x100;
 const CLD_TRAPPED: i32 = 4;
 const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
 
@@ -381,12 +389,16 @@ fn tracee(pid: u32, stopped: bool) -> Result<&'static mut Process, Errno> {
     Ok(p)
 }
 
-/// Lets a tracee go on, with a signal to deliver (for a signal stop) or to send.
-fn resume(p: &mut Process, syscalls: bool, sig: u64) -> SysResult {
+/// Lets a tracee go on, with a signal to deliver (for a signal stop) or to send; with `step`,
+/// for one instruction (the trap flag), after which it stops with SIGTRAP.
+fn resume(p: &mut Process, syscalls: bool, sig: u64, step: bool) -> SysResult {
     if sig > 64 {
         return Err(EIO);
     }
     let t = p.trace.as_deref_mut().ok_or(ESRCH)?;
+    if let Some(f) = t.frame() {
+        f.rflags = if step { f.rflags | TRAP_FLAG } else { f.rflags & !TRAP_FLAG };
+    }
     t.syscalls = syscalls;
     t.listening = false;
     let why = t.stop.take().map(|(why, _)| why);
@@ -406,9 +418,13 @@ fn registers(p: &Process) -> Result<[u64; 27], Errno> {
     let orig_rax = if in_syscall { t.syscall.0 } else { u64::MAX };
     // Going into a system call, rax holds -ENOSYS until it's made, as on Linux.
     let rax = if matches!(t.stop, Some((Why::Entry, _))) { (-(ENOSYS as i64)) as u64 } else { f.rax };
+    // The segment selectors are Linux's 64-bit ones (debuggers tell 64-bit from 32-bit programs
+    // by cs); ours are numbered differently but mean the same.
+    const LINUX_USER_CS: u64 = 0x33;
+    const LINUX_USER_DS: u64 = 0x2b;
     Ok([
-        f.r15, f.r14, f.r13, f.r12, f.rbp, f.rbx, f.r11, f.r10, f.r9, f.r8, rax, f.rcx, f.rdx, f.rsi, f.rdi, orig_rax, f.rip, f.cs, f.rflags,
-        f.rsp, f.ss, p.fs_base, p.gs_base, 0, 0, 0, 0,
+        f.r15, f.r14, f.r13, f.r12, f.rbp, f.rbx, f.r11, f.r10, f.r9, f.r8, rax, f.rcx, f.rdx, f.rsi, f.rdi, orig_rax, f.rip, LINUX_USER_CS, f.rflags,
+        f.rsp, LINUX_USER_DS, p.fs_base, p.gs_base, 0, 0, 0, 0,
     ])
 }
 
@@ -536,10 +552,11 @@ pub fn ptrace(request: u64, pid: u32, addr: u64, data: u64) -> SysResult {
 fn request_on_stopped(p: &'static mut Process, request: u64, addr: u64, data: u64) -> SysResult {
     let space = current().space();
     match request {
-        CONT | SYSCALL => resume(p, request == SYSCALL, data),
+        CONT | SYSCALL => resume(p, request == SYSCALL, data, false),
+        SINGLESTEP => resume(p, false, data, true),
         DETACH => {
             let sig = data;
-            resume(p, false, sig)?;
+            resume(p, false, sig, false)?;
             let pass = p.trace.as_ref().map_or(0, |t| t.resume_sig);
             p.trace = None;
             if pass != 0 {
@@ -591,7 +608,31 @@ fn request_on_stopped(p: &'static mut Process, request: u64, addr: u64, data: u6
             Ok(0)
         }
         POKETEXT | POKEDATA => {
-            user::write(p.space(), addr, &data.to_le_bytes()).map_err(|_| EIO)?;
+            user::write_force(p.space(), addr, &data.to_le_bytes()).map_err(|_| EIO)?;
+            Ok(0)
+        }
+        POKEUSER => {
+            // A register; or a debug register, where there are none to set: clearing one is
+            // fine, setting one (a hardware watchpoint) isn't possible.
+            if addr % 8 == 0 && addr < 27 * 8 {
+                let mut regs = registers(p)?;
+                regs[addr as usize / 8] = data;
+                set_registers(p, &regs)?;
+                Ok(0)
+            } else if (DEBUGREG_OFFSET..DEBUGREG_OFFSET + 64).contains(&addr) && data == 0 {
+                Ok(0)
+            } else {
+                Err(EIO)
+            }
+        }
+        GETFPREGS => {
+            user::write(space, data, p.fpu_state())?;
+            Ok(0)
+        }
+        SETFPREGS => {
+            let mut state = [0u8; 512];
+            user::read(space, data, &mut state)?;
+            p.set_fpu_state(&state);
             Ok(0)
         }
         PEEKUSER => {
@@ -608,6 +649,21 @@ fn request_on_stopped(p: &'static mut Process, request: u64, addr: u64, data: u6
         SETREGS => {
             let regs: [u64; 27] = user::read_struct(space, data)?;
             set_registers(p, &regs)?;
+            Ok(0)
+        }
+        GETREGSET | SETREGSET if addr == NT_PRFPREG => {
+            let [base, len]: [u64; 2] = user::read_struct(space, data)?;
+            if len < 512 {
+                return Err(EINVAL);
+            }
+            if request == GETREGSET {
+                user::write(space, base, p.fpu_state())?;
+                user::write_struct(space, data + 8, &512u64)?;
+            } else {
+                let mut state = [0u8; 512];
+                user::read(space, base, &mut state)?;
+                p.set_fpu_state(&state);
+            }
             Ok(0)
         }
         GETREGSET | SETREGSET => {
@@ -635,6 +691,25 @@ fn request_on_stopped(p: &'static mut Process, request: u64, addr: u64, data: u6
         }
         _ => Err(EIO),
     }
+}
+
+/// /proc/<pid>/mem: the process's memory, at its addresses, for whoever may trace it.
+pub fn mem_read(pid: u32, at: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+    let target = get(pid).ok_or(EIO)?;
+    if !may_trace(target) {
+        return Err(EACCES);
+    }
+    user::read(target.space(), at, buf).map_err(|_| EIO)?;
+    Ok(buf.len())
+}
+
+pub fn mem_write(pid: u32, at: u64, data: &[u8]) -> Result<usize, Errno> {
+    let target = get(pid).ok_or(EIO)?;
+    if !may_trace(target) {
+        return Err(EACCES);
+    }
+    user::write_force(target.space(), at, data).map_err(|_| EIO)?;
+    Ok(data.len())
 }
 
 /// process_vm_readv / process_vm_writev: copy between the caller's memory and another process's

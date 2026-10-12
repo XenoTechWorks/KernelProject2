@@ -8,11 +8,20 @@ use crate::sys::errno::{EFAULT, Errno};
 use alloc::string::String;
 use alloc::vec::Vec;
 
+/// How a chunk of memory will be used: read, written by the program's own rules, or written
+/// whatever the page says (a debugger putting a breakpoint into code; pages are private copies).
+#[derive(Clone, Copy, PartialEq)]
+enum Access {
+    Read,
+    Write,
+    Force,
+}
+
 fn each_chunk(
     space: &AddressSpace,
     addr: u64,
     len: usize,
-    write: bool,
+    access: Access,
     mut f: impl FnMut(*mut u8, usize, usize),
 ) -> Result<(), Errno> {
     if addr.checked_add(len as u64).is_none_or(|end| end > USER_END) {
@@ -28,7 +37,7 @@ fn each_chunk(
             space.map_new_page(va, USER | WRITABLE | NO_EXECUTE);
         }
         let (page, flags) = space.translate(va).ok_or(EFAULT)?;
-        if flags & USER == 0 || (write && flags & WRITABLE == 0) {
+        if flags & USER == 0 || (access == Access::Write && flags & WRITABLE == 0) {
             return Err(EFAULT);
         }
         let offset = (va % PAGE_SIZE) as usize;
@@ -41,7 +50,7 @@ fn each_chunk(
 
 pub fn read(space: &AddressSpace, addr: u64, out: &mut [u8]) -> Result<(), Errno> {
     let len = out.len();
-    each_chunk(space, addr, len, false, |src, at, n| unsafe {
+    each_chunk(space, addr, len, Access::Read, |src, at, n| unsafe {
         core::ptr::copy_nonoverlapping(src, out.as_mut_ptr().add(at), n)
     })
 }
@@ -53,7 +62,14 @@ pub fn read_vec(space: &AddressSpace, addr: u64, len: usize) -> Result<Vec<u8>, 
 }
 
 pub fn write(space: &AddressSpace, addr: u64, data: &[u8]) -> Result<(), Errno> {
-    each_chunk(space, addr, data.len(), true, |dst, at, n| unsafe {
+    each_chunk(space, addr, data.len(), Access::Write, |dst, at, n| unsafe {
+        core::ptr::copy_nonoverlapping(data.as_ptr().add(at), dst, n)
+    })
+}
+
+/// Writes even where the program itself may not (its code): for ptrace's POKETEXT.
+pub fn write_force(space: &AddressSpace, addr: u64, data: &[u8]) -> Result<(), Errno> {
+    each_chunk(space, addr, data.len(), Access::Force, |dst, at, n| unsafe {
         core::ptr::copy_nonoverlapping(data.as_ptr().add(at), dst, n)
     })
 }

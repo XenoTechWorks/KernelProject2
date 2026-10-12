@@ -35,7 +35,9 @@ kernel answers those calls the way Linux does, the program can't tell the differ
   Signals carry who sent them and why (a child's exit status for `SIGCHLD`). Python's `asyncio`
   runs on them.
 - `ptrace`, so one program can watch and steer another: Ubuntu's own `strace` runs (`strace -f`
-  follows a whole pipeline), stopping at each system call, signal, exec and fork.
+  follows a whole pipeline), stopping at each system call, signal, exec and fork; and Ubuntu's
+  `gdb`, with breakpoints, single steps, backtraces and attaching to running programs (it has
+  Python inside, so it's in the image only with `WITH_GDB=1 ./build.sh`).
 - About 150 Linux system calls (see `kernel/src/sys/mod.rs`). Missing ones return `ENOSYS` and are
   logged once on the serial port, which shows what a new program needs next.
 
@@ -407,7 +409,7 @@ rootfs/          files copied into the root file system (/etc ...)
 disk/            what a new disk starts with (out/disk.img is made from it once)
 tests/           test programs (C, and Windows ones in windows/) and the test scripts:
                  smoke.py, persist.py, windows.py, edit.py, textedit.py, archive.py,
-                 pkg.py, accounts.py, net.py, tcp.py, ssh.py, terminals.py, doom.py,
+                 pkg.py, accounts.py, net.py, tcp.py, ssh.py, terminals.py, gdb.py, doom.py,
                  session.sh; events.c is events-test, ptys.c pty-test, jail.c jail-test,
                  trace.c trace-test
 ```
@@ -438,7 +440,8 @@ python3 tests/accounts.py # a user, a password, and what they're not allowed to 
 python3 tests/net.py      # the card, ping through ARP, and a DNS lookup
 python3 tests/tcp.py      # curl over TCP (a big file byte for byte), a server in the guest, HTTPS
 python3 tests/ssh.py      # ssh, scp and ssh-agent against an SSH server on this machine
-python3 tests/terminals.py # script and tmux, in pseudo-terminals
+python3 tests/terminals.py # script and tmux, in pseudo-terminals, and job control
+python3 tests/gdb.py      # gdb: breakpoints, a step, attaching (in an image built WITH_GDB=1)
 python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
 ```
 
@@ -446,8 +449,8 @@ python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
 
 Roughly in order; each step is checked by running a real program.
 
-1. **More of Linux for real tools**: what gdb needs beyond ptrace (single-stepping, breakpoints
-   in read-only code), and more CPUs.
+1. **More of Linux for real tools**: hardware watchpoints (debug registers), `/proc/<pid>/maps`,
+   and more CPUs.
 2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
    archive), interrupt-driven I/O, and AHCI for real PCs.
 3. **Run the targets**: fastfetch and git run; next then coreutils as a compatibility test.

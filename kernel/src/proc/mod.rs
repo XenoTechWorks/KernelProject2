@@ -198,6 +198,10 @@ pub struct Process {
     pub vfork_parent: Option<u32>,
     /// For the first thread of a process: a stop or continue its parent hasn't waited for yet.
     pub job_event: Option<JobEvent>,
+    /// personality(2)'s flags.
+    pub personality: u32,
+    /// The auxiliary vector its program started with.
+    pub auxv: Vec<u8>,
     /// Its tracer, and how it's being traced (ptrace.rs).
     pub trace: Option<Box<ptrace::Trace>>,
     /// The terminal that controls it (its session's), if any: /dev/tty, and where Ctrl+C comes from.
@@ -211,6 +215,15 @@ pub struct Process {
 }
 
 impl Process {
+    /// The saved floating point and SSE registers (FXSAVE's 512 bytes).
+    pub fn fpu_state(&self) -> &[u8] {
+        &self.fpu.0
+    }
+
+    pub fn set_fpu_state(&mut self, state: &[u8; 512]) {
+        self.fpu.0.copy_from_slice(state);
+    }
+
     pub fn space(&self) -> &AddressSpace {
         self.mem.get().space.as_ref().expect("process without memory")
     }
@@ -376,6 +389,8 @@ fn new_task(pid: u32, mem: Arc<Shared<Memory>>, files: Arc<Shared<Files>>, handl
         fault_addr: None,
         vfork_parent: None,
         job_event: None,
+        auxv: Vec::new(),
+        personality: 0,
         trace: None,
         ctty: None,
         futex: None,
@@ -404,12 +419,14 @@ pub fn spawn_init(path: &str) -> Result<(), Errno> {
     let env = alloc::vec![String::from("PATH=/bin:/usr/bin"), String::from("HOME=/root"), String::from("TERM=linux")];
     let mut image = Some(elf::load(path, &args, &env)?);
     let (entry, stack) = image.as_ref().map(|i| (i.entry, i.stack)).unwrap();
+    let auxv = image.as_mut().map(|i| core::mem::take(&mut i.auxv)).unwrap_or_default();
     let files = Shared::new(Files { fds, cwd: String::from("/"), root: String::from("/"), umask: 0o022 });
     let mut p = new_task(1, memory_of(&mut image), files, Shared::new([SigAction::default(); 65]));
     s.next_pid = 2;
     p.name = elf::short_name(path);
     p.exe = String::from(path);
     p.cmdline = cmdline_of(&args);
+    p.auxv = auxv;
     p.ctty = Some(crate::tty::console());
     prime_stack(&mut p, TrapFrame::user(entry, stack));
     s.procs.insert(1, p);
@@ -640,6 +657,8 @@ pub fn fork(frame: &TrapFrame, flags: u64, new_sp: u64, parent_tid: u64, child_t
     child.name = parent.name.clone();
     child.exe = parent.exe.clone();
     child.cmdline = parent.cmdline.clone();
+    child.auxv = parent.auxv.clone();
+    child.personality = parent.personality;
     child.fs_base = if flags & CLONE_SETTLS != 0 { tls } else { parent.fs_base };
     child.gs_base = parent.gs_base;
     child.sigmask = parent.sigmask;
@@ -719,6 +738,7 @@ pub fn exec(frame: &mut TrapFrame, path: &str, args: &[String], env: &[String]) 
         p
     };
     let (entry, stack, exe) = image.as_ref().map(|i| (i.entry, i.stack, i.path.clone())).unwrap();
+    p.auxv = image.as_mut().map(|i| core::mem::take(&mut i.auxv)).unwrap_or_default();
     image.as_ref().unwrap().space.activate();
     // New memory, our own copies of the files table and handlers (whoever shared them keeps theirs).
     p.mem = memory_of(&mut image);
@@ -872,12 +892,13 @@ pub fn user_fault(frame: &mut TrapFrame, name: &str) {
     use signal::{SIGBUS, SIGFPE, SIGILL, SIGTRAP};
     let sig = match frame.vector {
         0 | 16 | 19 => SIGFPE,
-        3 => SIGTRAP,
+        1 | 3 => SIGTRAP,
         6 => SIGILL,
         17 => SIGBUS,
         _ => SIGSEGV,
     };
-    let handled = p.handlers()[sig].handler > signal::SIG_IGN && p.sigmask & signal::bit(sig) == 0;
+    // (A traced program's tracer deals with it: a debugger's breakpoint isn't worth a log line.)
+    let handled = p.trace.is_some() || (p.handlers()[sig].handler > signal::SIG_IGN && p.sigmask & signal::bit(sig) == 0);
     if !handled {
         crate::log!(
             "pid {} ({}): {name} at {:#x}, address {:#x}, error {:#x}",

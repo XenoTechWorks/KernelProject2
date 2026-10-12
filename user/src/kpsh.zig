@@ -683,6 +683,7 @@ const help_text =
     \\  jobs              list jobs (Ctrl+Z stops the one running; & starts one in the background)
     \\  fg [%n]           bring a job back to the foreground
     \\  bg [%n]           let a stopped job go on in the background
+    \\  exec PROG [ARGS]  become PROG (the shell is replaced by it)
     \\  exit [code]       leave the shell
     \\  help              this text
     \\Everything else runs as a program from $PATH. Supported syntax:
@@ -694,6 +695,20 @@ const help_text =
 /// Runs a builtin; returns null when `cmd` isn't one.
 fn builtin(cmd: *const Command) ?u8 {
     const name = cmd.arg(0) orelse return null;
+    // exec PROGRAM ARGS: the shell becomes the program (debuggers start programs this way).
+    if (eql(u8, name, "exec")) {
+        const program = cmd.arg(1) orelse return 0;
+        var path_buf: [512]u8 = undefined;
+        const path = findProgram(program, &path_buf) orelse {
+            rt.err.print("kpsh: exec: {s}: not found\n", .{program});
+            return 127;
+        };
+        rt.out.flush();
+        rt.err.flush();
+        const r = sys.check(sys.syscall3(sys.nr.execve, @intFromPtr(path), @intFromPtr(&cmd.argv[1]), @intFromPtr(envp())));
+        rt.complain("kpsh: exec", program, r.err);
+        return 126;
+    }
     if (eql(u8, name, "jobs")) return listJobs();
     if (eql(u8, name, "fg")) return fgJob(cmd);
     if (eql(u8, name, "bg")) return bgJob(cmd);

@@ -229,6 +229,13 @@ pub fn send_info(p: &mut Process, sig: usize, info: Info) {
     }
 }
 
+/// Calls that SA_RESTART doesn't restart after a handler, as on Linux (signal(7)): waiting for a
+/// signal (pause, sigsuspend, sigtimedwait), sleeps, and the poll/select/epoll family. A program
+/// waiting in sigsuspend for a SIGCHLD whose handler has just run must see it return.
+fn restartable(syscall: u64) -> bool {
+    !matches!(syscall, 7 | 23 | 34 | 35 | 128 | 130 | 230 | 232 | 270 | 271 | 281 | 441)
+}
+
 /// Acts on pending signals before returning to the program described by `frame`.
 pub fn deliver(frame: &mut TrapFrame) {
     super::ptrace::interrupted(frame);
@@ -280,6 +287,22 @@ pub fn deliver(frame: &mut TrapFrame) {
 /// one and isn't blocking the signal, otherwise end it, as Linux does.
 pub fn fault(frame: &mut TrapFrame, sig: usize, addr: u64) {
     let p = current();
+    // A traced program's tracer sees the fault first (a debugger's breakpoint, a single step).
+    if p.trace.is_some() {
+        let code = match frame.vector {
+            1 => TRAP_TRACE,
+            3 => SI_KERNEL, // int3, as Linux reports it
+            _ => 1,
+        };
+        p.sigmask &= !bit(sig);
+        p.sig_info[sig] = Info { code, ..Info::default() };
+        p.pending |= bit(sig);
+        if sig != SIGTRAP {
+            p.fault_addr = Some(addr);
+        }
+        deliver(frame);
+        return;
+    }
     let handler = p.handlers()[sig].handler;
     if handler == SIG_DFL || handler == SIG_IGN || p.sigmask & bit(sig) != 0 {
         exit(sig as i32);
@@ -288,6 +311,9 @@ pub fn fault(frame: &mut TrapFrame, sig: usize, addr: u64) {
     p.pending |= bit(sig);
     deliver(frame);
 }
+
+/// si_code of a SIGTRAP from single-stepping.
+const TRAP_TRACE: i32 = 2;
 
 // Offsets in Linux's x86-64 `struct rt_sigframe`.
 const UC: usize = 8; // after the return address (the restorer)
@@ -309,7 +335,7 @@ fn start_handler(p: &mut Process, frame: &mut TrapFrame, sig: usize, info: Info,
         return Err(EFAULT); // x86-64 programs always provide one (the C library does)
     }
     // A system call cut short by this signal: restart it after the handler, or report EINTR.
-    if frame.vector == SYSCALL_VECTOR && frame.rax as i64 == -EINTR && action.flags & SA_RESTART != 0 {
+    if frame.vector == SYSCALL_VECTOR && frame.rax as i64 == -EINTR && action.flags & SA_RESTART != 0 && restartable(frame.error) {
         frame.rax = frame.error; // the system call number, saved on entry
         frame.rip -= 2; // back onto the `syscall` instruction
     }

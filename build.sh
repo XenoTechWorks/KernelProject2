@@ -170,18 +170,53 @@ for extra in ${EXTRA_PROGRAMS:-}; do
     fi
 done
 
+# Python's standard library, for python3 and for gdb (which has Python inside): everything but
+# the test suite, which is a third of it and of no use here.
+add_python_stdlib() {
+    local py_lib
+    py_lib="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')"
+    [[ -d "$stage$py_lib" ]] && return
+    mkdir -p "$stage$(dirname "$py_lib")"
+    rsync -a --exclude 'test' --exclude 'idlelib' --exclude '__pycache__' "$py_lib/" "$stage$py_lib/" 2>/dev/null ||
+        cp -r "$py_lib" "$stage$(dirname "$py_lib")/"
+}
+
 # Python needs its standard library beside the binary, so it gets a step of its own. It adds
 # about 30 MiB to the image, so ask for it:  WITH_PYTHON=1 ./build.sh
 if [[ -n "${WITH_PYTHON:-}" ]] && command -v python3 >/dev/null; then
     py_bin="$(readlink -f "$(command -v python3)")"
-    py_lib="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')"
     step "python3 ($py_bin)"
     add_host_program "$py_bin"
     ln -sf "$(basename "$py_bin")" "$stage/bin/python3"
-    mkdir -p "$stage$(dirname "$py_lib")"
-    # Everything but the test suite, which is a third of it and of no use here.
-    rsync -a --exclude 'test' --exclude 'idlelib' --exclude '__pycache__' "$py_lib/" "$stage$py_lib/" 2>/dev/null ||
-        cp -r "$py_lib" "$stage$(dirname "$py_lib")/"
+    add_python_stdlib
+fi
+
+# gdb, from Ubuntu: a debugger, over ptrace. It has Python inside, so it brings Python's standard
+# library too, which makes it big; ask for it:  WITH_GDB=1 ./build.sh
+# If the build machine has no gdb, the gdb package and the libraries it adds are downloaded and
+# unpacked into the cache (nothing is installed), and copied in from there to where they'd normally be.
+if [[ -n "${WITH_GDB:-}" ]]; then
+    step "gdb"
+    gdb_root=""
+    if [[ ! -x /usr/bin/gdb ]]; then
+        gdb_cache="$HOME/.cache/kernelproject2/gdb"
+        if [[ ! -x "$gdb_cache/root/usr/bin/gdb" || ! -e "$gdb_cache/root/usr/lib/x86_64-linux-gnu/libipt.so.2" ]]; then
+            mkdir -p "$gdb_cache"
+            (cd "$gdb_cache" && apt-get download gdb libbabeltrace1 libdebuginfod1t64 libipt2 libsource-highlight4t64 >/dev/null)
+            for deb in "$gdb_cache"/*.deb; do dpkg-deb -x "$deb" "$gdb_cache/root"; done
+        fi
+        gdb_root="$gdb_cache/root"
+    fi
+    cp -L "$gdb_root/usr/bin/gdb" "$stage/bin/"
+    LD_LIBRARY_PATH="$gdb_root/usr/lib/x86_64-linux-gnu" ldd "$gdb_root/usr/bin/gdb" | grep -o '/[^ ]*' | while read -r lib; do
+        dest="${lib#"$gdb_root"}"
+        mkdir -p "$stage$(dirname "$dest")"
+        cp -L "$lib" "$stage$dest"
+    done
+    cp -r "$gdb_root/usr/share/gdb" "$stage/usr/share/"
+    # glibc's helper for debuggers to see a program's threads.
+    cp -L /lib/x86_64-linux-gnu/libthread_db.so.1 "$stage/lib/x86_64-linux-gnu/"
+    add_python_stdlib
 fi
 
 fastfetch="${FASTFETCH:-$HOME/src/fastfetch/build/fastfetch}"

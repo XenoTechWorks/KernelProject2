@@ -155,6 +155,19 @@ pub fn waitid(idtype: u32, id: u64, info_at: u64, options: u32) -> SysResult {
     Ok(0)
 }
 
+/// personality: always Linux's own, but the flags a program sets (debuggers ask for no address
+/// randomisation, which there isn't here anyway) are kept and read back. 0xffffffff only asks.
+pub fn personality(persona: u32) -> SysResult {
+    let p = proc::current();
+    let old = p.personality;
+    if persona != u32::MAX {
+        for t in proc::threads(p.tgid) {
+            t.personality = persona;
+        }
+    }
+    Ok(old as u64)
+}
+
 pub fn kill(pid: i64, sig: usize) -> SysResult {
     if sig > 64 {
         return Err(EINVAL);
