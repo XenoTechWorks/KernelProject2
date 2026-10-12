@@ -6,9 +6,14 @@
 //!   pipe ends, so end-of-file and EPIPE work just as they do for pipes.
 //! - A datagram socket has a queue of whole messages, each with the sender's name.
 //!
+//! Either kind can carry open files along (SCM_RIGHTS): a datagram has them with it; on a stream
+//! they're tied to the bytes they were sent with, and as on Linux a read that takes them ends
+//! with those bytes, so the next files come with the next read.
+//!
 //! The file system call layer (sys/net.rs) turns addresses into names; this file only sees names.
 
 use crate::fs::pipe::{self, Pipe};
+use crate::proc::fd::OpenFile;
 use crate::sys::errno::*;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
@@ -106,9 +111,30 @@ enum State {
     Connected(Link),
 }
 
+/// One way of a stream connection: the bytes, and the files sent along with them.
+#[derive(Clone)]
+struct Way {
+    pipe: Arc<Pipe>,
+    files: Arc<Mutex<Attached>>,
+}
+
+impl Way {
+    fn new() -> Way {
+        Way { pipe: pipe::new(), files: Arc::new(Mutex::new(Attached::default())) }
+    }
+}
+
+/// Files sent on a stream, with where in the stream the bytes they came with start and end.
+#[derive(Default)]
+struct Attached {
+    sent: u64,
+    read: u64,
+    queue: VecDeque<(u64, u64, Vec<Arc<OpenFile>>)>,
+}
+
 struct Link {
-    rx: Arc<Pipe>,
-    tx: Arc<Pipe>,
+    rx: Way,
+    tx: Way,
     peer: Option<Name>,
     peer_cred: Cred,
     reading: bool,
@@ -116,21 +142,22 @@ struct Link {
 }
 
 impl Link {
-    fn new(rx: Arc<Pipe>, tx: Arc<Pipe>, peer: Option<Name>, peer_cred: Cred) -> Link {
-        *rx.readers.lock() += 1;
-        *tx.writers.lock() += 1;
+    fn new(rx: Way, tx: Way, peer: Option<Name>, peer_cred: Cred) -> Link {
+        *rx.pipe.readers.lock() += 1;
+        *tx.pipe.writers.lock() += 1;
         Link { rx, tx, peer, peer_cred, reading: true, writing: true }
     }
 
     fn stop_reading(&mut self) {
         if core::mem::take(&mut self.reading) {
-            *self.rx.readers.lock() -= 1;
+            *self.rx.pipe.readers.lock() -= 1;
+            self.rx.files.lock().queue.clear(); // nobody will take them now
         }
     }
 
     fn stop_writing(&mut self) {
         if core::mem::take(&mut self.writing) {
-            *self.tx.writers.lock() -= 1;
+            *self.tx.pipe.writers.lock() -= 1;
         }
     }
 }
@@ -153,7 +180,7 @@ impl Stream {
 
     pub fn pair() -> (Arc<Stream>, Arc<Stream>) {
         let (a, b) = (Stream::new(), Stream::new());
-        let (up, down) = (pipe::new(), pipe::new());
+        let (up, down) = (Way::new(), Way::new());
         *a.state.lock() = State::Connected(Link::new(down.clone(), up.clone(), None, b.owner));
         *b.state.lock() = State::Connected(Link::new(up, down, None, a.owner));
         (a, b)
@@ -198,7 +225,7 @@ pub fn connect(s: &Stream, name: &Name, nonblocking: bool) -> Result<(), Errno> 
             let mut state = listener.state.lock();
             let State::Listening { queue, max } = &mut *state else { return Err(ECONNREFUSED) };
             if queue.len() < *max {
-                let (up, down) = (pipe::new(), pipe::new());
+                let (up, down) = (Way::new(), Way::new());
                 let server = Arc::new(Stream {
                     state: Mutex::new(State::Connected(Link::new(up.clone(), down.clone(), s.name.lock().clone(), caller()))),
                     name: Mutex::new(listener.name.lock().clone()),
@@ -237,8 +264,8 @@ pub fn accept(s: &Stream, nonblocking: bool) -> Result<Arc<Stream>, Errno> {
     }
 }
 
-/// The two pipes of a connection, and whether each way is still open on this side.
-fn link_of(s: &Stream) -> Result<(Arc<Pipe>, Arc<Pipe>, bool, bool), Errno> {
+/// The two ways of a connection, and whether each is still open on this side.
+fn link_of(s: &Stream) -> Result<(Way, Way, bool, bool), Errno> {
     match &*s.state.lock() {
         State::Connected(l) => Ok((l.rx.clone(), l.tx.clone(), l.reading, l.writing)),
         State::Listening { .. } => Err(EINVAL),
@@ -246,21 +273,64 @@ fn link_of(s: &Stream) -> Result<(Arc<Pipe>, Arc<Pipe>, bool, bool), Errno> {
     }
 }
 
-pub fn read(s: &Stream, buf: &mut [u8], nonblocking: bool, peek: bool) -> Result<usize, Errno> {
+/// Reads, and takes the files of the first bytes read that have some. A read that reaches bytes
+/// with files ends where those bytes end.
+pub fn receive(s: &Stream, buf: &mut [u8], nonblocking: bool, peek: bool) -> Result<(usize, Vec<Arc<OpenFile>>), Errno> {
     let (rx, _, reading, _) = link_of(s)?;
     if !reading {
-        return Ok(0);
+        return Ok((0, Vec::new()));
     }
-    pipe::read(&rx, buf, nonblocking, peek)
+    let limit = {
+        let files = rx.files.lock();
+        files.queue.front().map_or(buf.len(), |(_, end, _)| ((end - files.read) as usize).min(buf.len()))
+    };
+    let n = pipe::read(&rx.pipe, &mut buf[..limit], nonblocking, peek)?;
+    if peek || n == 0 {
+        return Ok((n, Vec::new()));
+    }
+    let mut files = rx.files.lock();
+    files.read += n as u64;
+    let reached = files.queue.front().is_some_and(|(at, _, _)| *at < files.read);
+    let came = if reached { files.queue.pop_front().map(|(_, _, f)| f).unwrap_or_default() } else { Vec::new() };
+    Ok((n, came))
 }
 
-/// EPIPE once the other side has gone (or this side shut its writing); the caller sends SIGPIPE.
-pub fn write(s: &Stream, data: &[u8], nonblocking: bool) -> Result<usize, Errno> {
+pub fn read(s: &Stream, buf: &mut [u8], nonblocking: bool, peek: bool) -> Result<usize, Errno> {
+    // A plain read can't take files; any that came are closed, as on Linux.
+    receive(s, buf, nonblocking, peek).map(|(n, _)| n)
+}
+
+/// Writes, with `files` going along with the first byte. EPIPE once the other side has gone (or
+/// this side shut its writing); the caller sends SIGPIPE.
+pub fn send_stream(s: &Stream, data: &[u8], files: Vec<Arc<OpenFile>>, nonblocking: bool) -> Result<usize, Errno> {
     let (_, tx, _, writing) = link_of(s)?;
     if !writing {
         return Err(EPIPE);
     }
-    pipe::write(&tx, data, nonblocking)
+    if files.is_empty() {
+        let n = pipe::write(&tx.pipe, data, nonblocking)?;
+        tx.files.lock().sent += n as u64;
+        return Ok(n);
+    }
+    if data.is_empty() {
+        return Err(EINVAL); // files need at least one byte to travel with
+    }
+    let at = tx.files.lock().sent;
+    tx.files.lock().queue.push_back((at, at + data.len() as u64, files));
+    match pipe::write(&tx.pipe, data, nonblocking) {
+        Ok(n) => {
+            let mut attached = tx.files.lock();
+            attached.sent += n as u64;
+            if let Some(entry) = attached.queue.iter_mut().find(|(a, _, _)| *a == at) {
+                entry.1 = at + n as u64; // all that went, if not all did
+            }
+            Ok(n)
+        }
+        Err(e) => {
+            tx.files.lock().queue.retain(|(a, _, _)| *a != at);
+            Err(e)
+        }
+    }
 }
 
 /// shutdown(): 0 stops reading, 1 stops writing (the other side reads end-of-file), 2 both.
@@ -292,11 +362,11 @@ pub fn stream_readiness(s: &Stream) -> Ready {
         State::Idle => Ready { read: false, write: false, read_closed: false, hangup: false },
         State::Listening { queue, .. } => Ready { read: !queue.is_empty(), write: false, read_closed: false, hangup: false },
         State::Connected(l) => {
-            let ended = *l.rx.writers.lock() == 0 || !l.reading;
-            let peer_reading = *l.tx.readers.lock() > 0 && l.writing;
-            let room = l.tx.buffer.lock().len() < pipe::CAPACITY;
+            let ended = *l.rx.pipe.writers.lock() == 0 || !l.reading;
+            let peer_reading = *l.tx.pipe.readers.lock() > 0 && l.writing;
+            let room = l.tx.pipe.buffer.lock().len() < pipe::CAPACITY;
             Ready {
-                read: ended || !l.rx.buffer.lock().is_empty(),
+                read: ended || !l.rx.pipe.buffer.lock().is_empty(),
                 // A write that would fail with EPIPE counts as ready too: it doesn't wait.
                 write: room || !peer_reading,
                 read_closed: ended,
@@ -309,7 +379,7 @@ pub fn stream_readiness(s: &Stream) -> Ready {
 /// Bytes waiting to be read (FIONREAD).
 pub fn pending(s: &Stream) -> usize {
     match &*s.state.lock() {
-        State::Connected(l) => l.rx.buffer.lock().len(),
+        State::Connected(l) => l.rx.pipe.buffer.lock().len(),
         _ => 0,
     }
 }
@@ -338,6 +408,7 @@ pub struct Datagram {
 pub struct Message {
     pub data: Vec<u8>,
     pub from: Option<Name>,
+    pub files: Vec<Arc<OpenFile>>,
 }
 
 /// Messages a socket holds before senders wait.
@@ -387,7 +458,7 @@ pub fn connect_datagram(d: &Datagram, name: &Name) -> Result<(), Errno> {
     Ok(())
 }
 
-pub fn send(d: &Datagram, to: Option<&Name>, data: &[u8], nonblocking: bool) -> Result<usize, Errno> {
+pub fn send(d: &Datagram, to: Option<&Name>, data: &[u8], files: Vec<Arc<OpenFile>>, nonblocking: bool) -> Result<usize, Errno> {
     let target = match to {
         Some(name) => find_datagram(name)?,
         None => match &*d.peer.lock() {
@@ -399,7 +470,7 @@ pub fn send(d: &Datagram, to: Option<&Name>, data: &[u8], nonblocking: bool) -> 
         {
             let mut queue = target.queue.lock();
             if queue.len() < QUEUE_MAX {
-                queue.push_back(Message { data: data.to_vec(), from: d.name.lock().clone() });
+                queue.push_back(Message { data: data.to_vec(), from: d.name.lock().clone(), files: files.clone() });
                 drop(queue);
                 crate::proc::wake_all();
                 return Ok(data.len());
@@ -412,25 +483,33 @@ pub fn send(d: &Datagram, to: Option<&Name>, data: &[u8], nonblocking: bool) -> 
     }
 }
 
-/// The next message (cut to `buf.len()`), its full length, and who sent it.
-pub fn recv(d: &Datagram, buf: &mut [u8], nonblocking: bool, peek: bool) -> Result<(usize, usize, Option<Name>), Errno> {
+/// A message received: how much of it fitted, its full length, who sent it, and files with it.
+pub struct Received {
+    pub len: usize,
+    pub full: usize,
+    pub from: Option<Name>,
+    pub files: Vec<Arc<OpenFile>>,
+}
+
+/// The next message (cut to `buf.len()`).
+pub fn recv(d: &Datagram, buf: &mut [u8], nonblocking: bool, peek: bool) -> Result<Received, Errno> {
     loop {
         {
             let mut queue = d.queue.lock();
             if let Some(m) = queue.front() {
                 let n = m.data.len().min(buf.len());
                 buf[..n].copy_from_slice(&m.data[..n]);
-                let result = (n, m.data.len(), m.from.clone());
+                let mut got = Received { len: n, full: m.data.len(), from: m.from.clone(), files: Vec::new() };
                 if !peek {
-                    queue.pop_front();
+                    got.files = queue.pop_front().map(|m| m.files).unwrap_or_default();
                     drop(queue);
                     crate::proc::wake_all();
                 }
-                return Ok(result);
+                return Ok(got);
             }
         }
         if peer_gone(d) {
-            return Ok((0, 0, None));
+            return Ok(Received { len: 0, full: 0, from: None, files: Vec::new() });
         }
         if nonblocking {
             return Err(EAGAIN);

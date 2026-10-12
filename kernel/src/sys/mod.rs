@@ -11,6 +11,7 @@ pub mod mem;
 pub mod misc;
 pub mod net;
 pub mod process;
+pub mod signalfd;
 
 use crate::arch::idt::TrapFrame;
 use errno::*;
@@ -67,6 +68,7 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         37 => misc::alarm(a[0]),
         38 => misc::setitimer(a[0] as u32, a[1], a[2]),
         39 => Ok(crate::proc::current().tgid as u64),
+        73 => fs::flock(a[0] as i32, a[1] as u32),
         57 => process::clone(frame, 17, 0, 0, 0, 0),
         58 => process::clone(frame, 0x100 | 0x4000 | 17, 0, 0, 0, 0),
         56 => process::clone(frame, a[0], a[1], a[2], a[3], a[4]),
@@ -135,8 +137,12 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         111 => Ok(crate::proc::current().pgid as u64),
         112 => process::setsid(),
         121 => process::getpgid(a[0] as u32),
+        // setfsuid / setfsgid: file access here goes by the effective ids, so say what those are.
+        122 => Ok(crate::proc::current().creds.euid as u64),
+        123 => Ok(crate::proc::current().creds.egid as u64),
         124 => process::getsid(a[0] as u32),
         127 => process::rt_sigpending(a[0]),
+        128 => crate::proc::signal::timed_wait(a[0], a[1], a[2]),
         130 => crate::proc::signal::suspend(crate::mm::user::read_u64(crate::proc::current().space(), a[0])?),
         131 => Ok(0), // sigaltstack
         137 => fs::statfs_path(a[0], a[1]),
@@ -177,6 +183,8 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         273 => Ok(0), // set_robust_list
         280 => Ok(0), // utimensat
         284 => fs::eventfd(a[0], 0),
+        282 => signalfd::signalfd(a[0] as i32, a[1], 0),
+        289 => signalfd::signalfd(a[0] as i32, a[1], a[3] as u32),
         290 => fs::eventfd(a[0], a[1] as u32),
         291 => epoll::create(a[0] as u32),
         292 => fs::dup3(a[0] as i32, a[1] as i32, a[2] as u32, false),

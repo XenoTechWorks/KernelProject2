@@ -26,9 +26,17 @@ const SOCK_CLOEXEC: u32 = 0o2000000;
 const IPPROTO_TCP: u32 = 6;
 
 const MSG_PEEK: u32 = 0x2;
+const MSG_CTRUNC: u32 = 0x8;
 const MSG_TRUNC: u32 = 0x20;
 const MSG_DONTWAIT: u32 = 0x40;
 const MSG_NOSIGNAL: u32 = 0x4000;
+const MSG_CMSG_CLOEXEC: u32 = 0x40000000;
+
+/// Ancillary data: open files passed along (SCM_RIGHTS), and credentials (accepted, not used).
+const SCM_RIGHTS: i32 = 1;
+const SCM_CREDENTIALS: i32 = 2;
+/// The most files one message carries (Linux's SCM_MAX_FD).
+const MAX_FILES: usize = 253;
 
 const SOL_SOCKET: u32 = 1;
 const SO_TYPE: u32 = 3;
@@ -398,7 +406,10 @@ pub fn getpeername(fd: i32, at: u64, len_at: u64) -> SysResult {
 
 /// Sends from a kernel buffer, to the address at `to` (if any) or to whoever the socket is
 /// connected to. A stream ignores the address.
-fn send_on(file: &OpenFile, sock: &Sock, data: &[u8], to: u64, to_len: u64, flags: u32) -> SysResult {
+fn send_on(file: &OpenFile, sock: &Sock, data: &[u8], to: u64, to_len: u64, files: Vec<Arc<OpenFile>>, flags: u32) -> SysResult {
+    if !files.is_empty() && !matches!(sock, Sock::UnixStream(_) | Sock::UnixDatagram(_)) {
+        return Err(EINVAL);
+    }
     match sock {
         Sock::Datagram(s) => {
             let (ip, port) = match to {
@@ -413,10 +424,13 @@ fn send_on(file: &OpenFile, sock: &Sock, data: &[u8], to: u64, to_len: u64, flag
             Ok(n as u64)
         }
         Sock::Stream(c) => stream_write(file, c, data, flags),
-        Sock::UnixStream(s) => unix_write(file, s, data, flags),
+        Sock::UnixStream(s) => match unix::send_stream(s, data, files, nonblocking(file, flags)) {
+            Err(EPIPE) => broken_pipe(0, flags),
+            result => Ok(result? as u64),
+        },
         Sock::UnixDatagram(d) => {
             let target = if to != 0 { Some(existing_name(read_unix_addr(to, to_len)?)?) } else { None };
-            Ok(unix::send(d, target.as_ref(), data, nonblocking(file, flags))? as u64)
+            Ok(unix::send(d, target.as_ref(), data, files, nonblocking(file, flags))? as u64)
         }
     }
 }
@@ -437,8 +451,8 @@ fn write_sender(at: u64, len_at: u64, sender: &Sender) -> Result<(), Errno> {
 }
 
 /// Receives into a kernel buffer: how many bytes (the whole datagram's length with MSG_TRUNC),
-/// and who sent them.
-fn recv_on(file: &OpenFile, sock: &Sock, buf: &mut [u8], flags: u32) -> Result<(usize, Sender), Errno> {
+/// who sent them, and files that came with them.
+fn recv_on(file: &OpenFile, sock: &Sock, buf: &mut [u8], flags: u32) -> Result<(usize, Sender, Vec<Arc<OpenFile>>), Errno> {
     match sock {
         Sock::Datagram(s) => loop {
             {
@@ -451,7 +465,7 @@ fn recv_on(file: &OpenFile, sock: &Sock, buf: &mut [u8], flags: u32) -> Result<(
                     if flags & MSG_PEEK == 0 {
                         queue.pop_front();
                     }
-                    return Ok((full, from));
+                    return Ok((full, from, Vec::new()));
                 }
             }
             if nonblocking(file, flags) {
@@ -459,11 +473,14 @@ fn recv_on(file: &OpenFile, sock: &Sock, buf: &mut [u8], flags: u32) -> Result<(
             }
             proc::sleep()?;
         },
-        Sock::Stream(c) => Ok((stream_read(file, c, buf, flags)? as usize, Sender::None)),
-        Sock::UnixStream(s) => Ok((unix::read(s, buf, nonblocking(file, flags), flags & MSG_PEEK != 0)?, Sender::None)),
+        Sock::Stream(c) => Ok((stream_read(file, c, buf, flags)? as usize, Sender::None, Vec::new())),
+        Sock::UnixStream(s) => {
+            let (n, files) = unix::receive(s, buf, nonblocking(file, flags), flags & MSG_PEEK != 0)?;
+            Ok((n, Sender::None, files))
+        }
         Sock::UnixDatagram(d) => {
-            let (n, full, from) = unix::recv(d, buf, nonblocking(file, flags), flags & MSG_PEEK != 0)?;
-            Ok((if flags & MSG_TRUNC != 0 { full } else { n }, Sender::Unix(from)))
+            let got = unix::recv(d, buf, nonblocking(file, flags), flags & MSG_PEEK != 0)?;
+            Ok((if flags & MSG_TRUNC != 0 { got.full } else { got.len }, Sender::Unix(got.from), got.files))
         }
     }
 }
@@ -502,7 +519,7 @@ pub fn stream_write(file: &OpenFile, conn: &Arc<Conn>, data: &[u8], flags: u32) 
 
 /// write() and send() on a Unix stream socket.
 pub fn unix_write(file: &OpenFile, s: &unix::Stream, data: &[u8], flags: u32) -> SysResult {
-    match unix::write(s, data, nonblocking(file, flags)) {
+    match unix::send_stream(s, data, Vec::new(), nonblocking(file, flags)) {
         Err(EPIPE) => broken_pipe(0, flags),
         result => Ok(result? as u64),
     }
@@ -519,13 +536,13 @@ fn broken_pipe(written: usize, flags: u32) -> SysResult {
 pub fn sendto(fd: i32, buf: u64, len: usize, flags: u32, to: u64, to_len: u64) -> SysResult {
     let (file, sock) = sock_of(fd)?;
     let data = user::read_vec(proc::current().space(), buf, len.min(1 << 20))?;
-    send_on(&file, &sock, &data, to, to_len, flags)
+    send_on(&file, &sock, &data, to, to_len, Vec::new(), flags)
 }
 
 pub fn recvfrom(fd: i32, buf: u64, len: usize, flags: u32, from: u64, from_len: u64) -> SysResult {
     let (file, sock) = sock_of(fd)?;
     let mut tmp = vec![0u8; len.min(1 << 20)];
-    let (n, sender) = recv_on(&file, &sock, &mut tmp, flags)?;
+    let (n, sender, _) = recv_on(&file, &sock, &mut tmp, flags)?; // files without recvmsg are closed
     user::write(proc::current().space(), buf, &tmp[..n.min(tmp.len())])?;
     write_sender(from, from_len, &sender)?;
     Ok(n as u64)
@@ -533,7 +550,8 @@ pub fn recvfrom(fd: i32, buf: u64, len: usize, flags: u32, from: u64, from_len: 
 
 // ---- sendmsg / recvmsg, and their batch forms ----
 
-/// `struct msghdr`: where to, the pieces of the message (an iovec), and ancillary data.
+/// `struct msghdr`: where to, the pieces of the message (an iovec), and ancillary data: a list of
+/// `struct cmsghdr` (length, level, type, then the data, each padded to 8 bytes).
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 struct MsgHdr {
@@ -563,18 +581,72 @@ fn iovecs(m: &MsgHdr) -> Result<Vec<IoVec>, Errno> {
     (0..m.iov_len).map(|i| user::read_struct::<IoVec>(space, m.iov + i * 16)).collect()
 }
 
+/// The open files a message's ancillary data passes along (SCM_RIGHTS).
+fn files_to_send(m: &MsgHdr) -> Result<Vec<Arc<OpenFile>>, Errno> {
+    let p = proc::current();
+    let control = user::read_vec(p.space(), m.control, (m.control_len as usize).min(4096))?;
+    let mut files = Vec::new();
+    let mut at = 0;
+    while at + 16 <= control.len() {
+        let len = u64::from_le_bytes(control[at..at + 8].try_into().unwrap()) as usize;
+        let level = i32::from_le_bytes(control[at + 8..at + 12].try_into().unwrap());
+        let kind = i32::from_le_bytes(control[at + 12..at + 16].try_into().unwrap());
+        if len < 16 || at + len > control.len() {
+            return Err(EINVAL);
+        }
+        match (level, kind) {
+            (1, SCM_RIGHTS) => {
+                for fd in control[at + 16..at + len].chunks_exact(4) {
+                    files.push(p.files().fds.get(i32::from_le_bytes(fd.try_into().unwrap()))?);
+                }
+            }
+            (1, SCM_CREDENTIALS) => {} // the kernel knows who's sending; nothing to pass on
+            _ => return Err(EINVAL),
+        }
+        at += len.next_multiple_of(8);
+    }
+    if files.len() > MAX_FILES {
+        return Err(EINVAL);
+    }
+    Ok(files)
+}
+
+/// Gives received files descriptors here, and describes them in the receiver's ancillary data
+/// buffer. Returns the bytes of it used, and whether some didn't fit (those are closed).
+fn files_received(m: &MsgHdr, files: Vec<Arc<OpenFile>>, flags: u32) -> Result<(usize, bool), Errno> {
+    if files.is_empty() {
+        return Ok((0, false));
+    }
+    let p = proc::current();
+    let room = (m.control_len as usize).saturating_sub(16) / 4;
+    let (count, fit) = (files.len(), files.len().min(room));
+    if fit == 0 {
+        return Ok((0, true));
+    }
+    let mut fds = Vec::new();
+    for file in files.into_iter().take(fit) {
+        fds.push(p.files().fds.insert(file, flags & MSG_CMSG_CLOEXEC != 0, 0)?);
+    }
+    let len = 16 + 4 * fit;
+    let mut control = Vec::with_capacity(len);
+    control.extend((len as u64).to_le_bytes());
+    control.extend(1i32.to_le_bytes()); // SOL_SOCKET
+    control.extend(SCM_RIGHTS.to_le_bytes());
+    for fd in &fds {
+        control.extend(fd.to_le_bytes());
+    }
+    user::write(p.space(), m.control, &control)?;
+    Ok((len.next_multiple_of(8).min(m.control_len as usize), fit < count))
+}
+
 fn send_msg(file: &OpenFile, sock: &Sock, at: u64, flags: u32) -> SysResult {
     let m: MsgHdr = user::read_struct(proc::current().space(), at)?;
-    // Passing descriptors or credentials along (SCM_RIGHTS ...) isn't done yet; better to say so
-    // than to drop them without a word.
-    if m.control_len > 0 && matches!(sock, Sock::UnixStream(_) | Sock::UnixDatagram(_)) {
-        return Err(EOPNOTSUPP);
-    }
+    let files = if m.control != 0 && m.control_len > 0 { files_to_send(&m)? } else { Vec::new() };
     let mut data = Vec::new();
     for v in iovecs(&m)? {
         data.extend(user::read_vec(proc::current().space(), v.base, (v.len as usize).min(1 << 20))?);
     }
-    send_on(file, sock, &data, m.name, m.name_len as u64, flags)
+    send_on(file, sock, &data, m.name, m.name_len as u64, files, flags)
 }
 
 fn recv_msg(file: &OpenFile, sock: &Sock, at: u64, flags: u32) -> SysResult {
@@ -583,7 +655,7 @@ fn recv_msg(file: &OpenFile, sock: &Sock, at: u64, flags: u32) -> SysResult {
     let vecs = iovecs(&m)?;
     let total: usize = vecs.iter().map(|v| v.len as usize).sum();
     let mut tmp = vec![0u8; total.min(1 << 20)];
-    let (n, sender) = recv_on(file, sock, &mut tmp, flags)?;
+    let (n, sender, files) = recv_on(file, sock, &mut tmp, flags)?;
     // Spread it back over the pieces.
     let got = n.min(tmp.len());
     let mut done = 0;
@@ -598,8 +670,11 @@ fn recv_msg(file: &OpenFile, sock: &Sock, at: u64, flags: u32) -> SysResult {
     if m.name != 0 {
         write_sender(m.name, at + 8, &sender)?; // msg_namelen: the room given, then the length
     }
-    user::write_struct(space, at + 40, &0u64)?; // no ancillary data
-    user::write_struct(space, at + 48, &0i32)?; // msg_flags
+    let (control_used, cut) = files_received(&m, files, flags)?;
+    let truncated = n > got; // only seen when MSG_TRUNC asked for the full length
+    let msg_flags = (if cut { MSG_CTRUNC } else { 0 }) | if truncated { MSG_TRUNC } else { 0 };
+    user::write_struct(space, at + 40, &(control_used as u64))?; // msg_controllen
+    user::write_struct(space, at + 48, &(msg_flags as i32))?;
     Ok(n as u64)
 }
 

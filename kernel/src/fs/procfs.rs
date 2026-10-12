@@ -104,7 +104,13 @@ fn state_letter(state: State) -> char {
 
 fn process_dir(p: &proc::Process) -> Arc<Node> {
     let state = state_letter(p.state);
-    let tty = if p.sid == 1 || p.ppid != 0 { 0x501 } else { 0 }; // /dev/console (5, 1)
+    // The controlling terminal's device number (/dev/console is 5,1; /dev/pts/N is 136,N), and
+    // its foreground process group.
+    let (tty, tpgid) = match &p.ctty {
+        Some(t) if t.is_console() => (0x501, t.foreground() as i64),
+        Some(t) => (crate::sys::fs::makedev(136, crate::pty::index(t) as u64), t.foreground() as i64),
+        None => (0, -1),
+    };
     let stat = format!(
         "{} ({}) {state} {} {} {} {tty} {} 0 0 0 0 0 0 0 0 0 20 0 1 0 {} 0 0\n",
         p.pid,
@@ -112,7 +118,7 @@ fn process_dir(p: &proc::Process) -> Arc<Node> {
         p.ppid,
         p.pgid,
         p.sid,
-        crate::tty::foreground(),
+        tpgid,
         p.start_ticks,
     );
     let status = format!(

@@ -16,6 +16,7 @@ mod mm;
 mod mouse;
 mod net;
 mod proc;
+mod pty;
 mod smbios;
 mod sys;
 mod term;

@@ -12,6 +12,7 @@
 pub mod cpio;
 pub mod eventfd;
 pub mod ext2;
+pub mod lock;
 pub mod pipe;
 pub mod procfs;
 pub mod sysfs;
@@ -27,7 +28,14 @@ use spin::{Mutex, Once};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Device {
+    /// /dev/console and /dev/tty0: the screen and keyboard (and serial port).
+    Console,
+    /// /dev/tty: whichever terminal controls the process opening it.
     Tty,
+    /// /dev/ptmx: each open makes a new pseudo-terminal (pty.rs) and is its outside end.
+    Ptmx,
+    /// /dev/pts/N: the inside of pseudo-terminal N.
+    Pts(u32),
     Null,
     Zero,
     Random,
@@ -543,6 +551,16 @@ pub fn install(path: &str, node: Arc<Node>) {
     }
 }
 
+/// Takes a node the kernel put in the in-memory tree away again (a pseudo-terminal's /dev/pts/N).
+pub fn uninstall(path: &str) {
+    let Some((dir, name)) = path.rsplit_once('/') else { return };
+    if let Ok(parent) = lookup(dir, true) {
+        if let Kind::Dir(entries) = &parent.kind {
+            entries.lock().remove(name);
+        }
+    }
+}
+
 /// Where the disk is mounted, if one is (for /proc/mounts and statfs).
 pub static DISK_MOUNT: Once<(String, Arc<Ext2>)> = Once::new();
 
@@ -563,9 +581,10 @@ pub fn mount_disk(path: &str) {
 
 pub fn init_devices() {
     for (name, device, mode) in [
-        ("console", Device::Tty, 0o620),
+        ("console", Device::Console, 0o620),
         ("tty", Device::Tty, 0o666),
-        ("tty0", Device::Tty, 0o620),
+        ("tty0", Device::Console, 0o620),
+        ("ptmx", Device::Ptmx, 0o666),
         ("null", Device::Null, 0o666),
         ("zero", Device::Zero, 0o666),
         ("random", Device::Random, 0o666),
@@ -575,6 +594,7 @@ pub fn init_devices() {
     ] {
         install(&alloc::format!("/dev/{name}"), Node::new(Kind::Device(device), mode));
     }
+    mkdir_p("/dev/pts");
     install("/dev/stdin", Node::new(Kind::Symlink("/proc/self/fd/0".into()), 0o777));
     install("/dev/stdout", Node::new(Kind::Symlink("/proc/self/fd/1".into()), 0o777));
     install("/dev/stderr", Node::new(Kind::Symlink("/proc/self/fd/2".into()), 0o777));

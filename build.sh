@@ -60,7 +60,8 @@ add_host_program() {
 add_host_program "$stage/bin/hello-dynamic"
 gcc -O2 -o "$stage/bin/signal-test" "$root/tests/signals.c"
 gcc -O2 -pthread -o "$stage/bin/thread-test" "$root/tests/threads.c"
-gcc -O2 -o "$stage/bin/events-test" "$root/tests/events.c"
+gcc -O2 -Wno-unused-result -o "$stage/bin/events-test" "$root/tests/events.c"
+gcc -O2 -Wno-unused-result -o "$stage/bin/pty-test" "$root/tests/ptys.c"
 
 step "Windows layer (winload) and Windows test programs"
 g++ -std=c++20 -O2 -static -fno-exceptions -fno-rtti -Wall -Wextra -o "$stage/bin/winload" "$root"/windows/src/*.cpp
@@ -110,6 +111,22 @@ if [[ -x /usr/bin/ssh ]]; then
         add_host_program "/usr/bin/$program"
     done
 fi
+
+# Programs that run others in a pseudo-terminal: script (records a session) and tmux. With them,
+# the terminfo entries that tell full-screen programs how to drive the console (linux) and the
+# terminals they may find themselves in.
+step "script and tmux, and terminfo"
+for program in script tmux; do
+    [[ -x "/usr/bin/$program" ]] && add_host_program "/usr/bin/$program"
+done
+# glibc's C.UTF-8 locale (the shell starts with LANG=C.UTF-8): tmux won't run without UTF-8.
+if [[ -d /usr/lib/locale/C.utf8 ]]; then
+    mkdir -p "$stage/usr/lib/locale"
+    cp -r /usr/lib/locale/C.utf8 "$stage/usr/lib/locale/"
+fi
+for entry in d/dumb l/linux v/vt100 v/vt220 x/xterm x/xterm-256color s/screen s/screen-256color t/tmux t/tmux-256color; do
+    [[ -e "/usr/share/terminfo/$entry" ]] && install -D -m 644 "/usr/share/terminfo/$entry" "$stage/usr/share/terminfo/$entry"
+done
 
 # Anything else you want to try, by name or path, as in:
 #     EXTRA_PROGRAMS="jq bc sed" ./build.sh

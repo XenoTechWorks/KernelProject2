@@ -235,7 +235,7 @@ fn become(a: Account) u8 {
     const home_line = std.fmt.bufPrintSentinel(&home_env, "HOME={s}", .{a.home}, 0) catch return 1;
     const user_line = std.fmt.bufPrintSentinel(&user_env, "USER={s}", .{a.name}, 0) catch return 1;
     const argv = [_:null]?[*:0]const u8{ shell, null };
-    const envp = [_:null]?[*:0]const u8{ home_line.ptr, user_line.ptr, "PATH=/bin:/sbin", "TERM=linux", null };
+    const envp = [_:null]?[*:0]const u8{ home_line.ptr, user_line.ptr, "PATH=/bin:/sbin", "TERM=linux", "LANG=C.UTF-8", null };
     _ = sys.syscall3(sys.nr.execve, @intFromPtr(shell), @intFromPtr(&argv), @intFromPtr(&envp));
     rt.err.print("can't run {s}\n", .{a.shell});
     return 1;

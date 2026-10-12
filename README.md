@@ -22,11 +22,14 @@ kernel answers those calls the way Linux does, the program can't tell the differ
   Linux-style initramfs (`cpio`), **ext2 on a virtio disk** (read and write, mounted at `/root`, so
   your home folder survives reboots), `/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/tty` and pipes.
   The disk is made by the real `mkfs.ext2`, and Linux's `e2fsck` checks it stays consistent.
-- Terminal: Linux's line discipline (editing, echo, Ctrl+C/D/U/W, raw mode via `termios`) on the
-  screen and on the serial port. The screen understands the usual escape codes and 16 colors.
+- Terminals: Linux's line discipline (editing, echo, Ctrl+C/D/U/W, raw mode via `termios`) on the
+  screen and on the serial port, and pseudo-terminals for programs that run others (see The
+  command line). The screen understands the usual escape codes and 16 colors.
 - What event loops and servers are built on: `epoll` (level- and edge-triggered, one-shot),
-  `eventfd`, Unix sockets (see Networking), and timers that really go off (`alarm`, `setitimer`,
-  and the timeouts of `poll`, `ppoll` and `epoll_wait`). Python's `asyncio` runs on them.
+  `eventfd`, `signalfd`, Unix sockets (see Networking), timers that really go off (`alarm`,
+  `setitimer`, and the timeouts of `poll`, `ppoll` and `epoll_wait`), `sigwaitinfo`, and `flock`.
+  Signals carry who sent them and why (a child's exit status for `SIGCHLD`). Python's `asyncio`
+  runs on them.
 - About 150 Linux system calls (see `kernel/src/sys/mod.rs`). Missing ones return `ENOSYS` and are
   logged once on the serial port, which shows what a new program needs next.
 
@@ -153,8 +156,9 @@ or a server that binds a name and clients that connect to it. A name is a socket
 makes one; `ls -l` shows it with an `s`), or an "abstract" name that lives only in the kernel.
 Streams and datagrams both work, and `SO_PEERCRED` tells a server which process and user is on
 the other end. `kernel/src/net/unix.rs` is all of it: a stream connection is two pipes, one each
-way, so end-of-file and `EPIPE` behave exactly as they do for pipes. Passing descriptors along
-(`SCM_RIGHTS`) isn't done yet; it fails plainly instead of losing them.
+way, so end-of-file and `EPIPE` behave exactly as they do for pipes. Open files can be passed
+along (`SCM_RIGHTS`), on a stream tied to the bytes they were sent with, as Linux does: that's
+how a tmux client hands the server its terminal.
 
 ### SSH
 
@@ -173,7 +177,8 @@ ssh-add                          # hand it your key
 `tests/ssh.py` runs an SSH server on the build machine (Ubuntu's `sshd`, as you, on a spare port)
 and does all of the above against it, an interactive login included. `/usr/bin` is the same
 folder as `/bin`, as on today's Linux distributions, since `scp` starts `/usr/bin/ssh` by that
-name. An SSH server inside KernelProject2 needs pseudo-terminals first.
+name. An SSH server inside KernelProject2 needs `chroot` next (OpenSSH shuts its unprivileged
+half away in an empty folder).
 
 ## Trying other programs
 
@@ -266,6 +271,26 @@ The same layout as Linux:
 
 They're written in Zig as ordinary Linux programs with no libc (`user/src`), so they also run on real
 Linux. That keeps them honest: if one works on Linux but not here, the kernel is wrong.
+
+### Pseudo-terminals, script and tmux
+
+A pseudo-terminal is a terminal with a program on each side: opening `/dev/ptmx` makes one, the
+program holding it is the "outside" (like the screen and keyboard), and `/dev/pts/N` is the
+inside, where a shell runs with everything a terminal gives it: line editing, raw mode, Ctrl+C
+for its foreground, a window size (and `SIGWINCH` when it changes), and a hang-up when the
+outside goes. Each terminal has its own line discipline (`kernel/src/tty.rs`; the console is one
+of them, `kernel/src/pty.rs` makes the others), and each session its controlling terminal, which
+`/dev/tty` means.
+
+Ubuntu's own `script` and `tmux` run on them, unchanged:
+
+```sh
+script -c 'ls -l' session.txt   # run a command and keep a copy of everything it showed
+tmux                            # windows and panes inside the console; Ctrl+B d leaves it running
+tmux attach                     # ...and this comes back to it
+```
+
+`pty-test` checks the details against Linux, and `tests/terminals.py` drives `script` and `tmux`.
 
 ## Apps in windows
 
@@ -362,8 +387,8 @@ rootfs/          files copied into the root file system (/etc ...)
 disk/            what a new disk starts with (out/disk.img is made from it once)
 tests/           test programs (C, and Windows ones in windows/) and the test scripts:
                  smoke.py, persist.py, windows.py, edit.py, textedit.py, archive.py,
-                 pkg.py, accounts.py, net.py, tcp.py, ssh.py, doom.py, session.sh;
-                 events.c is events-test
+                 pkg.py, accounts.py, net.py, tcp.py, ssh.py, terminals.py, doom.py,
+                 session.sh; events.c is events-test and ptys.c pty-test
 ```
 
 ## Building and running
@@ -392,6 +417,7 @@ python3 tests/accounts.py # a user, a password, and what they're not allowed to 
 python3 tests/net.py      # the card, ping through ARP, and a DNS lookup
 python3 tests/tcp.py      # curl over TCP (a big file byte for byte), a server in the guest, HTTPS
 python3 tests/ssh.py      # ssh, scp and ssh-agent against an SSH server on this machine
+python3 tests/terminals.py # script and tmux, in pseudo-terminals
 python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
 ```
 
@@ -399,9 +425,8 @@ python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
 
 Roughly in order; each step is checked by running a real program.
 
-1. **More of Linux for real tools**: pseudo-terminals (for an SSH server, `script`, tmux), passing
-   descriptors over Unix sockets (`SCM_RIGHTS`), `timerfd`, `signalfd` and `pidfd`, and signal
-   masks in `ppoll`/`epoll_pwait`.
+1. **More of Linux for real tools**: `chroot` (for an SSH server inside), `timerfd` and `pidfd`,
+   and signal masks in `ppoll`/`epoll_pwait`.
 2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
    archive), interrupt-driven I/O, and AHCI for real PCs.
 3. **Run the targets**: fastfetch and git run; next then coreutils as a compatibility test.

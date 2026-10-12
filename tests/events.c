@@ -12,6 +12,8 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/file.h>
+#include <sys/signalfd.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -174,6 +176,70 @@ static void pairs(void) {
     close(sv[1]);
 }
 
+/* Sends `data` with `fd` along (SCM_RIGHTS). */
+static int send_fd(int sock, const char *data, int fd) {
+    char control[CMSG_SPACE(sizeof(int))] = {0};
+    struct iovec iov = {.iov_base = (void *)data, .iov_len = strlen(data)};
+    struct msghdr m = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control, .msg_controllen = sizeof control};
+    struct cmsghdr *c = CMSG_FIRSTHDR(&m);
+    c->cmsg_level = SOL_SOCKET;
+    c->cmsg_type = SCM_RIGHTS;
+    c->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(c), &fd, sizeof fd);
+    return sendmsg(sock, &m, 0);
+}
+
+/* Receives into `buf`; the descriptor that came along, or -1. */
+static int recv_fd(int sock, char *buf, int size, int *len) {
+    char control[CMSG_SPACE(sizeof(int))] = {0};
+    struct iovec iov = {.iov_base = buf, .iov_len = size};
+    struct msghdr m = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control, .msg_controllen = sizeof control};
+    *len = recvmsg(sock, &m, MSG_CMSG_CLOEXEC);
+    struct cmsghdr *c = CMSG_FIRSTHDR(&m);
+    int fd = -1;
+    if (c && c->cmsg_type == SCM_RIGHTS) memcpy(&fd, CMSG_DATA(c), sizeof fd);
+    return fd;
+}
+
+static void passing(void) {
+    int sv[2], p[2], len;
+    char buf[16] = {0};
+    socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    pipe(p);
+    write(sv[0], "ab", 2);
+    send_fd(sv[0], "cd", p[1]);
+    write(sv[0], "ef", 2);
+    close(p[1]);
+    int got = recv_fd(sv[1], buf, sizeof buf, &len);
+    int first = len == 4 && !memcmp(buf, "abcd", 4);
+    int cloexec = fcntl(got, F_GETFD) == FD_CLOEXEC;
+    write(got, "via", 3);
+    close(got);
+    int n = read(p[0], buf, sizeof buf);
+    check("SCM_RIGHTS: a descriptor travels with its bytes, and works at the other end",
+          first && got >= 0 && n == 3 && !memcmp(buf, "via", 3));
+    int rest = recv_fd(sv[1], buf, sizeof buf, &len);
+    check("...the read that brings it ends with its bytes, and MSG_CMSG_CLOEXEC marks it",
+          cloexec && rest < 0 && len == 2 && !memcmp(buf, "ef", 2));
+    close(p[0]);
+    close(sv[0]);
+    close(sv[1]);
+
+    socketpair(AF_UNIX, SOCK_DGRAM, 0, sv);
+    int e = eventfd(0, 0);
+    send_fd(sv[0], "e", e);
+    uint64_t v = 5;
+    int other = recv_fd(sv[1], buf, sizeof buf, &len);
+    write(other, &v, 8);
+    v = 0;
+    read(e, &v, 8);
+    check("...on datagrams too: the same eventfd at both ends", other >= 0 && other != e && v == 5);
+    close(e);
+    close(other);
+    close(sv[0]);
+    close(sv[1]);
+}
+
 static void named(void) {
     const char *path = "/tmp/events-test.sock";
     struct sockaddr_un addr, got;
@@ -268,6 +334,47 @@ static void named(void) {
     unlink(addr.sun_path);
 }
 
+static void signalfds(void) {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGCHLD);
+    sigaddset(&set, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &set, NULL);
+    int sfd = signalfd(-1, &set, SFD_CLOEXEC);
+    struct pollfd p = {.fd = sfd, .events = POLLIN};
+    int quiet = poll(&p, 1, 0) == 0;
+    pid_t child = fork();
+    if (child == 0) _exit(3);
+    int ready = poll(&p, 1, 2000) == 1;
+    struct signalfd_siginfo si;
+    int n = read(sfd, &si, sizeof si);
+    waitpid(child, NULL, 0);
+    check("signalfd: a child's exit can be read, with who and how (CLD_EXITED, status 3)",
+          quiet && ready && n == sizeof si && si.ssi_signo == SIGCHLD && si.ssi_code == CLD_EXITED &&
+          si.ssi_pid == (uint32_t)child && si.ssi_status == 3);
+
+    kill(getpid(), SIGUSR1);
+    siginfo_t info;
+    int sig = sigwaitinfo(&set, &info);
+    check("sigwaitinfo takes a blocked signal, saying who sent it", sig == SIGUSR1 && info.si_code == SI_USER && info.si_pid == getpid());
+    close(sfd);
+    sigprocmask(SIG_UNBLOCK, &set, NULL);
+}
+
+static void locks(void) {
+    const char *path = "/tmp/events-lock";
+    int a = open(path, O_RDWR | O_CREAT, 0644), b = open(path, O_RDWR);
+    int took = flock(a, LOCK_EX) == 0;
+    int blocked = flock(b, LOCK_EX | LOCK_NB) < 0 && errno == EWOULDBLOCK;
+    int no_share = flock(b, LOCK_SH | LOCK_NB) < 0 && errno == EWOULDBLOCK;
+    close(a);
+    int freed = flock(b, LOCK_EX | LOCK_NB) == 0;
+    check("flock: a file locked through one open can't be locked through another, until closed",
+          took && blocked && no_share && freed);
+    close(b);
+    unlink(path);
+}
+
 static void timers(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
@@ -312,7 +419,10 @@ int main(void) {
     eventfds();
     epolls();
     pairs();
+    passing();
     named();
+    signalfds();
+    locks();
     timers();
     printf("events: %d/%d passed\n", passed, total);
     return passed == total ? 0 : 1;

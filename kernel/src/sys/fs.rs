@@ -74,15 +74,8 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
             Type::Dir => Err(EISDIR),
             Type::Symlink => Err(EINVAL),
             Type::Socket => Err(ENXIO),
-            Type::Device(Device::Tty) => loop {
-                if let Some(n) = crate::tty::try_read(buf) {
-                    return Ok(n as u64);
-                }
-                if nonblocking(file) {
-                    return Err(EAGAIN);
-                }
-                proc::sleep()?;
-            },
+            // Terminals are opened as Handle::Tty; only an O_PATH descriptor gets here.
+            Type::Device(Device::Console | Device::Tty | Device::Ptmx | Device::Pts(_)) => Err(EBADF),
             Type::Device(Device::Null) => Ok(0),
             Type::Device(Device::Zero) => {
                 buf.fill(0);
@@ -130,6 +123,8 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
             }
             proc::sleep()?;
         },
+        Handle::Tty(tty, _) => Ok(tty.read(buf, nonblocking(file))? as u64),
+        Handle::PtyMaster(tty) => Ok(crate::pty::read(tty, buf, nonblocking(file))? as u64),
         Handle::Tcp(conn) => super::net::stream_read(file, conn, buf, 0),
         Handle::Socket(sock) => loop {
             if let Some(packet) = sock.queue.lock().pop_front() {
@@ -145,7 +140,7 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
         Handle::PipeRead(pipe) => Ok(pipe::read(pipe, buf, nonblocking(file), false)? as u64),
         Handle::PipeWrite(_) => Err(EBADF),
         Handle::UnixStream(s) => Ok(unix::read(s, buf, nonblocking(file), false)? as u64),
-        Handle::UnixDatagram(d) => Ok(unix::recv(d, buf, nonblocking(file), false)?.0 as u64),
+        Handle::UnixDatagram(d) => Ok(unix::recv(d, buf, nonblocking(file), false)?.len as u64),
         Handle::EventFd(e) => {
             if buf.len() < 8 {
                 return Err(EINVAL);
@@ -153,6 +148,7 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
             buf[..8].copy_from_slice(&eventfd::read(e, nonblocking(file))?.to_le_bytes());
             Ok(8)
         }
+        Handle::SignalFd(s) => Ok(super::signalfd::read(s, buf, nonblocking(file))? as u64),
         Handle::Epoll(_) => Err(EINVAL),
     }
 }
@@ -179,10 +175,7 @@ fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
             Type::Dir => Err(EISDIR),
             Type::Symlink => Err(EINVAL),
             Type::Socket => Err(ENXIO),
-            Type::Device(Device::Tty) => {
-                crate::tty::write(data);
-                Ok(data.len() as u64)
-            }
+            Type::Device(Device::Console | Device::Tty | Device::Ptmx | Device::Pts(_)) => Err(EBADF),
             Type::Device(Device::Clipboard) => {
                 // A write at the start replaces what was there; later writes add to it.
                 let mut clip = fs::CLIPBOARD.lock();
@@ -202,6 +195,8 @@ fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
             crate::console::window_write(window.id, data);
             Ok(data.len() as u64)
         }
+        Handle::Tty(tty, _) => Ok(tty.write(data, nonblocking(file))? as u64),
+        Handle::PtyMaster(tty) => Ok(crate::pty::write(tty, data) as u64),
         Handle::Tcp(conn) => super::net::stream_write(file, conn, data, 0),
         Handle::Socket(sock) => {
             let Some((ip, port)) = *sock.peer.lock() else { return Err(EDESTADDRREQ) };
@@ -220,13 +215,13 @@ fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
         },
         Handle::PipeRead(_) => Err(EBADF),
         Handle::UnixStream(s) => super::net::unix_write(file, s, data, 0),
-        Handle::UnixDatagram(d) => Ok(unix::send(d, None, data, nonblocking(file))? as u64),
+        Handle::UnixDatagram(d) => Ok(unix::send(d, None, data, Vec::new(), nonblocking(file))? as u64),
         Handle::EventFd(e) => {
             let value = u64::from_le_bytes(data.get(..8).ok_or(EINVAL)?.try_into().unwrap());
             eventfd::write(e, value, nonblocking(file))?;
             Ok(8)
         }
-        Handle::Epoll(_) => Err(EINVAL),
+        Handle::Epoll(_) | Handle::SignalFd(_) => Err(EINVAL),
     }
 }
 
@@ -350,11 +345,23 @@ pub fn open_path(path: &str, flags: u32, mode: u32) -> SysResult {
         }
     }
     let kept = flags & !(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | O_CLOEXEC);
-    let file = if node.kind_of() == Type::Device(Device::Window) && flags & O_PATH == 0 {
-        OpenFile::window(crate::console::open_window().ok_or(ENXIO)?, kept, String::from(path))
-    } else {
-        OpenFile::node(node, kept, String::from(path))
+    let handle = match node.kind_of() {
+        _ if flags & O_PATH != 0 => Handle::Node(node),
+        Type::Device(Device::Window) => Handle::Window(crate::console::open_window().ok_or(ENXIO)?),
+        Type::Device(Device::Console) => Handle::Tty(crate::tty::console(), node),
+        Type::Device(Device::Tty) => Handle::Tty(p.ctty.clone().ok_or(ENXIO)?, node),
+        Type::Device(Device::Ptmx) => Handle::PtyMaster(crate::pty::open_master()?),
+        Type::Device(Device::Pts(n)) => {
+            let inside = crate::pty::open_inside(n)?;
+            // A session leader without a terminal gets this one, as on Linux.
+            if flags & O_NOCTTY == 0 && p.tgid == p.sid && p.ctty.is_none() && inside.session() == 0 {
+                let _ = take_control(&inside, false);
+            }
+            Handle::Tty(inside, node)
+        }
+        _ => Handle::Node(node),
     };
+    let file = OpenFile::new(handle, kept, String::from(path));
     Ok(p.files().fds.insert(file, flags & O_CLOEXEC != 0, 0)? as u64)
 }
 
@@ -366,6 +373,16 @@ pub fn allowed(node: &Node, want: u32) -> bool {
 
 pub fn close(fd: i32) -> SysResult {
     proc::current().files().fds.close(fd)?;
+    Ok(0)
+}
+
+/// flock: an advisory lock on the whole file (fs/lock.rs). Only files have them; on anything else
+/// it succeeds without doing anything.
+pub fn flock(fd: i32, op: u32) -> SysResult {
+    let file = proc::current().files().fds.get(fd)?;
+    if let Handle::Node(node) = &file.handle {
+        fs::lock::flock((node.dev(), node.inode_number()), alloc::sync::Arc::as_ptr(&file) as usize, op)?;
+    }
     Ok(0)
 }
 
@@ -442,10 +459,17 @@ struct Stat {
     _unused: [i64; 3],
 }
 
+/// A device number the way glibc's makedev() packs it.
+pub fn makedev(major: u64, minor: u64) -> u64 {
+    ((major & 0xfffff000) << 32) | ((major & 0xfff) << 8) | ((minor & 0xffffff00) << 12) | (minor & 0xff)
+}
+
 fn rdev(node: &Node) -> u64 {
-    let makedev = |major: u64, minor: u64| (major << 8) | minor;
     match node.kind_of() {
-        Type::Device(Device::Tty) => makedev(5, 1),
+        Type::Device(Device::Tty) => makedev(5, 0),
+        Type::Device(Device::Console) => makedev(5, 1),
+        Type::Device(Device::Ptmx) => makedev(5, 2),
+        Type::Device(Device::Pts(n)) => makedev(136, n as u64),
         Type::Device(Device::Null) => makedev(1, 3),
         Type::Device(Device::Zero) => makedev(1, 5),
         Type::Device(Device::Random) => makedev(1, 9),
@@ -456,7 +480,7 @@ fn rdev(node: &Node) -> u64 {
 
 fn stat_of(handle: &Handle) -> Stat {
     match handle {
-        Handle::Node(node) => {
+        Handle::Node(node) | Handle::Tty(_, node) => {
             let size = node.size() as i64;
             let mtime = node.mtime() as i64;
             let (uid, gid) = node.owner();
@@ -479,11 +503,12 @@ fn stat_of(handle: &Handle) -> Stat {
         }
         Handle::PipeRead(_) | Handle::PipeWrite(_) => Stat { dev: 2, mode: fs::S_IFIFO | 0o600, nlink: 1, blksize: 4096, ..Default::default() },
         Handle::Window(_) => Stat { mode: fs::S_IFCHR | 0o666, nlink: 1, blksize: 4096, ..Default::default() },
+        Handle::PtyMaster(_) => Stat { mode: fs::S_IFCHR | 0o666, rdev: makedev(5, 2), nlink: 1, blksize: 4096, ..Default::default() },
         Handle::Socket(_) | Handle::Tcp(_) | Handle::UnixStream(_) | Handle::UnixDatagram(_) => {
             Stat { mode: fs::S_IFSOCK | 0o777, nlink: 1, blksize: 4096, ..Default::default() }
         }
         // Like Linux's "anonymous inodes": no file type, only permissions.
-        Handle::EventFd(_) | Handle::Epoll(_) => Stat { mode: 0o600, nlink: 1, blksize: 4096, ..Default::default() },
+        Handle::EventFd(_) | Handle::Epoll(_) | Handle::SignalFd(_) => Stat { mode: 0o600, nlink: 1, blksize: 4096, ..Default::default() },
     }
 }
 
@@ -569,17 +594,8 @@ pub fn getdents64(fd: i32, buf: u64, len: usize) -> SysResult {
 }
 
 pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
-    const TCGETS: u32 = 0x5401;
-    const TCSETS: u32 = 0x5402;
-    const TCSETSW: u32 = 0x5403;
-    const TCSETSF: u32 = 0x5404;
-    const TIOCSCTTY: u32 = 0x540E;
-    const TIOCGPGRP: u32 = 0x540F;
-    const TIOCSPGRP: u32 = 0x5410;
     const TIOCGWINSZ: u32 = 0x5413;
-    const TIOCSWINSZ: u32 = 0x5414;
     const FIONREAD: u32 = 0x541B;
-    const TIOCNOTTY: u32 = 0x5422;
     const FIONBIO: u32 = 0x5421;
     const FIONCLEX: u32 = 0x5450;
     const FIOCLEX: u32 = 0x5451;
@@ -650,42 +666,156 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
             _ => Err(ENOTTY),
         };
     }
-    let is_tty = matches!(&file.handle, Handle::Node(n) if n.kind_of() == Type::Device(Device::Tty));
-    if !is_tty {
-        return Err(ENOTTY);
+    match &file.handle {
+        Handle::Tty(tty, _) => tty_ioctl(tty, request, arg),
+        Handle::PtyMaster(tty) => master_ioctl(tty, request, arg),
+        _ => Err(ENOTTY),
     }
+}
+
+/// The terminal ioctls: termios, window size, process groups, controlling terminal.
+fn tty_ioctl(tty: &alloc::sync::Arc<crate::tty::Tty>, request: u32, arg: u64) -> SysResult {
+    const TCGETS: u32 = 0x5401;
+    const TCSETS: u32 = 0x5402;
+    const TCSETSW: u32 = 0x5403;
+    const TCSETSF: u32 = 0x5404;
+    const TCSBRK: u32 = 0x5409;
+    const TCXONC: u32 = 0x540A;
+    const TCFLSH: u32 = 0x540B;
+    const TIOCSCTTY: u32 = 0x540E;
+    const TIOCGPGRP: u32 = 0x540F;
+    const TIOCSPGRP: u32 = 0x5410;
+    const TIOCOUTQ: u32 = 0x5411;
+    const TIOCGWINSZ: u32 = 0x5413;
+    const TIOCSWINSZ: u32 = 0x5414;
+    const FIONREAD: u32 = 0x541B;
+    const TIOCNOTTY: u32 = 0x5422;
+    const TIOCGSID: u32 = 0x5429;
+    const TCSBRKP: u32 = 0x5425;
+
+    let p = proc::current();
     match request {
         TCGETS => {
-            user::write_struct(p.space(), arg, &crate::tty::termios())?;
+            user::write_struct(p.space(), arg, &tty.termios())?;
             Ok(0)
         }
         TCSETS | TCSETSW | TCSETSF => {
             let t: crate::tty::Termios = user::read_struct(p.space(), arg)?;
-            crate::tty::set_termios(t);
+            if request == TCSETSF {
+                tty.flush_input();
+            }
+            tty.set_termios(t);
             Ok(0)
         }
         TIOCGWINSZ => {
-            let (cols, rows) = crate::console::size();
-            let ws: [u16; 4] = [rows as u16, cols as u16, 0, 0];
-            user::write_struct(p.space(), arg, &ws)?;
+            let (rows, cols) = tty.size();
+            user::write_struct(p.space(), arg, &[rows, cols, 0, 0])?;
             Ok(0)
         }
-        TIOCSWINSZ | TIOCSCTTY | TIOCNOTTY => Ok(0),
+        TIOCSWINSZ => {
+            let [rows, cols, _, _]: [u16; 4] = user::read_struct(p.space(), arg)?;
+            tty.set_size(rows, cols);
+            Ok(0)
+        }
+        TIOCSCTTY => {
+            take_control(tty, true)?;
+            Ok(0)
+        }
+        TIOCNOTTY => {
+            if p.ctty.as_ref().is_some_and(|c| alloc::sync::Arc::ptr_eq(c, tty)) {
+                for t in proc::threads(p.tgid) {
+                    t.ctty = None;
+                }
+            }
+            Ok(0)
+        }
         TIOCGPGRP => {
-            user::write_struct(p.space(), arg, &crate::tty::foreground())?;
+            user::write_struct(p.space(), arg, &tty.foreground())?;
             Ok(0)
         }
         TIOCSPGRP => {
             let pgid: u32 = user::read_struct(p.space(), arg)?;
-            crate::tty::set_foreground(pgid);
+            tty.set_foreground(pgid);
+            Ok(0)
+        }
+        TIOCGSID => {
+            user::write_struct(p.space(), arg, &tty.session())?;
             Ok(0)
         }
         FIONREAD => {
-            user::write_struct(p.space(), arg, &(crate::tty::available() as u32))?;
+            user::write_struct(p.space(), arg, &(tty.available() as u32))?;
             Ok(0)
         }
-        _ => Err(EINVAL),
+        TIOCOUTQ => {
+            user::write_struct(p.space(), arg, &0u32)?; // output never waits in the kernel
+            Ok(0)
+        }
+        TCFLSH => {
+            if arg != 1 {
+                tty.flush_input(); // TCIFLUSH or TCIOFLUSH
+            }
+            Ok(0)
+        }
+        // tcdrain (output is shown at once), breaks, and flow control: nothing to do.
+        TCSBRK | TCSBRKP | TCXONC => Ok(0),
+        _ => Err(ENOTTY),
     }
+}
+
+/// The outside of a pseudo-terminal: its number, unlocking the inside, opening the inside, and
+/// everything a terminal answers (termios and the size are the inside's).
+fn master_ioctl(tty: &alloc::sync::Arc<crate::tty::Tty>, request: u32, arg: u64) -> SysResult {
+    const TIOCGPTN: u32 = 0x80045430;
+    const TIOCSPTLCK: u32 = 0x40045431;
+    const TIOCGPTPEER: u32 = 0x5441;
+    const FIONREAD: u32 = 0x541B;
+    let p = proc::current();
+    match request {
+        TIOCGPTN => {
+            user::write_struct(p.space(), arg, &crate::pty::index(tty))?;
+            Ok(0)
+        }
+        TIOCSPTLCK => {
+            let lock: i32 = user::read_struct(p.space(), arg)?;
+            crate::pty::set_locked(tty, lock != 0);
+            Ok(0)
+        }
+        // Opens the inside straight away, without going through its name.
+        TIOCGPTPEER => {
+            let flags = arg as u32;
+            let path = alloc::format!("/dev/pts/{}", crate::pty::index(tty));
+            let node = fs::lookup(&path, true)?;
+            let inside = crate::pty::open_inside(crate::pty::index(tty))?;
+            let kept = flags & (O_ACCMODE | O_NONBLOCK);
+            let file = OpenFile::new(Handle::Tty(inside, node), kept, path);
+            Ok(p.files().fds.insert(file, flags & O_CLOEXEC != 0, 0)? as u64)
+        }
+        FIONREAD => {
+            user::write_struct(p.space(), arg, &(crate::pty::pending(tty) as u32))?;
+            Ok(0)
+        }
+        _ => tty_ioctl(tty, request, arg),
+    }
+}
+
+/// Makes `tty` the caller's controlling terminal: it must lead a session that has none (or, with
+/// `steal`, be root). Opening a terminal does this too, unless O_NOCTTY.
+fn take_control(tty: &alloc::sync::Arc<crate::tty::Tty>, steal: bool) -> Result<(), Errno> {
+    let p = proc::current();
+    if p.ctty.as_ref().is_some_and(|c| alloc::sync::Arc::ptr_eq(c, tty)) {
+        return Ok(());
+    }
+    if p.tgid != p.sid || p.ctty.is_some() {
+        return Err(EPERM);
+    }
+    if tty.session() != 0 && !(steal && p.creds.is_root()) {
+        return Err(EPERM);
+    }
+    tty.control(p.sid, p.pgid);
+    for t in proc::threads(p.tgid) {
+        t.ctty = Some(tty.clone());
+    }
+    Ok(())
 }
 
 const WINDOW_PIXELS: u32 = 0x5701;
@@ -936,7 +1066,6 @@ fn readiness(fd: i32) -> i16 {
 pub fn file_readiness(file: &OpenFile) -> i16 {
     match &file.handle {
         Handle::Node(n) => match n.kind_of() {
-            Type::Device(Device::Tty) => POLLOUT | if crate::tty::available() > 0 { POLLIN } else { 0 },
             _ => POLLIN | POLLOUT,
         },
         Handle::PipeRead(pipe) => {
@@ -948,6 +1077,14 @@ pub fn file_readiness(file: &OpenFile) -> i16 {
                 r |= POLLHUP | POLLRDHUP;
             }
             r
+        }
+        Handle::Tty(tty, _) => {
+            let hung_up = tty.hung_up();
+            (if hung_up { POLLHUP } else { POLLOUT }) | if tty.readable() { POLLIN } else { 0 }
+        }
+        Handle::PtyMaster(tty) => {
+            let (read, deserted) = crate::pty::readiness(tty);
+            POLLOUT | (if read { POLLIN } else { 0 }) | if deserted { POLLHUP } else { 0 }
         }
         Handle::Socket(sock) => POLLOUT | if sock.queue.lock().is_empty() { 0 } else { POLLIN },
         Handle::Tcp(conn) => {
@@ -984,6 +1121,7 @@ pub fn file_readiness(file: &OpenFile) -> i16 {
             (if read { POLLIN } else { 0 }) | (if write { POLLOUT } else { 0 })
         }
         Handle::Epoll(ep) => if super::epoll::has_ready(ep) { POLLIN } else { 0 },
+        Handle::SignalFd(s) => if super::signalfd::readable(s) { POLLIN } else { 0 },
     }
 }
 

@@ -14,6 +14,11 @@ pub enum Handle {
     Node(Arc<Node>),
     PipeRead(Arc<Pipe>),
     PipeWrite(Arc<Pipe>),
+    /// A terminal (tty.rs): the console, or the inside of a pseudo-terminal; and the device file
+    /// it was opened by, for stat.
+    Tty(Arc<crate::tty::Tty>, Arc<Node>),
+    /// The outside of a pseudo-terminal (pty.rs), made by opening /dev/ptmx.
+    PtyMaster(Arc<crate::tty::Tty>),
     /// A window on the screen, made by opening /dev/window.
     Window(Arc<crate::console::Window>),
     /// A datagram socket: UDP, or ICMP for ping (net/socket.rs).
@@ -27,6 +32,8 @@ pub enum Handle {
     EventFd(Arc<crate::fs::eventfd::EventFd>),
     /// epoll (sys/epoll.rs).
     Epoll(Arc<crate::sys::epoll::Epoll>),
+    /// signalfd (sys/signalfd.rs).
+    SignalFd(Arc<crate::sys::signalfd::SignalFd>),
 }
 
 pub struct OpenFile {
@@ -38,12 +45,8 @@ pub struct OpenFile {
 }
 
 impl OpenFile {
-    pub fn node(node: Arc<Node>, flags: u32, path: String) -> Arc<OpenFile> {
-        Arc::new(OpenFile { handle: Handle::Node(node), offset: Mutex::new(0), flags: Mutex::new(flags), path })
-    }
-
-    pub fn window(window: Arc<crate::console::Window>, flags: u32, path: String) -> Arc<OpenFile> {
-        Arc::new(OpenFile { handle: Handle::Window(window), offset: Mutex::new(0), flags: Mutex::new(flags), path })
+    pub fn new(handle: Handle, flags: u32, path: String) -> Arc<OpenFile> {
+        Arc::new(OpenFile { handle, offset: Mutex::new(0), flags: Mutex::new(flags), path })
     }
 
     pub fn pipe(pipe: &Arc<Pipe>, write: bool) -> Arc<OpenFile> {
@@ -64,13 +67,19 @@ impl Drop for OpenFile {
         match &self.handle {
             Handle::PipeRead(p) => *p.readers.lock() -= 1,
             Handle::PipeWrite(p) => *p.writers.lock() -= 1,
-            Handle::Node(_) => return,
+            Handle::Node(node) => {
+                crate::fs::lock::release((node.dev(), node.inode_number()), self as *const OpenFile as usize);
+                return;
+            }
             // The last descriptor for a window is gone: take it off the screen.
             Handle::Window(w) => crate::console::close_window(w.id),
             Handle::Socket(s) => crate::net::socket::remove(s),
             Handle::Tcp(c) => crate::net::tcp::close(c),
+            Handle::Tty(t, _) if !t.is_console() => crate::pty::inside_closed(t),
+            Handle::Tty(..) => return,
+            Handle::PtyMaster(t) => crate::pty::master_closed(t),
             // These let go when the last reference to them goes (their Drop).
-            Handle::UnixStream(_) | Handle::UnixDatagram(_) | Handle::EventFd(_) | Handle::Epoll(_) => {}
+            Handle::UnixStream(_) | Handle::UnixDatagram(_) | Handle::EventFd(_) | Handle::Epoll(_) | Handle::SignalFd(_) => {}
         }
         crate::proc::wake_all();
     }

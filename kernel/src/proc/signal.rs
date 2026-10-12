@@ -15,6 +15,7 @@ use crate::mm::user;
 use crate::sys::errno::*;
 use core::arch::asm;
 
+pub const SIGHUP: usize = 1;
 pub const SIGINT: usize = 2;
 pub const SIGQUIT: usize = 3;
 pub const SIGILL: usize = 4;
@@ -42,6 +43,58 @@ const SA_RESTART: u64 = 0x1000_0000;
 const SA_NODEFER: u64 = 0x4000_0000;
 const SA_RESETHAND: u64 = 0x8000_0000;
 
+/// Why a signal was sent, as a program sees it in its siginfo: the reason (si_code), who sent it,
+/// and for SIGCHLD the child's exit status. Like Linux, one is kept for each pending signal.
+#[derive(Clone, Copy, Default)]
+pub struct Info {
+    pub code: i32,
+    pub pid: u32,
+    pub uid: u32,
+    pub status: i32,
+}
+
+pub const SI_USER: i32 = 0;
+pub const SI_KERNEL: i32 = 0x80;
+pub const SI_TKILL: i32 = -6;
+const CLD_EXITED: i32 = 1;
+const CLD_KILLED: i32 = 2;
+
+impl Info {
+    /// From the kernel itself (a terminal's Ctrl+C, SIGPIPE, timers).
+    pub fn kernel() -> Info {
+        Info { code: SI_KERNEL, ..Info::default() }
+    }
+
+    /// From the calling process (kill, tkill).
+    pub fn from_caller(code: i32) -> Info {
+        let p = current();
+        Info { code, pid: p.tgid, uid: p.creds.uid, status: 0 }
+    }
+
+    /// SIGCHLD for a child that ended, from its wait status (exit code << 8, or the signal).
+    pub fn child_ended(pid: u32, uid: u32, wait_status: i32) -> Info {
+        let (code, status) = if wait_status & 0x7f == 0 { (CLD_EXITED, (wait_status >> 8) & 0xff) } else { (CLD_KILLED, wait_status & 0x7f) };
+        Info { code, pid, uid, status }
+    }
+
+    /// A `siginfo_t`: number, errno, code, then the sender's pid and uid and, for SIGCHLD, the status.
+    pub fn siginfo(&self, sig: usize) -> [u8; 128] {
+        let mut b = [0u8; 128];
+        b[0..4].copy_from_slice(&(sig as i32).to_le_bytes());
+        b[8..12].copy_from_slice(&self.code.to_le_bytes());
+        b[16..20].copy_from_slice(&self.pid.to_le_bytes());
+        b[20..24].copy_from_slice(&self.uid.to_le_bytes());
+        b[24..28].copy_from_slice(&self.status.to_le_bytes());
+        b
+    }
+}
+
+/// Takes a pending signal off: it's acted on, waited for, or read from a signalfd.
+pub fn take(p: &mut Process, sig: usize) -> Info {
+    p.pending &= !bit(sig);
+    core::mem::take(&mut p.sig_info[sig])
+}
+
 pub const fn bit(sig: usize) -> u64 {
     1 << (sig - 1)
 }
@@ -65,6 +118,10 @@ pub fn interrupted(p: &Process) -> bool {
 }
 
 pub fn send(p: &mut Process, sig: usize) {
+    send_info(p, sig, Info::kernel());
+}
+
+pub fn send_info(p: &mut Process, sig: usize, info: Info) {
     if sig == 0 || sig > 64 || matches!(p.state, State::Zombie(_)) {
         return;
     }
@@ -73,11 +130,19 @@ pub fn send(p: &mut Process, sig: usize) {
     if p.tgid == 1 && handler == SIG_DFL {
         return;
     }
-    if sig != SIGKILL && (handler == SIG_IGN || (handler == SIG_DFL && ignored_by_default(sig))) {
+    // An ignored signal is dropped, unless it's blocked: the program may change its mind by the
+    // time it unblocks it, or be waiting for it in sigwait (Linux keeps it too).
+    let blocked = p.sigmask & bit(sig) != 0;
+    if sig != SIGKILL && !blocked && (handler == SIG_IGN || (handler == SIG_DFL && ignored_by_default(sig))) {
         return;
     }
+    // An ordinary signal already pending isn't queued again; the first one's details stay.
+    if p.pending & bit(sig) == 0 {
+        p.sig_info[sig] = info;
+    }
     p.pending |= bit(sig);
-    if p.state == State::Sleeping && interrupted(p) {
+    // Wake it either way: a sigwait waits for blocked signals too.
+    if p.state == State::Sleeping {
         p.state = State::Runnable;
     }
 }
@@ -91,14 +156,14 @@ pub fn deliver(frame: &mut TrapFrame) {
             return;
         }
         let sig = ready.trailing_zeros() as usize + 1;
-        p.pending &= !bit(sig);
+        let info = take(p, sig);
         let action = p.handlers()[sig];
         match action.handler {
             SIG_IGN => continue,
             SIG_DFL if ignored_by_default(sig) => continue,
             SIG_DFL => exit(sig as i32),
             _ => {
-                if start_handler(p, frame, sig, action).is_err() {
+                if start_handler(p, frame, sig, info, action).is_err() {
                     exit(SIGSEGV as i32);
                 }
                 return;
@@ -135,7 +200,7 @@ fn registers(frame: &TrapFrame) -> [u64; 18] {
     ]
 }
 
-fn start_handler(p: &mut Process, frame: &mut TrapFrame, sig: usize, action: SigAction) -> Result<(), Errno> {
+fn start_handler(p: &mut Process, frame: &mut TrapFrame, sig: usize, info: Info, action: SigAction) -> Result<(), Errno> {
     if action.flags & SA_RESTORER == 0 || action.restorer == 0 {
         return Err(EFAULT); // x86-64 programs always provide one (the C library does)
     }
@@ -172,12 +237,14 @@ fn start_handler(p: &mut Process, frame: &mut TrapFrame, sig: usize, action: Sig
     put(MCONTEXT + 176, p.fault_addr.unwrap_or(0)); // cr2
     put(MCONTEXT + 184, fpu_at);
     put(SIGMASK, old_mask);
-    // siginfo: si_signo and si_errno (two i32s), then si_code: SEGV_MAPERR-style 1 for faults,
-    // SI_USER (0) otherwise; then the fault address.
-    put(SIGINFO, sig as u64);
-    put(SIGINFO + 8, if p.fault_addr.is_some() { 1 } else { 0 });
-    if let Some(addr) = p.fault_addr.take() {
-        put(SIGINFO + 16, addr);
+    // siginfo: for a fault, SEGV_MAPERR-style code 1 and the address; otherwise why it was sent.
+    match p.fault_addr.take() {
+        Some(addr) => {
+            put(SIGINFO, sig as u64);
+            put(SIGINFO + 8, 1);
+            put(SIGINFO + 16, addr);
+        }
+        None => f[SIGINFO..SIGINFO + 128].copy_from_slice(&info.siginfo(sig)),
     }
 
     let space = p.space();
@@ -252,6 +319,36 @@ pub fn sigreturn(frame: &mut TrapFrame) -> Result<u64, Errno> {
 }
 
 /// rt_sigsuspend: waits for a signal with a temporary mask; the old mask comes back after the handler.
+/// rt_sigtimedwait (sigwait, sigwaitinfo, sigtimedwait): waits for one of the signals in the set
+/// (usually blocked ones) and takes it instead of running a handler. EAGAIN if the timeout passes.
+pub fn timed_wait(set_at: u64, info_at: u64, timeout_at: u64) -> Result<u64, Errno> {
+    let want = user::read_u64(current().space(), set_at)? & !UNBLOCKABLE;
+    let deadline = if timeout_at == 0 {
+        None
+    } else {
+        let secs = user::read_u64(current().space(), timeout_at)?;
+        let nanos = user::read_u64(current().space(), timeout_at + 8)?;
+        let ticks = secs * crate::arch::irq::TIMER_HZ + nanos.div_ceil(1_000_000_000 / crate::arch::irq::TIMER_HZ);
+        Some(crate::arch::irq::ticks() + ticks)
+    };
+    loop {
+        let p = current();
+        let hit = p.pending & want;
+        if hit != 0 {
+            let sig = hit.trailing_zeros() as usize + 1;
+            let info = take(p, sig);
+            if info_at != 0 {
+                user::write(p.space(), info_at, &info.siginfo(sig))?;
+            }
+            return Ok(sig as u64);
+        }
+        if deadline.is_some_and(|d| crate::arch::irq::ticks() >= d) {
+            return Err(EAGAIN);
+        }
+        super::sleep()?; // EINTR if another signal, one not waited for, needs acting on
+    }
+}
+
 pub fn suspend(mask: u64) -> Result<u64, Errno> {
     let p = current();
     p.saved_mask = Some(p.sigmask);

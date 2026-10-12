@@ -108,16 +108,17 @@ pub fn kill(pid: i64, sig: usize) -> SysResult {
         return Err(EINVAL);
     }
     let me = proc::current();
+    let info = proc::signal::Info::from_caller(proc::signal::SI_USER);
     match pid {
-        p if p > 0 => proc::signal_process(p as u32, sig)?,
-        0 => proc::signal_group(me.pgid, sig),
+        p if p > 0 => proc::signal_process_info(p as u32, sig, info)?,
+        0 => proc::signal_group_info(me.pgid, sig, info),
         -1 => {
             let all: alloc::vec::Vec<u32> = proc::processes().filter(|t| t.tgid != 1).map(|t| t.tgid).collect();
             for tgid in all {
-                let _ = proc::signal_process(tgid, sig);
+                let _ = proc::signal_process_info(tgid, sig, info);
             }
         }
-        p => proc::signal_group((-p) as u32, sig),
+        p => proc::signal_group_info((-p) as u32, sig, info),
     }
     Ok(0)
 }
@@ -127,8 +128,9 @@ pub fn tkill(tid: u32, sig: usize) -> SysResult {
     if sig > 64 {
         return Err(EINVAL);
     }
+    let info = proc::signal::Info::from_caller(proc::signal::SI_TKILL);
     let target = proc::get(tid).ok_or(ESRCH)?;
-    proc::signal::send(target, sig);
+    proc::signal::send_info(target, sig, info);
     Ok(0)
 }
 
@@ -207,11 +209,13 @@ pub fn getsid(pid: u32) -> SysResult {
     Ok(proc::get(pid).ok_or(ESRCH)?.sid as u64)
 }
 
+/// A new session, led by the caller, with no controlling terminal yet.
 pub fn setsid() -> SysResult {
     let tgid = proc::current().tgid;
     for t in proc::threads(tgid) {
         t.sid = tgid;
         t.pgid = tgid;
+        t.ctty = None;
     }
     Ok(tgid as u64)
 }

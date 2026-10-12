@@ -161,14 +161,17 @@ pub struct Process {
     pub gs_base: u64,
     pub clear_child_tid: u64,
     pub sigmask: u64,
-    /// Signals sent but not acted on yet (bit n-1 for signal n).
+    /// Signals sent but not acted on yet (bit n-1 for signal n), and why each was sent.
     pub pending: u64,
+    pub sig_info: [signal::Info; 65],
     /// The mask to restore after a handler started from rt_sigsuspend.
     pub saved_mask: Option<u64>,
     /// The faulting address for the signal being delivered (SIGSEGV etc.).
     pub fault_addr: Option<u64>,
     /// Set while a vfork parent waits for this child to exec or exit.
     pub vfork_parent: Option<u32>,
+    /// The terminal that controls it (its session's), if any: /dev/tty, and where Ctrl+C comes from.
+    pub ctty: Option<Arc<crate::tty::Tty>>,
     /// The futex this task waits on, if any.
     pub futex: Option<futex::Key>,
     pub start_ticks: u64,
@@ -330,9 +333,11 @@ fn new_task(pid: u32, mem: Arc<Shared<Memory>>, files: Arc<Shared<Files>>, handl
         clear_child_tid: 0,
         sigmask: 0,
         pending: 0,
+        sig_info: [signal::Info::default(); 65],
         saved_mask: None,
         fault_addr: None,
         vfork_parent: None,
+        ctty: None,
         futex: None,
         start_ticks: crate::arch::irq::ticks(),
         fpu: Box::new(unsafe { (*(&raw const INITIAL_FPU)).clone() }),
@@ -349,8 +354,8 @@ fn memory_of(image: &mut Option<elf::Image>) -> Arc<Shared<Memory>> {
 /// Starts the first program (pid 1) with the terminal as stdin, stdout and stderr.
 pub fn spawn_init(path: &str) -> Result<(), Errno> {
     let s = sched();
-    let tty = crate::fs::lookup("/dev/console", true)?;
-    let console = fd::OpenFile::node(tty, 2, String::from("/dev/console"));
+    let node = crate::fs::lookup("/dev/console", true)?;
+    let console = fd::OpenFile::new(fd::Handle::Tty(crate::tty::console(), node), 2, String::from("/dev/console"));
     let mut fds = FdTable::default();
     for _ in 0..3 {
         fds.insert(console.clone(), false, 0)?;
@@ -365,6 +370,7 @@ pub fn spawn_init(path: &str) -> Result<(), Errno> {
     p.name = elf::short_name(path);
     p.exe = String::from(path);
     p.cmdline = cmdline_of(&args);
+    p.ctty = Some(crate::tty::console());
     prime_stack(&mut p, TrapFrame::user(entry, stack));
     s.procs.insert(1, p);
     Ok(())
@@ -528,8 +534,9 @@ fn finish_process(status: i32) -> ! {
             leader.state = State::Zombie(status);
         }
     }
+    let uid = p.creds.uid;
     if let Some(parent) = get(ppid) {
-        signal::send(parent, signal::SIGCHLD);
+        signal::send_info(parent, signal::SIGCHLD, signal::Info::child_ended(tgid, uid, status));
     }
     wake_all();
     yield_now();
@@ -579,6 +586,7 @@ pub fn fork(frame: &TrapFrame, flags: u64, new_sp: u64, parent_tid: u64, child_t
     child.ppid = if thread || flags & CLONE_PARENT != 0 { parent.ppid } else { parent.tgid };
     child.pgid = parent.pgid;
     child.sid = parent.sid;
+    child.ctty = parent.ctty.clone();
     child.name = parent.name.clone();
     child.exe = parent.exe.clone();
     child.cmdline = parent.cmdline.clone();
@@ -726,22 +734,30 @@ pub fn wait(target: i64, nohang: bool) -> Result<Option<(u32, i32)>, Errno> {
 
 /// Sends a signal to a process: to one of its threads that isn't blocking it (Linux picks any).
 pub fn signal_process(tgid: u32, sig: usize) -> Result<(), Errno> {
+    signal_process_info(tgid, sig, signal::Info::kernel())
+}
+
+pub fn signal_process_info(tgid: u32, sig: usize, info: signal::Info) -> Result<(), Errno> {
     let leader = get(tgid).filter(|p| p.pid == p.tgid).ok_or(ESRCH)?;
     if sig == 0 {
         return Ok(());
     }
     let target = threads(tgid).find(|t| t.state.alive() && t.sigmask & signal::bit(sig) == 0).map(|t| t.pid);
     match target.and_then(get) {
-        Some(t) => signal::send(t, sig),
-        None => signal::send(leader, sig),
+        Some(t) => signal::send_info(t, sig, info),
+        None => signal::send_info(leader, sig, info),
     }
     Ok(())
 }
 
 pub fn signal_group(pgid: u32, sig: usize) {
+    signal_group_info(pgid, sig, signal::Info::kernel());
+}
+
+pub fn signal_group_info(pgid: u32, sig: usize, info: signal::Info) {
     let tgids: Vec<u32> = processes().filter(|p| p.pgid == pgid).map(|p| p.tgid).collect();
     for tgid in tgids {
-        let _ = signal_process(tgid, sig);
+        let _ = signal_process_info(tgid, sig, info);
     }
 }
 
