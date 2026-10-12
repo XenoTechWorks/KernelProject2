@@ -26,8 +26,9 @@ kernel answers those calls the way Linux does, the program can't tell the differ
   screen and on the serial port, and pseudo-terminals for programs that run others (see The
   command line). The screen understands the usual escape codes and 16 colors.
 - What event loops and servers are built on: `epoll` (level- and edge-triggered, one-shot),
-  `eventfd`, `signalfd`, Unix sockets (see Networking), timers that really go off (`alarm`,
-  `setitimer`, and the timeouts of `poll`, `ppoll` and `epoll_wait`), `sigwaitinfo`, and `flock`.
+  `eventfd`, `signalfd`, `timerfd`, `pidfd` (with `waitid`), Unix sockets (see Networking), timers
+  that really go off (`alarm`, `setitimer`, and the timeouts of `poll`, `ppoll` and `epoll_wait`,
+  which also take a signal mask to wait with), `sigwaitinfo`, and `flock`.
   Signals carry who sent them and why (a child's exit status for `SIGCHLD`). Python's `asyncio`
   runs on them.
 - About 150 Linux system calls (see `kernel/src/sys/mod.rs`). Missing ones return `ENOSYS` and are
@@ -435,8 +436,8 @@ python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
 
 Roughly in order; each step is checked by running a real program.
 
-1. **More of Linux for real tools**: `timerfd` and `pidfd`, and signal masks in
-   `ppoll`/`epoll_pwait`.
+1. **More of Linux for real tools**: `ptrace` (for strace and gdb), `inotify`, and job control
+   (Ctrl+Z, `fg`, `bg`).
 2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
    archive), interrupt-driven I/O, and AHCI for real PCs.
 3. **Run the targets**: fastfetch and git run; next then coreutils as a compatibility test.

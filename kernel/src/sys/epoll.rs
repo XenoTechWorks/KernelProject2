@@ -180,7 +180,11 @@ pub fn ctl(epfd: i32, op: u32, fd: i32, event_ptr: u64) -> SysResult {
     Ok(0)
 }
 
-/// epoll_wait and epoll_pwait (whose signal mask, like ppoll's here, isn't applied).
+/// epoll_wait, and epoll_pwait, which waits with the given signal mask.
+pub fn pwait(epfd: i32, out: u64, max: i32, timeout_ms: i64, mask_at: u64) -> SysResult {
+    proc::signal::with_mask(mask_at, || wait(epfd, out, max, timeout_ms))
+}
+
 pub fn wait(epfd: i32, out: u64, max: i32, timeout_ms: i64) -> SysResult {
     if max <= 0 {
         return Err(EINVAL);
@@ -199,7 +203,7 @@ pub fn wait(epfd: i32, out: u64, max: i32, timeout_ms: i64) -> SysResult {
 }
 
 /// epoll_pwait2: the same with a timespec timeout (none: forever).
-pub fn wait_timespec(epfd: i32, out: u64, max: i32, timeout: u64) -> SysResult {
+pub fn wait_timespec(epfd: i32, out: u64, max: i32, timeout: u64, mask_at: u64) -> SysResult {
     let timeout_ms = if timeout == 0 {
         -1
     } else {
@@ -208,5 +212,5 @@ pub fn wait_timespec(epfd: i32, out: u64, max: i32, timeout: u64) -> SysResult {
         let nanos = user::read_u64(space, timeout + 8)? as i64;
         secs * 1000 + (nanos as u64).div_ceil(1_000_000) as i64
     };
-    wait(epfd, out, max, timeout_ms)
+    pwait(epfd, out, max, timeout_ms, mask_at)
 }

@@ -711,7 +711,10 @@ pub fn exec(frame: &mut TrapFrame, path: &str, args: &[String], env: &[String]) 
 }
 
 /// wait4: returns (pid, status) of an ended child, or None for WNOHANG with nothing ready.
-pub fn wait(target: i64, nohang: bool) -> Result<Option<(u32, i32)>, Errno> {
+/// Waits for a child to end: (its pid, its wait status, the user it ran as). `target` is wait4's
+/// pid: -1 any child, 0 or -pgid one in a group, or a pid. With `keep`, the child stays a zombie
+/// to be waited for again (waitid's WNOWAIT).
+pub fn wait(target: i64, nohang: bool, keep: bool) -> Result<Option<(u32, i32, u32)>, Errno> {
     loop {
         let s = sched();
         let me = current();
@@ -731,9 +734,12 @@ pub fn wait(target: i64, nohang: bool) -> Result<Option<(u32, i32)>, Errno> {
         }
         let done = s.procs.values().find(|p| matches(p) && matches!(p.state, State::Zombie(_))).map(|p| p.pid);
         if let Some(pid) = done {
-            let child = s.procs.remove(&pid).unwrap();
-            let State::Zombie(status) = child.state else { unreachable!() };
-            return Ok(Some((pid, status)));
+            let child = s.procs.get(&pid).unwrap();
+            let (State::Zombie(status), uid) = (child.state, child.creds.uid) else { unreachable!() };
+            if !keep {
+                s.procs.remove(&pid);
+            }
+            return Ok(Some((pid, status, uid)));
         }
         if nohang {
             return Ok(None);

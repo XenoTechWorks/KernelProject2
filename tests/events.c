@@ -13,11 +13,13 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/file.h>
+#include <sys/pidfd.h>
 #include <sys/signalfd.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/timerfd.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -375,6 +377,81 @@ static void locks(void) {
     unlink(path);
 }
 
+static volatile sig_atomic_t usr1s;
+static void on_usr1(int sig) { (void)sig; usr1s++; }
+
+static void more_fds(void) {
+    /* timerfd: first after 30 ms, then every 20 ms. */
+    int t = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
+    struct itimerspec spec = {.it_interval = {0, 20000000}, .it_value = {0, 30000000}}, now_spec;
+    double start = now();
+    timerfd_settime(t, 0, &spec, NULL);
+    uint64_t count = 0;
+    read(t, &count, 8);
+    double first = now() - start;
+    struct pollfd p = {.fd = t, .events = POLLIN};
+    int later = poll(&p, 1, 500) == 1 && read(t, &count, 8) == 8;
+    timerfd_gettime(t, &now_spec);
+    check("timerfd goes off on time, then every so often, and can be watched with poll",
+          first >= 0.025 && first < 0.3 && later && count >= 1 && now_spec.it_interval.tv_nsec == 20000000);
+    close(t);
+
+    /* pidfd: readable when the child ends; waitid takes it through the pidfd. */
+    pid_t child = fork();
+    if (child == 0) {
+        usleep(100000);
+        _exit(5);
+    }
+    int pfd = pidfd_open(child, 0);
+    p = (struct pollfd){.fd = pfd, .events = POLLIN};
+    int early = poll(&p, 1, 0) == 0;
+    int ended = poll(&p, 1, 3000) == 1;
+    siginfo_t info;
+    memset(&info, 0, sizeof info);
+    waitid(P_PIDFD, pfd, &info, WEXITED);
+    check("pidfd: readable once its child ends, and waitid through it says how",
+          early && ended && info.si_pid == child && info.si_code == CLD_EXITED && info.si_status == 5);
+    close(pfd);
+
+    child = fork();
+    if (child == 0) {
+        pause();
+        _exit(0);
+    }
+    pfd = pidfd_open(child, 0);
+    int sent = pidfd_send_signal(pfd, SIGTERM, NULL, 0) == 0;
+    memset(&info, 0, sizeof info);
+    int peeked = waitid(P_PID, child, &info, WEXITED | WNOWAIT) == 0 && info.si_code == CLD_KILLED && info.si_status == SIGTERM;
+    int reaped = waitpid(child, NULL, 0) == child;
+    check("pidfd_send_signal; waitid with WNOWAIT leaves the child to be waited for", sent && peeked && reaped);
+    close(pfd);
+
+    /* ppoll with a signal mask: a signal blocked outside it gets in during the wait. */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_usr1;
+    sigaction(SIGUSR1, &sa, NULL);
+    sigset_t block, empty, after;
+    sigemptyset(&block);
+    sigaddset(&block, SIGUSR1);
+    sigemptyset(&empty);
+    sigprocmask(SIG_BLOCK, &block, NULL);
+    raise(SIGUSR1);
+    int pipe_fds[2];
+    pipe(pipe_fds);
+    p = (struct pollfd){.fd = pipe_fds[0], .events = POLLIN};
+    struct timespec second = {1, 0};
+    double t0 = now();
+    int r = ppoll(&p, 1, &second, &empty);
+    int interrupted = r < 0 && errno == EINTR && usr1s == 1 && now() - t0 < 0.5;
+    sigprocmask(SIG_BLOCK, NULL, &after);
+    check("ppoll's mask lets a blocked signal in while it waits, then the old mask is back",
+          interrupted && sigismember(&after, SIGUSR1));
+    sigprocmask(SIG_UNBLOCK, &block, NULL);
+    close(pipe_fds[0]);
+    close(pipe_fds[1]);
+}
+
 static void timers(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
@@ -423,6 +500,7 @@ int main(void) {
     named();
     signalfds();
     locks();
+    more_fds();
     timers();
     printf("events: %d/%d passed\n", passed, total);
     return passed == total ? 0 : 1;

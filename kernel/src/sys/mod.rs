@@ -10,8 +10,10 @@ pub mod fs;
 pub mod mem;
 pub mod misc;
 pub mod net;
+pub mod pidfd;
 pub mod process;
 pub mod signalfd;
+pub mod timerfd;
 
 use crate::arch::idt::TrapFrame;
 use errno::*;
@@ -167,8 +169,8 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         228 => misc::clock_gettime(a[0] as u32, a[1]),
         229 => misc::clock_getres(a[1]),
         230 => misc::clock_nanosleep(a[2]),
-        // epoll_wait and epoll_pwait; the signal mask isn't applied (as with ppoll).
-        232 | 281 => epoll::wait(a[0] as i32, a[1], a[2] as i32, a[3] as i32 as i64),
+        232 => epoll::wait(a[0] as i32, a[1], a[2] as i32, a[3] as i32 as i64),
+        281 => epoll::pwait(a[0] as i32, a[1], a[2] as i32, a[3] as i32 as i64, a[4]),
         233 => epoll::ctl(a[0] as i32, a[1] as u32, a[2] as i32, a[3]),
         257 => fs::openat(a[0] as i32, a[1], a[2] as u32, a[3] as u32),
         258 => fs::mkdirat(a[0] as i32, a[1], a[2] as u32),
@@ -179,13 +181,17 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         266 => fs::symlinkat(a[0], a[1] as i32, a[2]),
         267 => fs::readlinkat(a[0] as i32, a[1], a[2], a[3] as usize),
         269 | 439 => fs::faccessat(a[0] as i32, a[1], a[2] as u32),
-        270 => fs::select(a[0] as usize, a[1], a[2], a[3], a[4], true),
-        271 => fs::ppoll(a[0], a[1] as usize, a[2]),
+        247 => process::waitid(a[0] as u32, a[1], a[2], a[3] as u32),
+        270 => fs::pselect(a[0] as usize, a[1], a[2], a[3], a[4], a[5]),
+        271 => fs::ppoll(a[0], a[1] as usize, a[2], a[3]),
         273 => Ok(0), // set_robust_list
         280 => Ok(0), // utimensat
         284 => fs::eventfd(a[0], 0),
         282 => signalfd::signalfd(a[0] as i32, a[1], 0),
+        283 => timerfd::create(a[0] as u32, a[1] as u32),
         289 => signalfd::signalfd(a[0] as i32, a[1], a[3] as u32),
+        286 => timerfd::settime(a[0] as i32, a[1] as u32, a[2], a[3]),
+        287 => timerfd::gettime(a[0] as i32, a[1]),
         290 => fs::eventfd(a[0], a[1] as u32),
         291 => epoll::create(a[0] as u32),
         292 => fs::dup3(a[0] as i32, a[1] as i32, a[2] as u32, false),
@@ -195,10 +201,11 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         318 => misc::getrandom(a[0], a[1] as usize),
         332 => fs::statx(a[0] as i32, a[1], a[2] as u32, a[4]),
         334 => Err(ENOSYS), // rseq: glibc works without it
-        434 => Err(ENOSYS), // pidfd_open: Python's asyncio watches children another way without it
+        424 => pidfd::send_signal(a[0] as i32, a[1] as usize, a[3] as u32),
+        434 => pidfd::open(a[0] as u32, a[1] as u32),
         435 => Err(ENOSYS), // clone3: glibc falls back to clone
         436 => fs::close_range(a[0] as u32, a[1] as u32, a[2] as u32),
-        441 => epoll::wait_timespec(a[0] as i32, a[1], a[2] as i32, a[3]),
+        441 => epoll::wait_timespec(a[0] as i32, a[1], a[2] as i32, a[3], a[4]),
         _ => {
             unimplemented(n);
             Err(ENOSYS)

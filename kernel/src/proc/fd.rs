@@ -34,6 +34,10 @@ pub enum Handle {
     Epoll(Arc<crate::sys::epoll::Epoll>),
     /// signalfd (sys/signalfd.rs).
     SignalFd(Arc<crate::sys::signalfd::SignalFd>),
+    /// timerfd (sys/timerfd.rs).
+    TimerFd(Arc<crate::sys::timerfd::TimerFd>),
+    /// pidfd (sys/pidfd.rs).
+    PidFd(Arc<crate::sys::pidfd::PidFd>),
 }
 
 pub struct OpenFile {
@@ -79,7 +83,7 @@ impl Drop for OpenFile {
             Handle::Tty(..) => return,
             Handle::PtyMaster(t) => crate::pty::master_closed(t),
             // These let go when the last reference to them goes (their Drop).
-            Handle::UnixStream(_) | Handle::UnixDatagram(_) | Handle::EventFd(_) | Handle::Epoll(_) | Handle::SignalFd(_) => {}
+            Handle::UnixStream(_) | Handle::UnixDatagram(_) | Handle::EventFd(_) | Handle::Epoll(_) | Handle::SignalFd(_) | Handle::TimerFd(_) | Handle::PidFd(_) => {}
         }
         crate::proc::wake_all();
     }

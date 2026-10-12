@@ -92,8 +92,8 @@ pub fn execve(frame: &mut TrapFrame, dirfd: i32, path_ptr: u64, argv: u64, envp:
 
 pub fn wait4(pid: i64, status_ptr: u64, options: u32) -> SysResult {
     const WNOHANG: u32 = 1;
-    match proc::wait(pid, options & WNOHANG != 0)? {
-        Some((pid, status)) => {
+    match proc::wait(pid, options & WNOHANG != 0, false)? {
+        Some((pid, status, _)) => {
             if status_ptr != 0 {
                 user::write_struct(proc::current().space(), status_ptr, &status)?;
             }
@@ -101,6 +101,39 @@ pub fn wait4(pid: i64, status_ptr: u64, options: u32) -> SysResult {
         }
         None => Ok(0),
     }
+}
+
+/// waitid: wait4 with the answer as a siginfo (who, how it ended), and a choice of whom: any
+/// child, one by pid, a group, or the process a pidfd stands for. WNOWAIT leaves it waitable.
+pub fn waitid(idtype: u32, id: u64, info_at: u64, options: u32) -> SysResult {
+    const P_ALL: u32 = 0;
+    const P_PID: u32 = 1;
+    const P_PGID: u32 = 2;
+    const P_PIDFD: u32 = 3;
+    const WNOHANG: u32 = 1;
+    const WEXITED: u32 = 4;
+    const WNOWAIT: u32 = 0x0100_0000;
+    if options & WEXITED == 0 {
+        return Err(EINVAL); // only ended children are reported (no stop/continue events)
+    }
+    let target = match idtype {
+        P_ALL => -1,
+        P_PID => id as u32 as i64,
+        P_PGID if id == 0 => 0,
+        P_PGID => -(id as u32 as i64),
+        P_PIDFD => super::pidfd::pid_of(id as i32)? as i64,
+        _ => return Err(EINVAL),
+    };
+    let found = proc::wait(target, options & WNOHANG != 0, options & WNOWAIT != 0)?;
+    if info_at != 0 {
+        // Nothing yet (WNOHANG): a zeroed siginfo, as Linux leaves it.
+        let info = match found {
+            Some((pid, status, uid)) => proc::signal::Info::child_ended(pid, uid, status).siginfo(proc::signal::SIGCHLD),
+            None => [0u8; 128],
+        };
+        user::write(proc::current().space(), info_at, &info)?;
+    }
+    Ok(0)
 }
 
 pub fn kill(pid: i64, sig: usize) -> SysResult {

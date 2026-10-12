@@ -155,7 +155,8 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
             Ok(8)
         }
         Handle::SignalFd(s) => Ok(super::signalfd::read(s, buf, nonblocking(file))? as u64),
-        Handle::Epoll(_) => Err(EINVAL),
+        Handle::TimerFd(t) => Ok(super::timerfd::read(t, buf, nonblocking(file))? as u64),
+        Handle::Epoll(_) | Handle::PidFd(_) => Err(EINVAL),
     }
 }
 
@@ -227,7 +228,7 @@ fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
             eventfd::write(e, value, nonblocking(file))?;
             Ok(8)
         }
-        Handle::Epoll(_) | Handle::SignalFd(_) => Err(EINVAL),
+        Handle::Epoll(_) | Handle::SignalFd(_) | Handle::TimerFd(_) | Handle::PidFd(_) => Err(EINVAL),
     }
 }
 
@@ -520,7 +521,7 @@ fn stat_of(handle: &Handle) -> Stat {
             Stat { mode: fs::S_IFSOCK | 0o777, nlink: 1, blksize: 4096, ..Default::default() }
         }
         // Like Linux's "anonymous inodes": no file type, only permissions.
-        Handle::EventFd(_) | Handle::Epoll(_) | Handle::SignalFd(_) => Stat { mode: 0o600, nlink: 1, blksize: 4096, ..Default::default() },
+        Handle::EventFd(_) | Handle::Epoll(_) | Handle::SignalFd(_) | Handle::TimerFd(_) | Handle::PidFd(_) => Stat { mode: 0o600, nlink: 1, blksize: 4096, ..Default::default() },
     }
 }
 
@@ -1149,6 +1150,8 @@ pub fn file_readiness(file: &OpenFile) -> i16 {
         }
         Handle::Epoll(ep) => if super::epoll::has_ready(ep) { POLLIN } else { 0 },
         Handle::SignalFd(s) => if super::signalfd::readable(s) { POLLIN } else { 0 },
+        Handle::TimerFd(t) => if super::timerfd::readable(t) { POLLIN } else { 0 },
+        Handle::PidFd(p) => if super::pidfd::readable(p) { POLLIN } else { 0 },
     }
 }
 
@@ -1164,8 +1167,8 @@ pub fn wait_ready(timeout_ms: i64, mut check: impl FnMut() -> Result<u64, Errno>
     }
 }
 
-/// ppoll: poll with a timespec timeout (none: forever). The signal mask isn't applied.
-pub fn ppoll(fds_ptr: u64, count: usize, timeout: u64) -> SysResult {
+/// ppoll: poll with a timespec timeout (none: forever), waiting with the given signal mask.
+pub fn ppoll(fds_ptr: u64, count: usize, timeout: u64, mask_at: u64) -> SysResult {
     let timeout_ms = if timeout == 0 {
         -1
     } else {
@@ -1174,7 +1177,13 @@ pub fn ppoll(fds_ptr: u64, count: usize, timeout: u64) -> SysResult {
         let nanos = user::read_u64(space, timeout + 8)? as i64;
         (secs * 1000 + (nanos as u64).div_ceil(1_000_000) as i64).min(i32::MAX as i64) as i32
     };
-    poll(fds_ptr, count, timeout_ms)
+    proc::signal::with_mask(mask_at, || poll(fds_ptr, count, timeout_ms))
+}
+
+/// pselect6: select with a timespec timeout and, in its sixth argument, a {mask, size} pair.
+pub fn pselect(n: usize, readfds: u64, writefds: u64, exceptfds: u64, timeout: u64, mask_pair: u64) -> SysResult {
+    let mask_at = if mask_pair == 0 { 0 } else { user::read_u64(proc::current().space(), mask_pair)? };
+    proc::signal::with_mask(mask_at, || select(n, readfds, writefds, exceptfds, timeout, true))
 }
 
 pub fn poll(fds_ptr: u64, count: usize, timeout_ms: i32) -> SysResult {

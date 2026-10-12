@@ -153,6 +153,11 @@ pub fn deliver(frame: &mut TrapFrame) {
         let p = current();
         let ready = ready(p);
         if ready == 0 {
+            // A call that waited with a mask of its own (sigsuspend, ppoll ...) and no handler to
+            // run: the program's own mask comes back now. (A handler restores it on return.)
+            if let Some(mask) = p.saved_mask.take() {
+                p.sigmask = mask;
+            }
             return;
         }
         let sig = ready.trailing_zeros() as usize + 1;
@@ -347,6 +352,27 @@ pub fn timed_wait(set_at: u64, info_at: u64, timeout_at: u64) -> Result<u64, Err
         }
         super::sleep()?; // EINTR if another signal, one not waited for, needs acting on
     }
+}
+
+/// Runs a waiting call (ppoll, pselect, epoll_pwait) with the signal mask the program gave it, if
+/// it gave one, so a signal can't slip in between unblocking it and starting to wait. If the call
+/// is interrupted, the program's own mask comes back once the handler is done (see `deliver`).
+pub fn with_mask<T>(mask_at: u64, call: impl FnOnce() -> Result<T, Errno>) -> Result<T, Errno> {
+    if mask_at == 0 {
+        return call();
+    }
+    let mask = user::read_u64(current().space(), mask_at)?;
+    let p = current();
+    let own = p.sigmask;
+    p.saved_mask = Some(own);
+    p.sigmask = mask & !UNBLOCKABLE;
+    let result = call();
+    if !matches!(result, Err(EINTR)) {
+        let p = current();
+        p.sigmask = own;
+        p.saved_mask = None;
+    }
+    result
 }
 
 pub fn suspend(mask: u64) -> Result<u64, Errno> {
