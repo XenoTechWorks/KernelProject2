@@ -50,12 +50,33 @@ pub enum State {
     Lingering,
     /// A finished thread, removed by the scheduler once it has switched away from it.
     Dead,
+    /// Stopped by SIGSTOP, Ctrl+Z (SIGTSTP) and the like, until SIGCONT (or SIGKILL).
+    Stopped,
 }
 
 impl State {
     fn alive(self) -> bool {
-        matches!(self, State::Runnable | State::Sleeping)
+        matches!(self, State::Runnable | State::Sleeping | State::Stopped)
     }
+}
+
+/// What a process's parent hears through wait about it stopping and going on (job control).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum JobEvent {
+    Stopped(u8),
+    Continued,
+}
+
+/// What wait4 and waitid look for.
+#[derive(Clone, Copy, Default)]
+pub struct WaitFor {
+    pub exited: bool,
+    pub stopped: bool,
+    pub continued: bool,
+    /// Don't wait if there's nothing yet (WNOHANG).
+    pub nohang: bool,
+    /// Leave what's reported to be waited for again (WNOWAIT).
+    pub keep: bool,
 }
 
 #[repr(C, align(16))]
@@ -172,6 +193,8 @@ pub struct Process {
     pub fault_addr: Option<u64>,
     /// Set while a vfork parent waits for this child to exec or exit.
     pub vfork_parent: Option<u32>,
+    /// For the first thread of a process: a stop or continue its parent hasn't waited for yet.
+    pub job_event: Option<JobEvent>,
     /// The terminal that controls it (its session's), if any: /dev/tty, and where Ctrl+C comes from.
     pub ctty: Option<Arc<crate::tty::Tty>>,
     /// The futex this task waits on, if any.
@@ -347,6 +370,7 @@ fn new_task(pid: u32, mem: Arc<Shared<Memory>>, files: Arc<Shared<Files>>, handl
         saved_mask: None,
         fault_addr: None,
         vfork_parent: None,
+        job_event: None,
         ctty: None,
         futex: None,
         start_ticks: crate::arch::irq::ticks(),
@@ -711,10 +735,11 @@ pub fn exec(frame: &mut TrapFrame, path: &str, args: &[String], env: &[String]) 
 }
 
 /// wait4: returns (pid, status) of an ended child, or None for WNOHANG with nothing ready.
-/// Waits for a child to end: (its pid, its wait status, the user it ran as). `target` is wait4's
-/// pid: -1 any child, 0 or -pgid one in a group, or a pid. With `keep`, the child stays a zombie
-/// to be waited for again (waitid's WNOWAIT).
-pub fn wait(target: i64, nohang: bool, keep: bool) -> Result<Option<(u32, i32, u32)>, Errno> {
+/// Waits for a child to end (or, if asked, to stop or go on): (its pid, its wait status, the user
+/// it ran as). The status is wait4's: exit code << 8 or the signal that ended it; a stop is
+/// sig << 8 | 0x7f, going on is 0xffff. `target` is wait4's pid: -1 any child, 0 or -pgid one in a
+/// group, or a pid.
+pub fn wait(target: i64, want: WaitFor) -> Result<Option<(u32, i32, u32)>, Errno> {
     loop {
         let s = sched();
         let me = current();
@@ -732,16 +757,29 @@ pub fn wait(target: i64, nohang: bool, keep: bool) -> Result<Option<(u32, i32, u
         if !s.procs.values().any(|p| matches(p)) {
             return Err(ECHILD);
         }
-        let done = s.procs.values().find(|p| matches(p) && matches!(p.state, State::Zombie(_))).map(|p| p.pid);
+        let done = s.procs.values().find(|p| want.exited && matches(p) && matches!(p.state, State::Zombie(_))).map(|p| p.pid);
         if let Some(pid) = done {
             let child = s.procs.get(&pid).unwrap();
             let (State::Zombie(status), uid) = (child.state, child.creds.uid) else { unreachable!() };
-            if !keep {
+            if !want.keep {
                 s.procs.remove(&pid);
             }
             return Ok(Some((pid, status, uid)));
         }
-        if nohang {
+        let event = |p: &Process| match p.job_event {
+            Some(JobEvent::Stopped(sig)) if want.stopped => Some((sig as i32) << 8 | 0x7f),
+            Some(JobEvent::Continued) if want.continued => Some(0xffff),
+            _ => None,
+        };
+        let changed = s.procs.values_mut().find(|p| matches(p) && event(p).is_some());
+        if let Some(child) = changed {
+            let status = event(child).unwrap();
+            if !want.keep {
+                child.job_event = None;
+            }
+            return Ok(Some((child.pid, status, child.creds.uid)));
+        }
+        if want.nohang {
             return Ok(None);
         }
         sleep()?;

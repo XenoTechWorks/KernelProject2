@@ -26,7 +26,7 @@ CHECKS = [
     ("ls /proc/self/", "cmdline"),
     ("fastfetch", "Kernel: Linux 6.12.0-kp2"),
     ("kpfetch", "Kernel"),
-    ("signal-test", "signals: 7/7 passed"),
+    ("signal-test", "signals: 11/11 passed"),
     ("thread-test", "threads: 6/6 passed"),
     ("events-test", "events: 38/38 passed"),
     ("pty-test", "ptys: 15/15 passed"),

@@ -201,11 +201,17 @@ impl Tty {
             let t = line.termios;
             for &raw in bytes {
                 let b = if raw == b'\r' && t.iflag & ICRNL != 0 { b'\n' } else { raw };
-                if t.lflag & ISIG != 0 && (b == t.cc[VINTR] || b == t.cc[VQUIT]) {
-                    signal = Some(if b == t.cc[VINTR] { crate::proc::SIGINT } else { crate::proc::SIGQUIT });
+                if t.lflag & ISIG != 0 && (b == t.cc[VINTR] || b == t.cc[VQUIT] || b == t.cc[VSUSP]) {
+                    // Ctrl+C interrupts, Ctrl+\ quits, Ctrl+Z stops what runs in the foreground.
+                    let (sig, shown): (usize, &[u8]) = match b {
+                        _ if b == t.cc[VINTR] => (crate::proc::SIGINT, b"^C\n"),
+                        _ if b == t.cc[VQUIT] => (crate::proc::SIGQUIT, b"^\\\n"),
+                        _ => (crate::proc::signal::SIGTSTP, b"^Z"),
+                    };
+                    signal = Some(sig);
                     line.editing.clear();
                     if t.lflag & ECHO != 0 {
-                        echo.extend_from_slice(if b == t.cc[VINTR] { b"^C\n" } else { b"^\\\n" });
+                        echo.extend_from_slice(shown);
                     }
                     continue;
                 }
@@ -301,6 +307,7 @@ impl Tty {
     }
 
     pub fn read(&self, buf: &mut [u8], nonblocking: bool) -> Result<usize, Errno> {
+        self.check_background_read()?;
         loop {
             if let Some(n) = self.try_read(buf) {
                 return Ok(n);
@@ -314,6 +321,24 @@ impl Tty {
             }
             crate::proc::sleep()?;
         }
+    }
+
+    /// Job control: a process in the background that reads its terminal is stopped (SIGTTIN, to
+    /// its whole group) so it doesn't take what's typed for the job in front; if it ignores or
+    /// blocks SIGTTIN, the read fails instead.
+    fn check_background_read(&self) -> Result<(), Errno> {
+        let p = crate::proc::current();
+        let foreground = self.foreground();
+        let controls = p.ctty.as_ref().is_some_and(|c| core::ptr::eq(&**c, self));
+        if !controls || foreground == 0 || p.pgid == foreground {
+            return Ok(());
+        }
+        let sig = crate::proc::signal::SIGTTIN;
+        if p.handlers()[sig].handler == crate::proc::signal::SIG_IGN || p.sigmask & crate::proc::signal::bit(sig) != 0 {
+            return Err(EIO);
+        }
+        crate::proc::signal_group(p.pgid, sig);
+        Err(EINTR)
     }
 
     pub fn available(&self) -> usize {

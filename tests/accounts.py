@@ -24,6 +24,19 @@ def typed(m, *parts, wait=0.6):
         time.sleep(wait)
 
 
+def answer(m, command, *exchange):
+    """Types a command, then answers its prompts: (prompt, reply) pairs, each reply typed once
+    its prompt is on the screen."""
+    start = len(m.output)
+    m.type(command)
+    for prompt, reply in exchange:
+        deadline = time.time() + 20
+        while prompt.encode() not in m.output[start:] and time.time() < deadline:
+            m.drain(0.2)
+        start = len(m.output)
+        m.type(reply)
+
+
 with Machine() as m:
     check("we start as root", m.run("whoami") == "root")
     check("id says so", m.run("id") == "uid=0(root) gid=0(root)")
@@ -34,7 +47,7 @@ with Machine() as m:
     check("it has a home", "jax" in (m.run("ls /home") or ""))
 
     # Give them a password; it's stored hashed, never in the clear.
-    typed(m, "passwd jax\r", "secret\r", "secret\r")
+    answer(m, "passwd jax\r", ("New password: ", "secret\r"), ("Again: ", "secret\r"))
     time.sleep(1)
     m.drain()
     shadow = m.run("cat /etc/shadow")
@@ -53,15 +66,15 @@ with Machine() as m:
     check("they can't add users", out is not None and "only root" in out, out)
 
     # Becoming themselves again does ask for the password, and the right one works.
-    typed(m, "su jax\r", wait=1.0)
-    typed(m, "wrong\r", wait=1.0)
+    answer(m, "su jax\r", ("Password: ", "wrong\r"))
+    time.sleep(1)
     m.drain()
     out = m.run("whoami")
     check("a wrong password is refused", out == "jax", out)
 
     # And the right one lets them through, into a shell inside the first.
-    typed(m, "su jax\r", wait=1.0)
-    typed(m, "secret\r", wait=2.0)
+    answer(m, "su jax\r", ("Password: ", "secret\r"))
+    time.sleep(2)
     m.drain()
     check("the right password is accepted", m.run("whoami") == "jax")
     typed(m, "exit\r", wait=2.0)

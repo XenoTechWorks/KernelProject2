@@ -60,6 +60,30 @@ with Machine() as m:
     check("attach shows the session on the console, Ctrl+B d leaves it running", attached and detached,
           m.text()[-400:])
 
+    # Job control in the shell: Ctrl+Z stops what runs in front, jobs lists it, bg lets it go on
+    # (a background job that reads the terminal is stopped again: SIGTTIN), fg brings it back.
+    m.drain()
+    start = len(m.output)
+    m.type("cat\r")
+    time.sleep(1)
+    m.type("\x1a")
+    stopped = wait_for(m, r"\[1\]\+\s+Stopped\s+cat", start)
+    listed = m.run("jobs") or ""
+    resumed = m.run("bg") or ""
+    m.run("true")
+    again = m.run("jobs") or ""
+    m.drain()
+    start = len(m.output)
+    m.type("fg\r")
+    time.sleep(1)
+    m.type("back in front\r")
+    echoed = wait_for(m, r"back in front\nback in front", start)
+    m.type("\x04")
+    finished = wait_for(m, r"root:[^\n]*# $", start)
+    check("Ctrl+Z stops a job, jobs lists it, bg lets it go on until it reads the terminal",
+          stopped and "Stopped" in listed and "cat &" in resumed and "Stopped" in again, (listed, resumed, again))
+    check("fg brings it back to the terminal, where it carries on", echoed and finished, m.text()[-300:])
+
     m.run("tmux kill-server")
     gone = m.run("tmux list-sessions 2>&1") or ""
     check("kill-server ends it", "no server running" in gone, gone)

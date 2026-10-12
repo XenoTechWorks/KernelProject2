@@ -124,7 +124,7 @@ with Machine() as m:
     p.click(*close_button(x - 300, y + 200, clock_w))
     time.sleep(1)
     done = m.run("true")
-    check("dragged window closes with its × button", done is not None and "[1] Done" in done, done)
+    check("dragged window closes with its × button", done is not None and "Done" in done, done)
 
     # The tablet (absolute pointer) closes one too: the pointer lands exactly where it's sent.
     m.run("textclock &")
@@ -135,7 +135,7 @@ with Machine() as m:
     m.tablet(cx, cy, buttons=0)
     time.sleep(1)
     done = m.run("true")
-    check("the tablet clicks × right where it points", done is not None and "[1] Done" in done, done)
+    check("the tablet clicks × right where it points", done is not None and "Done" in done, done)
     p.x, p.y = cx, cy  # the PS/2 pointer moves the same pointer
 
     # The keyboard stays with the shell until the window is clicked; then q goes to the clock.
@@ -145,7 +145,7 @@ with Machine() as m:
     m.monitor("sendkey q")
     time.sleep(1)
     done = m.run("true")
-    check("clicked window gets the keyboard", done is not None and "[1] Done" in done, done)
+    check("clicked window gets the keyboard", done is not None and "Done" in done, done)
 
     # A graphical app. Its switch is the first thing in the last row (widgets.zig).
     m.run("widgets &")
@@ -186,7 +186,7 @@ with Machine() as m:
     p.click(*close_button(x, y, widgets_w))
     time.sleep(1)
     done = m.run("true")
-    check("window resized by its right and left edges closes with × where it is now", done is not None and "[1] Done" in done, done)
+    check("window resized by its right and left edges closes with × where it is now", done is not None and "Done" in done, done)
 
 print(f"{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

@@ -278,7 +278,10 @@ The same layout as Linux:
 
 - `init` (pid 1) shows the welcome text, starts the shell, and starts a new one if it exits.
 - `kpsh` is the shell (working name): pipes, `> >> < 2> 2>&1`, `; && ||`, quotes, `$VAR`, `$?`, `~`,
-  `cd`/`pwd`/`export`/`unset`/`env`/`exit`/`help`, scripts and `kpsh -c`.
+  `cd`/`pwd`/`export`/`unset`/`env`/`exit`/`help`, scripts and `kpsh -c`, and job control: each
+  command line is a job in its own process group, Ctrl+Z stops the one in front, `jobs` lists
+  them, `fg` and `bg` carry them on, and `&` starts one in the background (which is stopped,
+  as on Linux, if it tries to read the terminal).
 - Commands are separate programs, like coreutils: `ls` (with `-l -a -1`, colors, columns), `cat`,
   `echo`, `uname`, `mkdir -p`, `rm -r`, `touch`, `clear`.
 
@@ -438,8 +441,7 @@ python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
 
 Roughly in order; each step is checked by running a real program.
 
-1. **More of Linux for real tools**: `ptrace` (for strace and gdb), `inotify`, and job control
-   (Ctrl+Z, `fg`, `bg`).
+1. **More of Linux for real tools**: `ptrace` (for strace and gdb), and `inotify`.
 2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
    archive), interrupt-driven I/O, and AHCI for real PCs.
 3. **Run the targets**: fastfetch and git run; next then coreutils as a compatibility test.

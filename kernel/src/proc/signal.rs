@@ -7,7 +7,7 @@
 //! handler; when the handler returns into the C library's restorer, that calls `rt_sigreturn`, which
 //! reads the frame back. Because the layout is Linux's, glibc and musl programs work unchanged.
 
-use super::{Process, SigAction, State, current, exit};
+use super::{JobEvent, Process, SigAction, State, current, exit};
 use crate::arch::idt::{SYSCALL_VECTOR, TrapFrame};
 use crate::arch::gdt;
 use crate::mm::paging::{NO_EXECUTE, USER, WRITABLE};
@@ -71,9 +71,15 @@ impl Info {
         Info { code, pid: p.tgid, uid: p.creds.uid, status: 0 }
     }
 
-    /// SIGCHLD for a child that ended, from its wait status (exit code << 8, or the signal).
+    /// SIGCHLD for a child, from its wait status: it ended (exit code << 8, or the signal), stopped
+    /// (sig << 8 | 0x7f), or went on (0xffff).
     pub fn child_ended(pid: u32, uid: u32, wait_status: i32) -> Info {
-        let (code, status) = if wait_status & 0x7f == 0 { (CLD_EXITED, (wait_status >> 8) & 0xff) } else { (CLD_KILLED, wait_status & 0x7f) };
+        let (code, status) = match wait_status {
+            0xffff => (CLD_CONTINUED, SIGCONT as i32),
+            s if s & 0xff == 0x7f => (CLD_STOPPED, (s >> 8) & 0xff),
+            s if s & 0x7f == 0 => (CLD_EXITED, (s >> 8) & 0xff),
+            s => (CLD_KILLED, s & 0x7f),
+        };
         Info { code, pid, uid, status }
     }
 
@@ -101,10 +107,68 @@ pub const fn bit(sig: usize) -> u64 {
 
 const UNBLOCKABLE: u64 = bit(SIGKILL) | bit(SIGSTOP);
 
-/// Signals whose default action is to do nothing. Stop signals are in here too until there is job
-/// control.
+/// Signals whose default action is to do nothing.
 fn ignored_by_default(sig: usize) -> bool {
-    matches!(sig, SIGCHLD | SIGCONT | SIGURG | SIGWINCH | SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU)
+    matches!(sig, SIGCHLD | SIGCONT | SIGURG | SIGWINCH)
+}
+
+/// Signals whose default action is to stop the process (until SIGCONT).
+fn stops_by_default(sig: usize) -> bool {
+    matches!(sig, SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU)
+}
+
+const STOP_SIGNALS: u64 = bit(SIGSTOP) | bit(SIGTSTP) | bit(SIGTTIN) | bit(SIGTTOU);
+const SA_NOCLDSTOP: u64 = 1;
+const CLD_STOPPED: i32 = 5;
+const CLD_CONTINUED: i32 = 6;
+
+/// Stops every thread of the calling process (a stop signal's default action) and lets its parent
+/// know; returns once something continues it.
+fn stop_group(sig: usize) {
+    let tgid = current().tgid;
+    for t in super::threads(tgid) {
+        if matches!(t.state, State::Runnable | State::Sleeping) {
+            t.state = State::Stopped;
+        }
+    }
+    report(tgid, JobEvent::Stopped(sig as u8));
+    while current().state == State::Stopped {
+        super::yield_now();
+    }
+}
+
+/// SIGCONT: a stopped process goes on, whatever it does with the signal itself, and stop signals
+/// still pending are forgotten.
+fn continue_group(tgid: u32) {
+    let mut was_stopped = false;
+    for t in super::threads(tgid) {
+        t.pending &= !STOP_SIGNALS;
+        if t.state == State::Stopped {
+            t.state = State::Runnable;
+            was_stopped = true;
+        }
+    }
+    if was_stopped {
+        report(tgid, JobEvent::Continued);
+    }
+}
+
+/// Tells a process's parent it stopped or went on: for wait, and with SIGCHLD unless the parent
+/// asked not to hear about it (SA_NOCLDSTOP).
+fn report(tgid: u32, event: JobEvent) {
+    let Some(leader) = super::get(tgid) else { return };
+    leader.job_event = Some(event);
+    let (ppid, uid) = (leader.ppid, leader.creds.uid);
+    if let Some(parent) = super::get(ppid) {
+        if parent.handlers()[SIGCHLD].flags & SA_NOCLDSTOP == 0 {
+            let (code, status) = match event {
+                JobEvent::Stopped(sig) => (CLD_STOPPED, sig as i32),
+                JobEvent::Continued => (CLD_CONTINUED, SIGCONT as i32),
+            };
+            send_info(parent, SIGCHLD, Info { code, pid: tgid, uid, status });
+        }
+    }
+    super::wake_all();
 }
 
 /// Pending signals the process isn't blocking.
@@ -125,6 +189,14 @@ pub fn send_info(p: &mut Process, sig: usize, info: Info) {
     if sig == 0 || sig > 64 || matches!(p.state, State::Zombie(_)) {
         return;
     }
+    // Job control acts when the signal is sent, not when it's handled.
+    if sig == SIGCONT {
+        continue_group(p.tgid);
+    } else if STOP_SIGNALS & bit(sig) != 0 {
+        for t in super::threads(p.tgid) {
+            t.pending &= !bit(SIGCONT);
+        }
+    }
     let handler = p.handlers()[sig].handler;
     // init only gets the signals it has handlers for, like on Linux.
     if p.tgid == 1 && handler == SIG_DFL {
@@ -141,8 +213,8 @@ pub fn send_info(p: &mut Process, sig: usize, info: Info) {
         p.sig_info[sig] = info;
     }
     p.pending |= bit(sig);
-    // Wake it either way: a sigwait waits for blocked signals too.
-    if p.state == State::Sleeping {
+    // Wake it either way: a sigwait waits for blocked signals too. SIGKILL ends a stop as well.
+    if p.state == State::Sleeping || (sig == SIGKILL && p.state == State::Stopped) {
         p.state = State::Runnable;
     }
 }
@@ -166,6 +238,7 @@ pub fn deliver(frame: &mut TrapFrame) {
         match action.handler {
             SIG_IGN => continue,
             SIG_DFL if ignored_by_default(sig) => continue,
+            SIG_DFL if stops_by_default(sig) => stop_group(sig),
             SIG_DFL => exit(sig as i32),
             _ => {
                 if start_handler(p, frame, sig, info, action).is_err() {

@@ -25,6 +25,12 @@ static void on_int(int sig) {
     for (int i = 0; i < 10; i++) x *= 3.0;
     got_int = sig + (x > 0 ? 0 : 1000);
 }
+static volatile sig_atomic_t last_chld_code;
+static void on_chld_info(int sig, siginfo_t *info, void *uc) {
+    (void)sig;
+    (void)uc;
+    last_chld_code = info->si_code;
+}
 static void on_segv(int sig, siginfo_t *info, void *uc) {
     (void)uc;
     siglongjmp(recover, info->si_addr == (void *)16 ? sig : -1);
@@ -82,6 +88,30 @@ int main(void) {
     } else {
         check("recover from a segfault (with the right fault address)", r == SIGSEGV);
     }
+
+    /* Job control: a child stopped and continued, as a shell's Ctrl+Z, fg and bg do it. */
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = on_chld_info;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART; /* so the waits below aren't cut short by it */
+    sigaction(SIGCHLD, &sa, NULL);
+    child = fork();
+    if (child == 0) {
+        for (;;) pause();
+    }
+    kill(child, SIGSTOP);
+    int st = 0;
+    pid_t got = waitpid(child, &st, WUNTRACED);
+    check("SIGSTOP stops a child, and waitpid(WUNTRACED) says so", got == child && WIFSTOPPED(st) && WSTOPSIG(st) == SIGSTOP);
+    check("...and its parent gets SIGCHLD saying it stopped", last_chld_code == CLD_STOPPED);
+    kill(child, SIGCONT);
+    got = waitpid(child, &st, WCONTINUED);
+    check("SIGCONT makes it go on, and waitpid(WCONTINUED) says so", got == child && WIFCONTINUED(st));
+    kill(child, SIGTSTP);
+    got = waitpid(child, &st, WUNTRACED);
+    int tstp = got == child && WIFSTOPPED(st) && WSTOPSIG(st) == SIGTSTP;
+    kill(child, SIGKILL);
+    got = waitpid(child, &st, 0);
+    check("Ctrl+Z's SIGTSTP stops it too, and SIGKILL ends a stopped child", tstp && got == child && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL);
 
     printf("signals: %d/%d passed\n", passed, total);
     return passed == total ? 0 : 1;

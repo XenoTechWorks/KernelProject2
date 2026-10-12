@@ -360,11 +360,13 @@ fn setSignal(sig: usize, handler: usize) void {
     _ = sys.syscall4(sys.nr.rt_sigaction, sig, @intFromPtr(&action), 0, 8);
 }
 
-/// In a child process: run one command and never return.
-fn runInChild(cmd: *const Command, background: bool) noreturn {
+/// In a child process: run one command and never return. `pgid` is its job's process group (0:
+/// start one).
+fn runInChild(cmd: *const Command, background: bool, pgid: usize) noreturn {
+    // Its own process group, so Ctrl+C and Ctrl+Z reach the job and not the shell.
+    _ = sys.syscall2(sys.nr.setpgid, 0, pgid);
     if (background) {
-        // Like other shells without job control: a background job ignores Ctrl+C and doesn't read
-        // the terminal (its input is /dev/null unless redirected).
+        // A background job doesn't read the terminal: its input is /dev/null unless redirected.
         switch (sys.open("/dev/null", sys.O_RDONLY, 0)) {
             .ok => |fd| {
                 _ = sys.syscall2(sys.nr.dup2, fd, 0);
@@ -372,10 +374,9 @@ fn runInChild(cmd: *const Command, background: bool) noreturn {
             },
             .err => {},
         }
-    } else {
-        setSignal(2, 0); // SIGINT back to default, so Ctrl+C stops the program
-        setSignal(3, 0);
     }
+    // The signals the shell ignores, back to what programs expect.
+    for ([_]usize{ SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU }) |sig| setSignal(sig, 0);
     if (!applyRedirects(cmd)) sys.exit(1);
     if (cmd.argc == 0) sys.exit(0);
     if (builtin(cmd)) |status| {
@@ -410,11 +411,60 @@ fn describeSignal(sig: u32) ?[]const u8 {
     };
 }
 
-// Background jobs still running: their last process, and the job number shown for it.
-const Job = struct { pid: usize, number: usize };
-var jobs: [16]?Job = @splat(null);
+// ── Jobs ────────────────────────────────────────────────────────────────────────────────────────
+//
+// Each pipeline is a job: its processes share a process group, which has the terminal while the
+// job runs in the foreground. Ctrl+Z stops it (SIGTSTP to that group) and the shell takes the
+// terminal back; `fg` gives it back and continues it, `bg` continues it in the background.
 
-fn addJob(pid: usize) void {
+const SIGINT = 2;
+const SIGQUIT = 3;
+const SIGCONT = 18;
+const SIGTSTP = 20;
+const SIGTTIN = 21;
+const SIGTTOU = 22;
+const WNOHANG = 1;
+const WUNTRACED = 2;
+const WCONTINUED = 8;
+const TIOCSPGRP = 0x5410;
+
+const Job = struct {
+    number: usize,
+    pgid: usize,
+    /// The last process of the pipeline: its exit status is the job's.
+    last: usize,
+    stopped: bool,
+    label: [96]u8,
+    label_len: usize,
+
+    fn name(j: *const Job) []const u8 {
+        return j.label[0..j.label_len];
+    }
+};
+
+var jobs: [16]?Job = @splat(null);
+/// The shell's own process group, and whether it runs the terminal's jobs (an interactive shell).
+var shell_pgid: usize = 0;
+var job_control = false;
+
+/// Gives the terminal's keyboard to a process group.
+fn giveTerminal(pgid: usize) void {
+    if (job_control) {
+        var group: u32 = @intCast(pgid);
+        _ = sys.syscall3(sys.nr.ioctl, 0, TIOCSPGRP, @intFromPtr(&group));
+    }
+}
+
+fn newJob(pgid: usize, last: usize, label: []const u8) Job {
+    var job = Job{ .number = 0, .pgid = pgid, .last = last, .stopped = false, .label = undefined, .label_len = 0 };
+    const trimmed = std.mem.trim(u8, label, " \t\r\n&");
+    job.label_len = @min(trimmed.len, job.label.len);
+    @memcpy(job.label[0..job.label_len], trimmed[0..job.label_len]);
+    return job;
+}
+
+/// Puts a job in the table under the lowest free number.
+fn addJob(job: Job) ?*Job {
     var number: usize = 1;
     while (true) : (number += 1) {
         for (jobs) |j| {
@@ -423,76 +473,38 @@ fn addJob(pid: usize) void {
     }
     for (&jobs) |*slot| {
         if (slot.* == null) {
-            slot.* = .{ .pid = pid, .number = number };
-            break;
+            slot.* = job;
+            slot.*.?.number = number;
+            return &slot.*.?;
         }
     }
-    rt.err.print("[{d}] {d}\n", .{ number, pid });
+    return null;
 }
 
-/// Collects finished background processes and says which jobs are done (before each prompt).
-fn reapJobs() void {
+/// Waits while a job runs in the foreground: until its processes have all finished (its status
+/// is the last one's) or it's stopped (then it's kept in the table, and 128 + the signal).
+fn waitJob(job: Job) u8 {
+    var status: u8 = 0;
     while (true) {
         var raw: u32 = 0;
-        const r = sys.check(sys.syscall4(sys.nr.wait4, @as(usize, @bitCast(@as(isize, -1))), @intFromPtr(&raw), 1, 0)); // WNOHANG
+        const minus_pgid: usize = @bitCast(-@as(isize, @intCast(job.pgid)));
+        const r = sys.check(sys.syscall4(sys.nr.wait4, minus_pgid, @intFromPtr(&raw), WUNTRACED, 0));
         const pid = switch (r) {
             .ok => |pid| pid,
-            .err => return,
+            .err => |e| if (e == sys.EINTR) continue else break, // ECHILD: all done
         };
-        if (pid == 0) return;
-        for (&jobs) |*slot| {
-            if (slot.*) |j| {
-                if (j.pid == pid) {
-                    rt.err.print("[{d}] Done\n", .{j.number});
-                    slot.* = null;
-                }
+        if (raw & 0xff == 0x7f) {
+            const sig = (raw >> 8) & 0xff;
+            var stopped = job;
+            stopped.stopped = true;
+            const kept = findJob(job.pgid) orelse addJob(stopped);
+            if (kept) |k| {
+                k.stopped = true;
+                rt.err.print("\n[{d}]+  Stopped                 {s}\n", .{ k.number, k.name() });
             }
+            return @intCast(128 + sig);
         }
-    }
-}
-
-fn runPipeline(commands: []Command, background: bool) u8 {
-    // A lone builtin runs in the shell itself, so `cd` and `export` affect the shell.
-    if (commands.len == 1 and commands[0].redirect_count == 0 and !background) {
-        if (commands[0].argc == 0) return 0;
-        if (builtin(&commands[0])) |status| return status;
-    }
-    var pids: [16]usize = undefined;
-    var prev_read: ?i32 = null;
-    for (commands, 0..) |*cmd, i| {
-        var fds: [2]i32 = .{ -1, -1 };
-        const last = i + 1 == commands.len;
-        if (!last) _ = sys.syscall2(293, @intFromPtr(&fds), sys.O_CLOEXEC); // pipe2
-        const pid = sys.syscall0(sys.nr.fork);
-        if (sys.Result.of(pid) == .err) {
-            rt.err.write("kpsh: fork failed\n");
-            return 1;
-        }
-        if (pid == 0) {
-            if (prev_read) |r| _ = sys.syscall2(sys.nr.dup2, @intCast(r), 0);
-            if (!last) _ = sys.syscall2(sys.nr.dup2, @intCast(fds[1]), 1);
-            runInChild(cmd, background);
-        }
-        pids[i] = pid;
-        if (prev_read) |r| sys.close(r);
-        if (!last) {
-            sys.close(fds[1]);
-            prev_read = fds[0];
-        }
-    }
-    if (background) {
-        // The other processes in the pipeline are collected by reapJobs too.
-        addJob(pids[commands.len - 1]);
-        return 0;
-    }
-    var status: u8 = 0;
-    for (pids[0..commands.len], 0..) |pid, i| {
-        var raw: u32 = 0;
-        while (true) {
-            const r = sys.check(sys.syscall4(sys.nr.wait4, pid, @intFromPtr(&raw), 0, 0));
-            if (r == .ok or r.err != sys.EINTR) break;
-        }
-        if (i + 1 < commands.len) continue;
+        if (pid != job.last) continue;
         const sig = raw & 0x7f;
         if (sig == 0) {
             status = @intCast((raw >> 8) & 0xff);
@@ -501,6 +513,158 @@ fn runPipeline(commands: []Command, background: bool) u8 {
             if (describeSignal(sig)) |text| rt.err.print("{s}\n", .{text});
         }
     }
+    forgetJob(job.pgid);
+    return status;
+}
+
+fn findJob(pgid: usize) ?*Job {
+    for (&jobs) |*slot| {
+        if (slot.*) |*j| {
+            if (j.pgid == pgid) return j;
+        }
+    }
+    return null;
+}
+
+fn forgetJob(pgid: usize) void {
+    for (&jobs) |*slot| {
+        if (slot.* != null and slot.*.?.pgid == pgid) slot.* = null;
+    }
+}
+
+/// Says which background jobs finished or stopped (before each prompt), and collects them.
+fn reapJobs() void {
+    while (true) {
+        var raw: u32 = 0;
+        const any: usize = @bitCast(@as(isize, -1));
+        const r = sys.check(sys.syscall4(sys.nr.wait4, any, @intFromPtr(&raw), WNOHANG | WUNTRACED | WCONTINUED, 0));
+        const pid = switch (r) {
+            .ok => |pid| pid,
+            .err => return,
+        };
+        if (pid == 0) return;
+        for (&jobs) |*slot| {
+            const j = &(slot.* orelse continue);
+            if (raw & 0xff == 0x7f) {
+                // Stopped in the background (it read the terminal, or got SIGSTOP).
+                if (j.pgid == pid or j.last == pid) {
+                    if (!j.stopped) rt.err.print("[{d}]+  Stopped                 {s}\n", .{ j.number, j.name() });
+                    j.stopped = true;
+                }
+            } else if (raw == 0xffff) {
+                if (j.pgid == pid or j.last == pid) j.stopped = false;
+            } else if (j.last == pid) {
+                rt.err.print("[{d}]+  Done                    {s}\n", .{ j.number, j.name() });
+                slot.* = null;
+            }
+        }
+    }
+}
+
+/// The job `%n` names, or (with no argument) the most recent one.
+fn pickJob(cmd: *const Command) ?*Job {
+    if (cmd.arg(1)) |spec| {
+        const digits = if (spec.len > 0 and spec[0] == '%') spec[1..] else spec;
+        const number = std.fmt.parseInt(usize, digits, 10) catch {
+            rt.err.print("kpsh: {s}: no such job\n", .{spec});
+            return null;
+        };
+        for (&jobs) |*slot| {
+            if (slot.*) |*j| {
+                if (j.number == number) return j;
+            }
+        }
+        rt.err.print("kpsh: {s}: no such job\n", .{spec});
+        return null;
+    }
+    var newest: ?*Job = null;
+    for (&jobs) |*slot| {
+        if (slot.*) |*j| {
+            if (newest == null or j.number > newest.?.number) newest = j;
+        }
+    }
+    if (newest == null) rt.err.write("kpsh: no current job\n");
+    return newest;
+}
+
+fn continueJob(job: *Job) void {
+    const minus_pgid: usize = @bitCast(-@as(isize, @intCast(job.pgid)));
+    _ = sys.syscall2(sys.nr.kill, minus_pgid, SIGCONT);
+    job.stopped = false;
+}
+
+/// `fg`: the job gets the terminal back, goes on if stopped, and the shell waits for it.
+fn fgJob(cmd: *const Command) u8 {
+    const job = pickJob(cmd) orelse return 1;
+    rt.err.print("{s}\n", .{job.name()});
+    rt.err.flush();
+    const copy = job.*;
+    giveTerminal(copy.pgid);
+    continueJob(job);
+    const status = waitJob(copy);
+    giveTerminal(shell_pgid);
+    return status;
+}
+
+/// `bg`: a stopped job goes on, in the background.
+fn bgJob(cmd: *const Command) u8 {
+    const job = pickJob(cmd) orelse return 1;
+    continueJob(job);
+    rt.err.print("[{d}]+ {s} &\n", .{ job.number, job.name() });
+    return 0;
+}
+
+fn listJobs() u8 {
+    for (jobs) |slot| {
+        const j = slot orelse continue;
+        rt.out.print("[{d}]   {s}                 {s}\n", .{ j.number, if (j.stopped) "Stopped" else "Running", j.name() });
+    }
+    return 0;
+}
+
+fn runPipeline(commands: []Command, in_background: bool, label: []const u8) u8 {
+    // A lone builtin runs in the shell itself, so `cd` and `export` affect the shell.
+    if (commands.len == 1 and commands[0].redirect_count == 0 and !in_background) {
+        if (commands[0].argc == 0) return 0;
+        if (builtin(&commands[0])) |status| return status;
+    }
+    var pgid: usize = 0;
+    var last: usize = 0;
+    var prev_read: ?i32 = null;
+    for (commands, 0..) |*cmd, i| {
+        var fds: [2]i32 = .{ -1, -1 };
+        const is_last = i + 1 == commands.len;
+        if (!is_last) _ = sys.syscall2(293, @intFromPtr(&fds), sys.O_CLOEXEC); // pipe2
+        const pid = sys.syscall0(sys.nr.fork);
+        if (sys.Result.of(pid) == .err) {
+            rt.err.write("kpsh: fork failed\n");
+            return 1;
+        }
+        if (pid == 0) {
+            if (prev_read) |r| _ = sys.syscall2(sys.nr.dup2, @intCast(r), 0);
+            if (!is_last) _ = sys.syscall2(sys.nr.dup2, @intCast(fds[1]), 1);
+            runInChild(cmd, in_background, pgid);
+        }
+        // The first process starts the job's group; the shell sets it too, so it's in place
+        // whichever of the two runs first.
+        if (pgid == 0) pgid = pid;
+        _ = sys.syscall2(sys.nr.setpgid, pid, pgid);
+        if (i == 0 and !in_background) giveTerminal(pgid);
+        last = pid;
+        if (prev_read) |r| sys.close(r);
+        if (!is_last) {
+            sys.close(fds[1]);
+            prev_read = fds[0];
+        }
+    }
+    const job = newJob(pgid, last, label);
+    if (in_background) {
+        // The other processes in the pipeline are collected by reapJobs too.
+        if (addJob(job)) |j| rt.err.print("[{d}] {d}\n", .{ j.number, last });
+        return 0;
+    }
+    const status = waitJob(job);
+    giveTerminal(shell_pgid);
     return status;
 }
 
@@ -513,6 +677,9 @@ const help_text =
     \\  export NAME=value set an environment variable
     \\  unset NAME        remove one
     \\  env               list them
+    \\  jobs              list jobs (Ctrl+Z stops the one running; & starts one in the background)
+    \\  fg [%n]           bring a job back to the foreground
+    \\  bg [%n]           let a stopped job go on in the background
     \\  exit [code]       leave the shell
     \\  help              this text
     \\Everything else runs as a program from $PATH. Supported syntax:
@@ -524,6 +691,9 @@ const help_text =
 /// Runs a builtin; returns null when `cmd` isn't one.
 fn builtin(cmd: *const Command) ?u8 {
     const name = cmd.arg(0) orelse return null;
+    if (eql(u8, name, "jobs")) return listJobs();
+    if (eql(u8, name, "fg")) return fgJob(cmd);
+    if (eql(u8, name, "bg")) return bgJob(cmd);
     if (eql(u8, name, "cd")) {
         var target = cmd.arg(1) orelse (getVar("HOME") orelse "/");
         var old_buf: [512]u8 = undefined;
@@ -645,7 +815,7 @@ fn runPart(part: []const u8, commands: *[16]Command, background: bool) void {
         last_status = 2;
         return;
     };
-    last_status = runPipeline(commands[0..n], background);
+    last_status = runPipeline(commands[0..n], background, part);
     rt.out.flush();
     rt.err.flush();
 }
@@ -727,9 +897,17 @@ pub fn main(args: rt.Args) u8 {
         }
     }
 
-    // The shell itself ignores Ctrl+C and Ctrl+\; the programs it starts don't.
-    setSignal(2, 1);
-    setSignal(3, 1);
+    // The shell itself ignores Ctrl+C, Ctrl+\ and Ctrl+Z; the programs it starts don't. On a
+    // terminal it runs jobs: it leads a process group of its own, and gives the terminal to each
+    // job it runs in the foreground (and takes it back).
+    for ([_]usize{ SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU }) |sig| setSignal(sig, 1);
+    var termios: [60]u8 = undefined;
+    if (sys.Result.of(sys.syscall3(sys.nr.ioctl, 0, 0x5401, @intFromPtr(&termios))) == .ok) { // TCGETS: a terminal
+        _ = sys.syscall2(sys.nr.setpgid, 0, 0);
+        shell_pgid = sys.syscall0(sys.nr.getpid);
+        job_control = true;
+        giveTerminal(shell_pgid);
+    }
     var buf: [512]u8 = undefined;
     setVar("PWD", cwd(&buf));
 

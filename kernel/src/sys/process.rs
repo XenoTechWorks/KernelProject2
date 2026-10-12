@@ -92,7 +92,16 @@ pub fn execve(frame: &mut TrapFrame, dirfd: i32, path_ptr: u64, argv: u64, envp:
 
 pub fn wait4(pid: i64, status_ptr: u64, options: u32) -> SysResult {
     const WNOHANG: u32 = 1;
-    match proc::wait(pid, options & WNOHANG != 0, false)? {
+    const WUNTRACED: u32 = 2;
+    const WCONTINUED: u32 = 8;
+    let want = proc::WaitFor {
+        exited: true,
+        stopped: options & WUNTRACED != 0,
+        continued: options & WCONTINUED != 0,
+        nohang: options & WNOHANG != 0,
+        keep: false,
+    };
+    match proc::wait(pid, want)? {
         Some((pid, status, _)) => {
             if status_ptr != 0 {
                 user::write_struct(proc::current().space(), status_ptr, &status)?;
@@ -111,10 +120,12 @@ pub fn waitid(idtype: u32, id: u64, info_at: u64, options: u32) -> SysResult {
     const P_PGID: u32 = 2;
     const P_PIDFD: u32 = 3;
     const WNOHANG: u32 = 1;
+    const WSTOPPED: u32 = 2;
     const WEXITED: u32 = 4;
+    const WCONTINUED: u32 = 8;
     const WNOWAIT: u32 = 0x0100_0000;
-    if options & WEXITED == 0 {
-        return Err(EINVAL); // only ended children are reported (no stop/continue events)
+    if options & (WEXITED | WSTOPPED | WCONTINUED) == 0 {
+        return Err(EINVAL);
     }
     let target = match idtype {
         P_ALL => -1,
@@ -124,7 +135,14 @@ pub fn waitid(idtype: u32, id: u64, info_at: u64, options: u32) -> SysResult {
         P_PIDFD => super::pidfd::pid_of(id as i32)? as i64,
         _ => return Err(EINVAL),
     };
-    let found = proc::wait(target, options & WNOHANG != 0, options & WNOWAIT != 0)?;
+    let want = proc::WaitFor {
+        exited: options & WEXITED != 0,
+        stopped: options & WSTOPPED != 0,
+        continued: options & WCONTINUED != 0,
+        nohang: options & WNOHANG != 0,
+        keep: options & WNOWAIT != 0,
+    };
+    let found = proc::wait(target, want)?;
     if info_at != 0 {
         // Nothing yet (WNOHANG): a zeroed siginfo, as Linux leaves it.
         let info = match found {
