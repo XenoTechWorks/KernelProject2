@@ -8,6 +8,10 @@
 //!
 //! Paths are resolved as text: the current directory is an absolute path, and "." / ".." / symlinks
 //! are worked out before walking the tree.
+//!
+//! A process may have a root of its own (chroot): the paths it gives are inside it ("/" is its
+//! root, and ".." stops there), and the kernel keeps every path as it is in the whole tree,
+//! turning them around at the edges (`rooted`, `unrooted`).
 
 pub mod cpio;
 pub mod eventfd;
@@ -458,6 +462,32 @@ pub fn root() -> &'static Arc<Node> {
 }
 
 /// Joins `path` onto `base` (an absolute directory) and removes "." and "..".
+/// The root directory of the process running now: "/", or where it was chroot()ed.
+pub fn current_root() -> String {
+    crate::proc::current_root()
+}
+
+/// A path as a process with root `root` sees it, to the path in the whole tree.
+pub fn rooted(root: &str, path: &str) -> String {
+    let inside = normalize("/", path);
+    match (root, inside.as_str()) {
+        ("/", _) => inside,
+        (_, "/") => String::from(root),
+        _ => String::from(root) + &inside,
+    }
+}
+
+/// A path in the whole tree, as a process with root `root` sees it; None if it's outside.
+pub fn unrooted(root: &str, path: &str) -> Option<String> {
+    if root == "/" {
+        return Some(String::from(path));
+    }
+    if path == root {
+        return Some(String::from("/"));
+    }
+    path.strip_prefix(root).filter(|rest| rest.starts_with('/')).map(String::from)
+}
+
 pub fn normalize(base: &str, path: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     let base = if path.starts_with('/') { "" } else { base };
@@ -503,7 +533,13 @@ fn lookup_depth(path: &str, follow: bool, depth: u32) -> Result<Arc<Node>, Errno
         if next.kind_of() == Type::Symlink && (!last || follow) {
             let target = next.readlink()?;
             let here = String::from("/") + &parts[..i].join("/");
-            let mut rest = normalize(&here, &target);
+            // Inside a chroot, a link is followed as it would be from in there: an absolute
+            // target starts at the root, and ".." stops at it.
+            let root = current_root();
+            let mut rest = match unrooted(&root, &here) {
+                Some(inside) => rooted(&root, &normalize(&inside, &target)),
+                None => normalize(&here, &target),
+            };
             for p in &parts[i + 1..] {
                 rest.push('/');
                 rest.push_str(p);

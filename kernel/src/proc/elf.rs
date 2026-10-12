@@ -181,7 +181,7 @@ fn load_depth(path: &str, args: &[String], env: &[String], depth: u32) -> Result
         }
         new_args.push(String::from(path));
         new_args.extend(args.iter().skip(1).cloned());
-        return load_depth(interp, &new_args, env, depth + 1);
+        return load_depth(&fs::rooted(&fs::current_root(), interp), &new_args, env, depth + 1);
     }
 
     let mut space = AddressSpace::new().ok_or(ENOMEM)?;
@@ -189,7 +189,7 @@ fn load_depth(path: &str, args: &[String], env: &[String], depth: u32) -> Result
     let mut entry = program.entry;
     let mut interp_base = 0;
     if let Some(interp_path) = &program.interp {
-        let interp_node = fs::lookup(interp_path, true).map_err(|_| ENOENT)?;
+        let interp_node = fs::lookup(&fs::rooted(&fs::current_root(), interp_path), true).map_err(|_| ENOENT)?;
         if interp_node.kind_of() != Type::File {
             return Err(ENOEXEC);
         }

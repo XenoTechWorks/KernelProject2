@@ -177,8 +177,19 @@ ssh-add                          # hand it your key
 `tests/ssh.py` runs an SSH server on the build machine (Ubuntu's `sshd`, as you, on a spare port)
 and does all of the above against it, an interactive login included. `/usr/bin` is the same
 folder as `/bin`, as on today's Linux distributions, since `scp` starts `/usr/bin/ssh` by that
-name. An SSH server inside KernelProject2 needs `chroot` next (OpenSSH shuts its unprivileged
-half away in an empty folder).
+name.
+
+Ubuntu's SSH server runs inside too, so you can log in to KernelProject2 from outside. Its
+unprivileged half is shut away in `/run/sshd` with `chroot`, which works as on Linux (`jail-test`).
+
+```sh
+ssh-keygen -A            # this machine's host keys (once a boot)
+/usr/sbin/sshd           # listens on port 22; run.sh can forward one to it with hostfwd
+```
+
+Running a command (`ssh root@... uname -a`) and `scp` work, with a key in
+`/root/.ssh/authorized_keys`. An interactive login doesn't yet: the shell starts on its
+pseudo-terminal and runs what's typed, but sshd doesn't pass its output back. That's next.
 
 ## Trying other programs
 
@@ -388,7 +399,7 @@ disk/            what a new disk starts with (out/disk.img is made from it once)
 tests/           test programs (C, and Windows ones in windows/) and the test scripts:
                  smoke.py, persist.py, windows.py, edit.py, textedit.py, archive.py,
                  pkg.py, accounts.py, net.py, tcp.py, ssh.py, terminals.py, doom.py,
-                 session.sh; events.c is events-test and ptys.c pty-test
+                 session.sh; events.c is events-test, ptys.c pty-test, jail.c jail-test
 ```
 
 ## Building and running
@@ -425,8 +436,8 @@ python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
 
 Roughly in order; each step is checked by running a real program.
 
-1. **More of Linux for real tools**: `chroot` (for an SSH server inside), `timerfd` and `pidfd`,
-   and signal masks in `ppoll`/`epoll_pwait`.
+1. **More of Linux for real tools**: interactive logins through the SSH server inside, `timerfd`
+   and `pidfd`, and signal masks in `ppoll`/`epoll_pwait`.
 2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
    archive), interrupt-driven I/O, and AHCI for real PCs.
 3. **Run the targets**: fastfetch and git run; next then coreutils as a compatibility test.

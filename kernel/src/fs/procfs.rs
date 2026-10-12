@@ -18,6 +18,12 @@ fn link(target: impl Into<String>) -> Arc<Node> {
     Node::new(Kind::Symlink(target.into()), 0o777)
 }
 
+/// A link to a file, by its path as the process looking sees it (inside its chroot).
+fn path_link(path: &str) -> Arc<Node> {
+    let root = super::current_root();
+    link(super::unrooted(&root, path).unwrap_or_else(|| String::from(path)))
+}
+
 fn dir(entries: Vec<(String, Arc<Node>)>) -> Arc<Node> {
     let node = Node::new(Kind::Dir(Mutex::new(BTreeMap::new())), 0o555);
     if let Kind::Dir(map) = &node.kind {
@@ -130,7 +136,7 @@ fn process_dir(p: &proc::Process) -> Arc<Node> {
     );
     let fds = p
         .files().fds.iter()
-        .map(|(n, file)| (n.to_string(), link(file.path.clone())))
+        .map(|(n, file)| (n.to_string(), if file.path.starts_with('/') { path_link(&file.path) } else { link(file.path.clone()) }))
         .collect();
     dir(alloc::vec![
         ("stat".into(), file(stat)),
@@ -140,9 +146,9 @@ fn process_dir(p: &proc::Process) -> Arc<Node> {
         ("environ".into(), file(Vec::new())),
         ("maps".into(), file(Vec::new())),
         ("mounts".into(), file(mounts())),
-        ("exe".into(), link(p.exe.clone())),
-        ("cwd".into(), link(p.files().cwd.clone())),
-        ("root".into(), link("/")),
+        ("exe".into(), path_link(&p.exe)),
+        ("cwd".into(), path_link(&p.files().cwd)),
+        ("root".into(), path_link(&p.files().root)),
         ("fd".into(), dir(fds)),
     ])
 }

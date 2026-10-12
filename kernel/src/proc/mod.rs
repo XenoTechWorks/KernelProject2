@@ -98,6 +98,8 @@ pub struct Memory {
 pub struct Files {
     pub fds: FdTable,
     pub cwd: String,
+    /// The root directory (chroot), as a path in the whole tree.
+    pub root: String,
     pub umask: u32,
 }
 
@@ -242,6 +244,14 @@ fn cmdline_of(args: &[String]) -> Vec<u8> {
 }
 
 /// The running task's process id, if a task is running.
+/// The running process's root directory, or "/" outside any process (at boot).
+pub fn current_root() -> String {
+    match sched().current.and_then(get) {
+        Some(p) => p.files().root.clone(),
+        None => String::from("/"),
+    }
+}
+
 pub fn current_pid() -> Option<u32> {
     sched().current.and_then(get).map(|p| p.tgid)
 }
@@ -364,7 +374,7 @@ pub fn spawn_init(path: &str) -> Result<(), Errno> {
     let env = alloc::vec![String::from("PATH=/bin:/usr/bin"), String::from("HOME=/root"), String::from("TERM=linux")];
     let mut image = Some(elf::load(path, &args, &env)?);
     let (entry, stack) = image.as_ref().map(|i| (i.entry, i.stack)).unwrap();
-    let files = Shared::new(Files { fds, cwd: String::from("/"), umask: 0o022 });
+    let files = Shared::new(Files { fds, cwd: String::from("/"), root: String::from("/"), umask: 0o022 });
     let mut p = new_task(1, memory_of(&mut image), files, Shared::new([SigAction::default(); 65]));
     s.next_pid = 2;
     p.name = elf::short_name(path);
@@ -515,7 +525,7 @@ fn finish_process(status: i32) -> ! {
     }
     // Drop this task's hold on memory and files. Shared with no one else, they're freed now; a vfork
     // parent keeps the memory it lent.
-    p.files = Shared::new(Files { fds: FdTable::default(), cwd: String::from("/"), umask: 0o022 });
+    p.files = Shared::new(Files { fds: FdTable::default(), cwd: String::from("/"), root: String::from("/"), umask: 0o022 });
     p.mem = Shared::new(Memory { space: None, brk_start: 0, brk: 0, mmap_next: MMAP_TOP });
     p.vfork_parent = None;
     let tgid = p.tgid;
@@ -573,7 +583,7 @@ pub fn fork(frame: &TrapFrame, flags: u64, new_sp: u64, parent_tid: u64, child_t
         parent.files.clone()
     } else {
         let f = parent.files();
-        Shared::new(Files { fds: f.fds.clone(), cwd: f.cwd.clone(), umask: f.umask })
+        Shared::new(Files { fds: f.fds.clone(), cwd: f.cwd.clone(), root: f.root.clone(), umask: f.umask })
     };
     let handlers = if flags & CLONE_SIGHAND != 0 { parent.handlers.clone() } else { Shared::new(*parent.handlers()) };
 
@@ -670,7 +680,7 @@ pub fn exec(frame: &mut TrapFrame, path: &str, args: &[String], env: &[String]) 
     let f = p.files();
     let mut fds = f.fds.clone();
     fds.close_on_exec();
-    p.files = Shared::new(Files { fds, cwd: f.cwd.clone(), umask: f.umask });
+    p.files = Shared::new(Files { fds, cwd: f.cwd.clone(), root: f.root.clone(), umask: f.umask });
     let mut handlers = *p.handlers();
     for action in handlers.iter_mut() {
         if action.handler != signal::SIG_IGN {

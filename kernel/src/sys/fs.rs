@@ -37,11 +37,17 @@ pub fn resolve_str(dirfd: i32, path: &str) -> Result<String, Errno> {
     if path.is_empty() {
         return Err(ENOENT);
     }
+    let root = p.files().root.clone();
     if path.starts_with('/') {
-        return Ok(fs::normalize("/", path));
+        return Ok(fs::rooted(&root, path));
     }
     let base = if dirfd == AT_FDCWD { p.files().cwd.clone() } else { p.files().fds.get(dirfd)?.path.clone() };
-    Ok(fs::normalize(&base, path))
+    // Relative to a directory inside the root, ".." stops at the root; from one outside it (the
+    // current directory, if chroot didn't move it) the path is taken as it is, as on Linux.
+    Ok(match fs::unrooted(&root, &base) {
+        Some(inside) => fs::rooted(&root, &fs::normalize(&inside, path)),
+        None => fs::normalize(&base, path),
+    })
 }
 
 fn readable(file: &OpenFile) -> bool {
@@ -861,13 +867,28 @@ pub fn fcntl(fd: i32, cmd: u32, arg: u64) -> SysResult {
 
 pub fn getcwd(buf: u64, size: usize) -> SysResult {
     let p = proc::current();
-    let mut cwd = p.files().cwd.clone().into_bytes();
+    // As the process sees it; Linux marks a current directory outside the root "(unreachable)".
+    let cwd = &p.files().cwd;
+    let mut cwd = fs::unrooted(&p.files().root, cwd).unwrap_or_else(|| String::from("(unreachable)") + cwd).into_bytes();
     cwd.push(0);
     if cwd.len() > size {
         return Err(ERANGE);
     }
     user::write(p.space(), buf, &cwd)?;
     Ok(cwd.len() as u64)
+}
+
+/// chroot: from now on, "/" is this directory for the calling process and its children. Root only.
+pub fn chroot(path_ptr: u64) -> SysResult {
+    if !proc::current().creds.is_root() {
+        return Err(EPERM);
+    }
+    let path = resolve(AT_FDCWD, path_ptr)?;
+    if !fs::lookup(&path, true)?.is_dir() {
+        return Err(ENOTDIR);
+    }
+    proc::current().files().root = path;
+    Ok(0)
 }
 
 pub fn chdir(path_ptr: u64) -> SysResult {

@@ -150,6 +150,7 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         157 => Ok(0), // prctl: accept and ignore (PR_SET_NAME etc.)
         158 => process::arch_prctl(a[0] as u32, a[1]),
         160 => Ok(0), // setrlimit
+        161 => fs::chroot(a[0]),
         173 => Err(EPERM), // ioperm: no direct hardware ports for programs (Doom asks, for AdLib music)
         186 => Ok(crate::proc::current().pid as u64), // gettid
         200 => process::tkill(a[0] as u32, a[1] as usize),

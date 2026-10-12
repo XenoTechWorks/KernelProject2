@@ -62,6 +62,7 @@ gcc -O2 -o "$stage/bin/signal-test" "$root/tests/signals.c"
 gcc -O2 -pthread -o "$stage/bin/thread-test" "$root/tests/threads.c"
 gcc -O2 -Wno-unused-result -o "$stage/bin/events-test" "$root/tests/events.c"
 gcc -O2 -Wno-unused-result -o "$stage/bin/pty-test" "$root/tests/ptys.c"
+gcc -O2 -Wno-unused-result -o "$stage/bin/jail-test" "$root/tests/jail.c"
 
 step "Windows layer (winload) and Windows test programs"
 g++ -std=c++20 -O2 -static -fno-exceptions -fno-rtti -Wall -Wextra -o "$stage/bin/winload" "$root"/windows/src/*.cpp
@@ -111,6 +112,26 @@ if [[ -x /usr/bin/ssh ]]; then
         add_host_program "/usr/bin/$program"
     done
 fi
+
+# OpenSSH's server from Ubuntu, so this machine can be logged in to. If the build machine has no
+# sshd, the openssh-server package (and libwrap, the one library it adds) is downloaded and
+# unpacked into the cache, not installed. Its unprivileged half is shut away in /run/sshd.
+step "OpenSSH server (sshd)"
+sshd_bin=/usr/sbin/sshd
+if [[ ! -x "$sshd_bin" ]]; then
+    sshd_cache="$HOME/.cache/kernelproject2/sshd"
+    if [[ ! -x "$sshd_cache/root/usr/sbin/sshd" || ! -e "$sshd_cache/root/usr/lib/x86_64-linux-gnu/libwrap.so.0" ]]; then
+        mkdir -p "$sshd_cache"
+        (cd "$sshd_cache" && apt-get download openssh-server libwrap0 >/dev/null)
+        for deb in "$sshd_cache"/*.deb; do dpkg-deb -x "$deb" "$sshd_cache/root"; done
+    fi
+    sshd_bin="$sshd_cache/root/usr/sbin/sshd"
+    cp -L "$sshd_cache"/root/usr/lib/x86_64-linux-gnu/libwrap.so.0 "$stage/lib/x86_64-linux-gnu/"
+fi
+add_host_program "$sshd_bin"
+mv "$stage/bin/sshd" "$stage/sbin/sshd"
+mkdir -p "$stage/run/sshd"
+chmod 755 "$stage/run/sshd"
 
 # Programs that run others in a pseudo-terminal: script (records a session) and tmux. With them,
 # the terminfo entries that tell full-screen programs how to drive the console (linux) and the

@@ -44,6 +44,8 @@ const SO_ERROR: u32 = 4;
 const SO_SNDBUF: u32 = 7;
 const SO_RCVBUF: u32 = 8;
 const SO_PEERCRED: u32 = 17;
+const IPPROTO_IP: u32 = 0;
+const IP_OPTIONS: u32 = 4;
 
 /// Linux's `struct sockaddr_in`: family, port and address, the last two in network order.
 #[derive(Clone, Copy, Default)]
@@ -155,7 +157,8 @@ fn write_unix_addr(at: u64, len_at: u64, name: Option<&Name>) -> Result<(), Errn
     let mut raw = (AF_UNIX as u16).to_le_bytes().to_vec();
     match name {
         Some(Name::Path(path, _)) => {
-            raw.extend(path.as_bytes());
+            let root = fs::current_root();
+            raw.extend(fs::unrooted(&root, path).as_deref().unwrap_or(path).as_bytes());
             raw.push(0);
         }
         Some(Name::Abstract(bytes)) => {
@@ -752,6 +755,8 @@ pub fn getsockopt(fd: i32, level: u32, name: u32, out: u64, len_at: u64) -> SysR
             };
             [cred.pid, cred.uid, cred.gid].iter().flat_map(|v| v.to_le_bytes()).collect()
         }
+        // No IP options come with our packets (sshd refuses connections that have any).
+        (IPPROTO_IP, IP_OPTIONS) => Vec::new(),
         _ => int(0),
     };
     let p = proc::current();

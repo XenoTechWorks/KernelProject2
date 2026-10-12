@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""SSH, with Ubuntu's own OpenSSH client inside the guest, against an SSH server on this machine:
-a key made with ssh-keygen, a command run on the server, an interactive login (the terminal in
-raw mode, typing going one way and the remote shell's output the other), files copied both ways
-with scp, and ssh-agent holding the key (over a Unix socket).
+"""SSH both ways, with Ubuntu's own OpenSSH.
 
-The server is Ubuntu's sshd, run as you, on a spare port, with its own keys and settings in a
-temporary folder. If this machine has no sshd, the openssh-server package is downloaded and
-unpacked into ~/.cache/kernelproject2/sshd (nothing is installed).
+Out of the guest, its client against an SSH server on this machine: a key made with ssh-keygen,
+a command run on the server, an interactive login (the terminal in raw mode, typing going one
+way and the remote shell's output the other), files copied both ways with scp, and ssh-agent
+holding the key (over a Unix socket). The server is Ubuntu's sshd, run as you, on a spare port,
+with its own keys and settings in a temporary folder. If this machine has no sshd, the
+openssh-server package is downloaded and unpacked into ~/.cache/kernelproject2/sshd (nothing is
+installed).
+
+Into the guest, sshd running inside it (its unprivileged half in a chroot), from this machine's
+ssh through a forwarded port: a command, and scp. (An interactive login doesn't work yet: the
+shell runs, but its output doesn't come back.)
 
     python3 tests/ssh.py
 """
@@ -95,8 +100,9 @@ if server.poll() is not None:
 
 # QEMU's user network shows this machine to the guest as 10.0.2.2.
 target = f"-p {port} {user}@10.0.2.2"
+inward = free_port()
 try:
-    with Machine() as m:
+    with Machine(forward=[(inward, 22)]) as m:
         out = m.run('ssh-keygen -q -t ed25519 -N "" -f /root/.ssh/id_ed25519', timeout=60)
         key = m.run("cat /root/.ssh/id_ed25519.pub") or ""
         check("ssh-keygen makes a key pair", key.startswith("ssh-ed25519 "), (out, key))
@@ -142,6 +148,22 @@ try:
         m.run("mv /root/.ssh/id_ed25519 /root/.ssh/away")
         out = m.run(f"ssh -o IdentitiesOnly=no {target} echo through the agent", timeout=60) or ""
         check("ssh logs in with the agent's key", "through the agent" in out, out)
+
+        # The other way round: sshd inside, logged in to from here.
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", f"{work}/guest_key"], check=True)
+        m.run("ssh-keygen -A", timeout=120)
+        m.run(f"echo '{open(f'{work}/guest_key.pub').read().strip()}' > /root/.ssh/authorized_keys")
+        m.run("/usr/sbin/sshd", timeout=30)
+        options = ["-i", f"{work}/guest_key", "-o", "StrictHostKeyChecking=no", "-o", f"UserKnownHostsFile={work}/known",
+                   "-o", "ConnectTimeout=30", "-o", "IdentitiesOnly=yes"]
+        into = ["ssh", "-p", str(inward)] + options + ["root@127.0.0.1"]
+        r = subprocess.run(into + ["uname -n"], capture_output=True, text=True, timeout=120)
+        check("sshd inside: a command run from this machine", r.stdout.strip() == "kernelproject2", r.stderr[-400:])
+        open(f"{work}/to-sshd", "w").write(payload)
+        r = subprocess.run(["scp", "-P", str(inward)] + options + [f"{work}/to-sshd", "root@127.0.0.1:/tmp/from-host"],
+                           capture_output=True, text=True, timeout=120)
+        got = m.run("cat /tmp/from-host") or ""
+        check("...and scp into it", "line 1999" in got, (r.stderr[-400:], got[-200:]))
 finally:
     server.terminate()
     server.wait()

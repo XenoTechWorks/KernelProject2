@@ -1,0 +1,15 @@
+# KernelProject2's SSH server (Ubuntu's sshd). Start it with:
+#     ssh-keygen -A          (once a boot: makes this machine's host keys)
+#     /usr/sbin/sshd
+# Log in with a key in ~/.ssh/authorized_keys, or as a user with a password (passwd).
+
+Port 22
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_rsa_key
+PermitRootLogin prohibit-password
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+UsePAM no
+PrintMotd no
+Subsystem sftp internal-sftp

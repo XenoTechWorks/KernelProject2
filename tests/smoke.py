@@ -30,6 +30,7 @@ CHECKS = [
     ("thread-test", "threads: 6/6 passed"),
     ("events-test", "events: 34/34 passed"),
     ("pty-test", "ptys: 14/14 passed"),
+    ("jail-test", "jail: 5/5 passed"),
     ("hello.exe one", "Hello from Windows! 2 argument(s)"),
     ("winapi.exe", "winapi: 9/9 passed"),
     ("winapi.exe > /dev/null; echo windows exit $?", "windows exit 0"),
