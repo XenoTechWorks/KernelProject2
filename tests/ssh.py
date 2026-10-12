@@ -10,8 +10,7 @@ openssh-server package is downloaded and unpacked into ~/.cache/kernelproject2/s
 installed).
 
 Into the guest, sshd running inside it (its unprivileged half in a chroot), from this machine's
-ssh through a forwarded port: a command, and scp. (An interactive login doesn't work yet: the
-shell runs, but its output doesn't come back.)
+ssh through a forwarded port: a command, an interactive login on a pseudo-terminal, and scp.
 
     python3 tests/ssh.py
 """
@@ -159,6 +158,10 @@ try:
         into = ["ssh", "-p", str(inward)] + options + ["root@127.0.0.1"]
         r = subprocess.run(into + ["uname -n"], capture_output=True, text=True, timeout=120)
         check("sshd inside: a command run from this machine", r.stdout.strip() == "kernelproject2", r.stderr[-400:])
+        r = subprocess.run(into[:1] + ["-tt"] + into[1:], input="echo $TERM in a terminal\nexit\n", capture_output=True,
+                           text=True, timeout=120, env=dict(os.environ, TERM="xterm-256color"))
+        check("...an interactive login, on a pseudo-terminal", "xterm-256color in a terminal" in r.stdout,
+              (r.stdout[-400:], r.stderr[-400:]))
         open(f"{work}/to-sshd", "w").write(payload)
         r = subprocess.run(["scp", "-P", str(inward)] + options + [f"{work}/to-sshd", "root@127.0.0.1:/tmp/from-host"],
                            capture_output=True, text=True, timeout=120)

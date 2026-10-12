@@ -62,6 +62,14 @@ pub fn open_inside(index: u32) -> Result<Arc<Tty>, Errno> {
     Ok(tty)
 }
 
+/// The inside is opened another way (as /dev/tty, the controlling terminal): count it, since its
+/// closing counts too.
+pub fn inside_reopened(tty: &Tty) {
+    let p = pty(tty);
+    p.opens.fetch_add(1, Ordering::Relaxed);
+    p.opened.store(true, Ordering::Relaxed);
+}
+
 pub fn inside_closed(tty: &Tty) {
     pty(tty).opens.fetch_sub(1, Ordering::Relaxed);
     crate::proc::wake_all();

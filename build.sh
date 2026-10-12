@@ -130,8 +130,8 @@ if [[ ! -x "$sshd_bin" ]]; then
 fi
 add_host_program "$sshd_bin"
 mv "$stage/bin/sshd" "$stage/sbin/sshd"
-mkdir -p "$stage/run/sshd"
-chmod 755 "$stage/run/sshd"
+mkdir -p "$stage/run/sshd" "$stage/var/log"
+chmod 755 "$stage/run/sshd" "$stage/var/log"
 
 # Programs that run others in a pseudo-terminal: script (records a session) and tmux. With them,
 # the terminfo entries that tell full-screen programs how to drive the console (linux) and the

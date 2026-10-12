@@ -152,6 +152,24 @@ int main(void) {
     check("when the inside closes, the outside reads EIO", read(master, buf, 1) < 0 && errno == EIO);
     close(master);
 
+    /* Opening and closing /dev/tty (as sshd does, to check) leaves the terminal working. */
+    master = new_pty(name);
+    child = fork();
+    if (child == 0) {
+        close(master);
+        setsid();
+        int fd = open(name, O_RDWR);
+        close(open("/dev/tty", O_RDWR));
+        write(fd, "still here\n", 11);
+        read(sync[0], ok, 1); /* until the parent has read it */
+        _exit(0);
+    }
+    n = read_some(master, buf, sizeof buf);
+    write(sync[1], "k", 1);
+    waitpid(child, &status, 0);
+    check("opening and closing /dev/tty inside doesn't cut the terminal off", n > 0 && strstr(buf, "still here"));
+    close(master);
+
     /* forkpty: the usual way to run a program in a terminal. */
     child = forkpty(&master, NULL, NULL, &ws);
     if (child == 0) {

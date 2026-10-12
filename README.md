@@ -187,9 +187,8 @@ ssh-keygen -A            # this machine's host keys (once a boot)
 /usr/sbin/sshd           # listens on port 22; run.sh can forward one to it with hostfwd
 ```
 
-Running a command (`ssh root@... uname -a`) and `scp` work, with a key in
-`/root/.ssh/authorized_keys`. An interactive login doesn't yet: the shell starts on its
-pseudo-terminal and runs what's typed, but sshd doesn't pass its output back. That's next.
+Log in with a key in `/root/.ssh/authorized_keys`: an interactive shell (on a pseudo-terminal),
+a command (`ssh root@... uname -a`), or `scp`.
 
 ## Trying other programs
 
@@ -436,8 +435,8 @@ python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
 
 Roughly in order; each step is checked by running a real program.
 
-1. **More of Linux for real tools**: interactive logins through the SSH server inside, `timerfd`
-   and `pidfd`, and signal masks in `ppoll`/`epoll_pwait`.
+1. **More of Linux for real tools**: `timerfd` and `pidfd`, and signal masks in
+   `ppoll`/`epoll_pwait`.
 2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
    archive), interrupt-driven I/O, and AHCI for real PCs.
 3. **Run the targets**: fastfetch and git run; next then coreutils as a compatibility test.

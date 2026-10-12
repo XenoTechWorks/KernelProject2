@@ -355,7 +355,13 @@ pub fn open_path(path: &str, flags: u32, mode: u32) -> SysResult {
         _ if flags & O_PATH != 0 => Handle::Node(node),
         Type::Device(Device::Window) => Handle::Window(crate::console::open_window().ok_or(ENXIO)?),
         Type::Device(Device::Console) => Handle::Tty(crate::tty::console(), node),
-        Type::Device(Device::Tty) => Handle::Tty(p.ctty.clone().ok_or(ENXIO)?, node),
+        Type::Device(Device::Tty) => {
+            let tty = p.ctty.clone().ok_or(ENXIO)?;
+            if !tty.is_console() {
+                crate::pty::inside_reopened(&tty);
+            }
+            Handle::Tty(tty, node)
+        }
         Type::Device(Device::Ptmx) => Handle::PtyMaster(crate::pty::open_master()?),
         Type::Device(Device::Pts(n)) => {
             let inside = crate::pty::open_inside(n)?;
