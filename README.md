@@ -1,5 +1,7 @@
 # KernelProject2
 
+The second iteration of the Kernel Project series.
+
 A kernel in the Linux/POSIX style whose goal is to run Linux programs (fastfetch, git, ...) as they are,
 without porting, and later Windows programs too.
 
