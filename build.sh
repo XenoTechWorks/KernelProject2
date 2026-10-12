@@ -26,7 +26,7 @@ mkdir -p "$stage/bin" "$stage/sbin" "$out"
 cp -r "$root/rootfs/." "$stage/"
 find "$stage" -type d -exec chmod 755 {} +
 find "$stage" -type f -exec chmod 644 {} +
-for program in init kpsh ls cat echo uname fileops kpfetch clock textclock widgets calc files edit textedit eyes gzip tar zip pkg users ping ifconfig host; do
+for program in init kpsh ls cat echo uname fileops kpfetch clock textclock widgets calc files edit textedit eyes gzip tar zip pkg users ping ifconfig host nc; do
     dest="$stage/bin/$program"
     [[ $program == init ]] && dest="$stage/sbin/init"
     "$zig" build-exe "$root/user/src/$program.zig" -target x86_64-linux-none -O ${ZIG_MODE:-ReleaseSmall} -fstrip \
@@ -90,6 +90,12 @@ add_host_program /usr/bin/git
 mkdir -p "$stage/usr/share/git-core"
 cp -r /usr/share/git-core/templates "$stage/usr/share/git-core/"
 
+# curl straight from Ubuntu too: HTTP over our TCP, HTTPS through its own OpenSSL.
+if [[ -x /usr/bin/curl ]]; then
+    step "curl (/usr/bin/curl)"
+    add_host_program /usr/bin/curl
+fi
+
 # Anything else you want to try, by name or path, as in:
 #     EXTRA_PROGRAMS="jq bc sed" ./build.sh
 # Each is copied in with the shared libraries it needs. A good way to find out whether a program
@@ -143,6 +149,13 @@ CONTROL
     mkdir -p "$stage/usr/share/examples"
     dpkg-deb --build -Zgzip "$pkgdir" "$stage/usr/share/examples/hello_1.0_all.deb" >/dev/null
     rm -rf "$pkgdir"
+fi
+
+step "certificates"
+# The certificate authorities HTTPS checks servers against (what curl and OpenSSL look for).
+if [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
+    mkdir -p "$stage/etc/ssl/certs"
+    cp /etc/ssl/certs/ca-certificates.crt "$stage/etc/ssl/certs/"
 fi
 
 step "fonts"

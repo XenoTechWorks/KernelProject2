@@ -108,31 +108,39 @@ cat /dev/clipboard               # what a window copied
 
 ## Networking
 
-There's a network card and the beginnings of a stack: Ethernet, ARP, IPv4, ICMP and UDP.
+There's a network card and a stack: Ethernet, ARP, IPv4, ICMP, UDP and TCP.
 
 ```sh
-ifconfig                 # the card, its address, the gateway
-ping -c 3 10.0.2.2       # ARP for the gateway, then echo requests
-host example.com         # a DNS lookup: a UDP datagram out, one back
+ifconfig                       # the card, its address, the gateway
+ping -c 3 10.0.2.2             # ARP for the gateway, then echo requests
+host example.com               # a DNS lookup: a UDP datagram out, one back
+curl https://example.com       # Ubuntu's own curl: DNS, TCP, then TLS
+nc example.com 80              # a raw TCP connection; nc -l PORT waits for one
 ```
 
 `run.sh` gives QEMU a virtio network card on its user-mode network, which puts the machine at
 10.0.2.15 behind a gateway at 10.0.2.2 and a name server at 10.0.2.3 — the defaults the stack
 starts with, since there's no DHCP yet. `ifconfig ADDRESS NETMASK GATEWAY DNS` changes them.
 
-For programs it's the Linux socket calls, so far for datagrams only: `socket`, `bind`, `connect`,
-`sendto`, `recvfrom`, `getsockname`, and `read`/`write` on a connected socket. A `SOCK_DGRAM`
-socket on `IPPROTO_ICMP` is how `ping` works without being root, as on Linux.
-`user/src/lib/net.zig` wraps all of it, and has the DNS resolver `host` uses.
+For programs it's the Linux socket calls: `socket`, `bind`, `listen`, `accept`, `connect`,
+`send`/`recv` in all their forms (`sendto`, `recvmsg`, `sendmmsg`...), `shutdown`, `getsockopt`
+(with `SO_ERROR` for a connect that didn't wait), non-blocking sockets and `poll`. That's enough
+for software written for Linux to just work: `curl` is Ubuntu's own binary, and glibc's own
+resolver finds names through `/etc/resolv.conf`. A `SOCK_DGRAM` socket on `IPPROTO_ICMP` is how
+`ping` works without being root, as on Linux. `user/src/lib/net.zig` wraps it all for our tools.
 
 - `kernel/src/drivers/virtio_net.rs` is the card: one queue of buffers for it to fill, one of
   frames to send, collected on each timer tick.
 - `kernel/src/net/` is the stack. ARP learns addresses and holds a packet back until it knows
   where to send it; IP, ICMP and UDP are each about a screenful.
+- `kernel/src/net/tcp.rs` is TCP: the handshake both ways, a send buffer resent from the oldest
+  unacknowledged byte when the timer runs out (waiting twice as long each time), the other
+  side's window, a clean close (and TIME-WAIT), and resets. It keeps things simple where that's
+  safe: a segment that arrives out of order is dropped for the sender to resend, and there's no
+  congestion control beyond the window.
 
-**What's missing: TCP.** Without it there's no HTTP, so no `curl` yet, and nothing that talks to a
-web service. That's the next piece. Pinging something beyond the gateway usually fails too, but
-that's QEMU's user-mode network not passing ICMP on, not the stack.
+Not there yet: IPv6, DHCP, and a loopback (`127.0.0.1`). Pinging something beyond the gateway
+fails, but that's QEMU's user-mode network not passing ICMP on, not the stack.
 
 ## Trying other programs
 
@@ -281,7 +289,7 @@ kernel/          the kernel (Rust)
   src/mm/          physical pages, page tables, kernel heap, safe access to user memory
   src/fs/          the VFS, ext2, /proc, /sys, the initramfs reader, pipes
   src/drivers/     PCI, virtio (the disk, the tablet for the pointer, the network card)
-  src/net/         Ethernet, ARP, IPv4, ICMP, UDP, and sockets
+  src/net/         Ethernet, ARP, IPv4, ICMP, UDP, TCP, and sockets
   src/proc/        processes, scheduler, fork/exec/wait, the ELF loader
   src/sys/         the Linux system calls
   src/tty.rs       terminal line discipline
@@ -294,7 +302,7 @@ rootfs/          files copied into the root file system (/etc ...)
 disk/            what a new disk starts with (out/disk.img is made from it once)
 tests/           test programs (C, and Windows ones in windows/) and the test scripts:
                  smoke.py, persist.py, windows.py, edit.py, textedit.py, archive.py,
-                 pkg.py, accounts.py, net.py, session.sh
+                 pkg.py, accounts.py, net.py, tcp.py, session.sh
 ```
 
 ## Building and running
@@ -321,6 +329,7 @@ python3 tests/archive.py  # gzip, tar and zip, checked against BusyBox both ways
 python3 tests/pkg.py      # a real .deb, and a Windows program in a .zip, on and off again
 python3 tests/accounts.py # a user, a password, and what they're not allowed to do
 python3 tests/net.py      # the card, ping through ARP, and a DNS lookup
+python3 tests/tcp.py      # curl over TCP (a big file byte for byte), a server in the guest, HTTPS
 ```
 
 ## Roadmap

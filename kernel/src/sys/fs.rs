@@ -128,6 +128,7 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
             }
             proc::sleep()?;
         },
+        Handle::Tcp(conn) => super::net::stream_read(file, conn, buf, 0),
         Handle::Socket(sock) => loop {
             if let Some(packet) = sock.queue.lock().pop_front() {
                 let n = packet.data.len().min(buf.len());
@@ -208,6 +209,7 @@ fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
             crate::console::window_write(window.id, data);
             Ok(data.len() as u64)
         }
+        Handle::Tcp(conn) => super::net::stream_write(file, conn, data, 0),
         Handle::Socket(sock) => {
             let Some((ip, port)) = *sock.peer.lock() else { return Err(EDESTADDRREQ) };
             if *sock.port.lock() == 0 {
@@ -478,7 +480,7 @@ fn stat_of(handle: &Handle) -> Stat {
         }
         Handle::PipeRead(_) | Handle::PipeWrite(_) => Stat { dev: 2, mode: fs::S_IFIFO | 0o600, nlink: 1, blksize: 4096, ..Default::default() },
         Handle::Window(_) => Stat { mode: fs::S_IFCHR | 0o666, nlink: 1, blksize: 4096, ..Default::default() },
-        Handle::Socket(_) => Stat { mode: 0o140666, nlink: 1, blksize: 4096, ..Default::default() }, // S_IFSOCK
+        Handle::Socket(_) | Handle::Tcp(_) => Stat { mode: 0o140666, nlink: 1, blksize: 4096, ..Default::default() }, // S_IFSOCK
     }
 }
 
@@ -502,6 +504,7 @@ fn handle_for(dirfd: i32, path_ptr: u64, flags: u32) -> Result<Handle, Errno> {
                 Handle::PipeWrite(pp) => Handle::PipeWrite(pp.clone()),
                 Handle::Window(w) => Handle::Window(w.clone()),
                 Handle::Socket(s) => Handle::Socket(s.clone()),
+                Handle::Tcp(c) => Handle::Tcp(c.clone()),
             },
             None => Handle::Node(fs::lookup(&p.files().cwd, true)?),
         });
@@ -600,8 +603,8 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
         }
         _ => {}
     }
-    if let Handle::Socket(_) = &file.handle {
-        return super::net::net_ioctl(request, arg);
+    if let Handle::Socket(_) | Handle::Tcp(_) = &file.handle {
+        return super::net::net_ioctl(&file.handle, request, arg);
     }
     if let Handle::Window(window) = &file.handle {
         return match request {
@@ -928,6 +931,10 @@ fn readiness(fd: i32) -> i16 {
             r
         }
         Handle::Socket(sock) => POLLOUT | if sock.queue.lock().is_empty() { 0 } else { POLLIN },
+        Handle::Tcp(conn) => {
+            let (read, write, failed, gone) = crate::net::tcp::readiness(conn);
+            (if read { POLLIN } else { 0 }) | (if write { POLLOUT } else { 0 }) | (if failed { POLLERR } else { 0 }) | (if gone { POLLHUP } else { 0 })
+        }
         Handle::Window(window) => {
             let closed = window.closed.load(Ordering::Relaxed);
             let input = !window.input.lock().is_empty();

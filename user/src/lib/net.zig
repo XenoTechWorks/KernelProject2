@@ -100,6 +100,65 @@ pub fn setSettings(want: Settings) bool {
     return ioctl(fd, NET_SET, @intFromPtr(&copy));
 }
 
+// ---- TCP ----
+
+const SOCK_STREAM: usize = 1;
+
+pub const ConnectError = error{ NoNetwork, Refused, TimedOut, Failed };
+
+/// Connects, and returns the socket once the connection is up.
+pub fn tcpConnect(ip: Ip, port: u16) ConnectError!i32 {
+    const fd: i32 = switch (sys.check(sys.syscall3(41, AF_INET, SOCK_STREAM, 0))) {
+        .ok => |fd| @intCast(fd),
+        .err => return error.NoNetwork,
+    };
+    var to = SockAddrIn{ .port = std.mem.nativeToBig(u16, port), .addr = ip };
+    switch (sys.check(sys.syscall3(42, @bitCast(@as(isize, fd)), @intFromPtr(&to), @sizeOf(SockAddrIn)))) {
+        .ok => return fd,
+        .err => |e| {
+            sys.close(fd);
+            return switch (e) {
+                111 => error.Refused,
+                110 => error.TimedOut,
+                else => error.Failed,
+            };
+        },
+    }
+}
+
+/// A socket listening on `port`, on every address.
+pub fn tcpListen(port: u16) ?i32 {
+    const fd: i32 = switch (sys.check(sys.syscall3(41, AF_INET, SOCK_STREAM, 0))) {
+        .ok => |fd| @intCast(fd),
+        .err => return null,
+    };
+    var at = SockAddrIn{ .port = std.mem.nativeToBig(u16, port) };
+    if (sys.check(sys.syscall3(49, @bitCast(@as(isize, fd)), @intFromPtr(&at), @sizeOf(SockAddrIn))) == .err or
+        sys.check(sys.syscall2(50, @bitCast(@as(isize, fd)), 16)) == .err)
+    {
+        sys.close(fd);
+        return null;
+    }
+    return fd;
+}
+
+/// Waits for someone to connect, and returns their socket.
+pub fn accept(listener: i32) ?i32 {
+    return switch (sys.check(sys.syscall3(43, @bitCast(@as(isize, listener)), 0, 0))) {
+        .ok => |fd| @intCast(fd),
+        .err => null,
+    };
+}
+
+/// An address written out, or a name looked up with DNS.
+pub fn lookup(host: []const u8) ?Ip {
+    if (parseIp(host)) |ip| return ip;
+    const server = (settings() orelse return null).dns;
+    var found: [4]Ip = undefined;
+    const n = resolve(host, server, &found) catch return null;
+    return if (n > 0) found[0] else null;
+}
+
 // ---- DNS ----
 
 pub const ResolveError = error{ NoNetwork, Timeout, NotFound, Malformed };

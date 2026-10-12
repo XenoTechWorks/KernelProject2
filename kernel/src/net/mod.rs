@@ -1,12 +1,13 @@
-//! A small IPv4 stack: Ethernet, ARP, IP, ICMP and UDP, on top of the virtio network card.
+//! A small IPv4 stack: Ethernet, ARP, IP, ICMP, UDP and TCP, on top of the virtio network card.
 //!
-//! Enough to answer a ping, ping something else, and send and receive UDP (which is what a DNS
-//! lookup needs). TCP isn't here yet.
+//! Enough to answer a ping, ping something else, send and receive UDP (what a DNS lookup needs),
+//! and hold TCP connections both ways (what the web needs).
 //!
 //! Everything runs in the kernel with one lock: frames arrive on the timer interrupt, are dealt
 //! with there, and anything a program is waiting for is left in a socket's queue.
 
 pub mod socket;
+pub mod tcp;
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -271,6 +272,7 @@ fn ip_in(p: &[u8]) {
     match protocol {
         PROTO_ICMP => icmp_in(from, body),
         PROTO_UDP => udp_in(from, body),
+        tcp::PROTO_TCP => tcp::receive(from, body),
         _ => {}
     }
 }

@@ -16,9 +16,10 @@ PROMPT = re.compile(rb"[A-Za-z0-9_.-]+:[^\r\n]*[#$] $")
 
 
 class Machine:
-    def __init__(self, disk=None, scratch_disk=True):
+    def __init__(self, disk=None, scratch_disk=True, forward=()):
         """disk: a disk image to attach (default: out/disk.img when it exists). With scratch_disk,
-        a copy is used, so tests don't change the real one."""
+        a copy is used, so tests don't change the real one. forward: (host port, guest port) pairs,
+        so something on this machine can connect to a server inside the guest."""
         self.output = b""
         self._scratch = None
         if disk is None and os.path.exists(os.path.join(ROOT, "out/disk.img")):
@@ -38,7 +39,8 @@ class Machine:
             args += ["-drive", f"file={disk},if=none,id=home,format=raw",
                      "-device", "virtio-blk-pci,drive=home,disable-legacy=on"]
         args += ["-device", "virtio-tablet-pci,disable-legacy=on",
-                 "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0,disable-legacy=on"]
+                 "-netdev", "user,id=n0" + "".join(f",hostfwd=tcp:127.0.0.1:{h}-:{g}" for h, g in forward),
+                 "-device", "virtio-net-pci,netdev=n0,disable-legacy=on"]
         self.qemu = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self._wait_for_prompt(60)
 
