@@ -60,6 +60,7 @@ pub mod event {
     pub const FOCUS: u32 = 6; // data: 1 got the keyboard, 0 lost it
     pub const SCROLL: u32 = 7; // the mouse wheel (data: steps, as a signed number; down is positive)
     pub const RESIZE: u32 = 8; // the user resized the window: x, y are its new width and height
+    pub const RAWKEY: u32 = 9; // a physical key: x its PC scancode (0x100+ after 0xE0), data 1 down, 0 up
 }
 
 /// The part of a window the rest of the kernel sees: what was typed into it, and whether the user
@@ -274,6 +275,17 @@ pub fn try_write(bytes: &[u8]) {
 /// A key pressed on the keyboard: `bytes` is what a terminal gets, `key` and `mods` what a
 /// graphical window gets. Goes to the focused window, or to the console's tty. (The serial port
 /// always goes to the tty: it can't see windows.)
+/// A physical key went down or up. Only graphical windows hear about these (games, mostly, which
+/// need to know a key is still held); everyone else gets the characters from `key`.
+pub fn raw_key(scancode: u32, down: bool) {
+    let target = CONSOLE.lock().as_ref().and_then(|s| s.focused()).map(|v| v.window.clone());
+    if let Some(window) = target {
+        if window.pixels.load(Ordering::Relaxed) {
+            window.event(event::RAWKEY, scancode as i32, 0, down as u32);
+        }
+    }
+}
+
 pub fn key(bytes: &[u8], key: u32, mods: u32) {
     let target = CONSOLE.lock().as_ref().and_then(|s| s.focused()).map(|v| v.window.clone());
     match target {

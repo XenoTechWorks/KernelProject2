@@ -601,7 +601,8 @@ fn nextSeparator(line: []const u8, from: usize) ?struct { at: usize, len: usize,
             },
             '#' => if (i == 0 or line[i - 1] == ' ' or line[i - 1] == '\t') return null,
             ';' => return .{ .at = i, .len = 1, .kind = .semi },
-            '&' => return if (i + 1 < line.len and line[i + 1] == '&') .{ .at = i, .len = 2, .kind = .and_if } else .{ .at = i, .len = 1, .kind = .background },
+            // `>&` and `<&` are redirections (2>&1), not "run in the background".
+            '&' => if (i > 0 and (line[i - 1] == '>' or line[i - 1] == '<')) {} else return if (i + 1 < line.len and line[i + 1] == '&') .{ .at = i, .len = 2, .kind = .and_if } else .{ .at = i, .len = 1, .kind = .background },
             '|' => if (i + 1 < line.len and line[i + 1] == '|') return .{ .at = i, .len = 2, .kind = .or_if } else {},
             else => {},
         }

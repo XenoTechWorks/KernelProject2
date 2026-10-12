@@ -36,6 +36,9 @@ pub fn scancode(code: u8) {
     let released = code & 0x80 != 0;
     let key = code & 0x7f;
     let extended = core::mem::take(&mut s.extended);
+    // A graphical program (a game) is told about every physical key, down and up, modifiers too:
+    // the PC scancode, with 0x100 added for the keys that come after an 0xE0.
+    crate::console::raw_key(key as u32 | if extended { 0x100 } else { 0 }, !released);
 
     match key {
         0x2A | 0x36 => {

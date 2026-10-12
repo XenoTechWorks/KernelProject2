@@ -26,7 +26,7 @@ mkdir -p "$stage/bin" "$stage/sbin" "$out"
 cp -r "$root/rootfs/." "$stage/"
 find "$stage" -type d -exec chmod 755 {} +
 find "$stage" -type f -exec chmod 644 {} +
-for program in init kpsh ls cat echo uname fileops kpfetch clock textclock widgets calc files edit textedit eyes gzip tar zip pkg users ping ifconfig host nc; do
+for program in init kpsh ls cat echo uname fileops kpfetch clock textclock widgets calc files edit textedit eyes gzip tar zip pkg users ping ifconfig host nc doom; do
     dest="$stage/bin/$program"
     [[ $program == init ]] && dest="$stage/sbin/init"
     "$zig" build-exe "$root/user/src/$program.zig" -target x86_64-linux-none -O ${ZIG_MODE:-ReleaseSmall} -fstrip \
@@ -128,6 +128,27 @@ fastfetch="${FASTFETCH:-$HOME/src/fastfetch/build/fastfetch}"
 if [[ -x "$fastfetch" ]]; then
     step "fastfetch ($fastfetch)"
     add_host_program "$fastfetch"
+fi
+
+# Chocolate Doom, straight from Ubuntu (apt install chocolate-doom freedoom), drawing through
+# our own build of SDL 2 (sdl2/), which puts its windows on /dev/window. Its libraries are worked
+# out with ours in place, so none of Ubuntu's SDL's X11 and Wayland ones come along.
+if [[ -x /usr/games/chocolate-doom && -f /usr/share/games/doom/freedoom1.wad ]]; then
+    step "Chocolate Doom (/usr/games/chocolate-doom), with SDL 2 for /dev/window"
+    sdl="$(mktemp -d)"
+    bash "$root/sdl2/build.sh" "$sdl"
+    cp -L /usr/games/chocolate-doom "$stage/bin/"
+    LD_LIBRARY_PATH="$sdl" ldd /usr/games/chocolate-doom | grep -o '/[^ ]*' | while read -r lib; do
+        dest="$lib"
+        [[ "$lib" == "$sdl"/* ]] && dest="/lib/x86_64-linux-gnu/$(basename "$lib")"
+        mkdir -p "$stage$(dirname "$dest")"
+        cp -L "$lib" "$stage$dest"
+    done
+    rm -rf "$sdl"
+    # Freedoom: free game data in Doom's format (BSD license), so there's something to play.
+    mkdir -p "$stage/usr/share/games/doom" "$stage/usr/share/doc/freedoom"
+    cp /usr/share/games/doom/freedoom1.wad "$stage/usr/share/games/doom/"
+    cp /usr/share/doc/freedoom/copyright "$stage/usr/share/doc/freedoom/"
 fi
 
 step "a sample package"

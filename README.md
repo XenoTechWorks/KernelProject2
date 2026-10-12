@@ -263,7 +263,8 @@ For programs it's a file: opening `/dev/window` makes a window.
   `WINDOW_BLIT` copies a rectangle of the program's pixels into it, and `WINDOW_TITLE` names it.
   Reading returns 16-byte events: pointer motion, button presses and releases, the wheel, keys
   (with codes for arrows and the like, and shift/ctrl), focus, the pointer leaving, and a new size
-  when the user resizes the window.
+  when the user resizes the window. Games also get every physical key going down and up, Shift
+  and Ctrl included, as its PC scancode.
 - **Text**: without that ioctl, what the program writes is drawn as a terminal (escape sequences
   work); xterm's title (`ESC ] 2 ; title BEL`) and resize (`ESC [ 8 ; rows ; cols t`) sequences set
   its title and size, and mouse clicks come back as xterm reports once turned on (`ESC [ ? 1000 h`).
@@ -280,6 +281,31 @@ The graphical toolkit (`user/src/lib/gui.zig`, Zig, a working name) is our own, 
   `widgets`, `clock`, `calc`, `files` and `textedit` are the examples. Monospaced text uses
   [JetBrains Mono](https://www.jetbrains.com/lp/mono/) (SIL Open Font License).
 - `user/src/lib/ui.zig` is the smaller helper for text windows (`textclock`).
+
+## Doom
+
+Chocolate Doom runs: Ubuntu's own `chocolate-doom`, unchanged, playing
+[Freedoom](https://freedoom.github.io/) (a free game for the Doom engine).
+
+```sh
+doom                    # Freedoom: Phase 1 in a window
+doom -timedemo demo1    # play the first demo as fast as it goes, and say how fast
+```
+
+Click the window to give it the keyboard (in the demo, the click also opens the menu); arrows walk
+and turn, Ctrl fires, Space opens doors, Esc is the menu. Saves and settings go in
+`~/.local/share/chocolate-doom`, on the disk. There is no sound yet (no sound card driver).
+
+It draws through SDL 2, the library most Linux games use. `sdl2/` holds a video driver for our
+windows (`SDL_kp2video.c`: pixels go out with `WINDOW_BLIT`, events come back as SDL's mouse,
+keyboard and window events), and `sdl2/build.sh` builds SDL 2.30.0 with only that in it. The result
+answers to the same name and has the same functions as Ubuntu's `libSDL2-2.0.so.0`, so programs
+built for Ubuntu load it instead. `build.sh` adds Doom when the build machine has it:
+
+```sh
+sudo apt install chocolate-doom freedoom cmake make gcc
+./build.sh
+```
 
 ## Layout
 
@@ -298,11 +324,12 @@ kernel/          the kernel (Rust)
   src/keyboard.rs, src/mouse.rs   PS/2 keyboard and mouse
 user/src/        init, the shell, the commands and apps (Zig); lib/gui is the toolkit
 windows/src/     the Windows layer: PE loader, kernel32, msvcrt (C++)
+sdl2/            SDL 2's video driver for our windows, and the script that builds SDL with it
 rootfs/          files copied into the root file system (/etc ...)
 disk/            what a new disk starts with (out/disk.img is made from it once)
 tests/           test programs (C, and Windows ones in windows/) and the test scripts:
                  smoke.py, persist.py, windows.py, edit.py, textedit.py, archive.py,
-                 pkg.py, accounts.py, net.py, tcp.py, session.sh
+                 pkg.py, accounts.py, net.py, tcp.py, doom.py, session.sh
 ```
 
 ## Building and running
@@ -330,6 +357,7 @@ python3 tests/pkg.py      # a real .deb, and a Windows program in a .zip, on and
 python3 tests/accounts.py # a user, a password, and what they're not allowed to do
 python3 tests/net.py      # the card, ping through ARP, and a DNS lookup
 python3 tests/tcp.py      # curl over TCP (a big file byte for byte), a server in the guest, HTTPS
+python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
 ```
 
 ## Roadmap
@@ -355,3 +383,6 @@ Roughly in order; each step is checked by running a real program.
   [JetBrains Mono](https://www.jetbrains.com/lp/mono/), both SIL Open Font License (their OFL.txt
   is copied next to them in `/usr/share/fonts`).
 - The test programs link against glibc (LGPL) from the build machine.
+- [SDL 2](https://libsdl.org/) (zlib license) is downloaded at build time. Chocolate Doom
+  (GPL-2.0) and Freedoom (BSD-3-Clause, its copyright file is copied next to the WAD) come from
+  the build machine's packages.
