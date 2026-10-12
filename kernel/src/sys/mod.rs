@@ -148,6 +148,9 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         111 => Ok(crate::proc::current().pgid as u64),
         112 => process::setsid(),
         121 => process::getpgid(a[0] as u32),
+        253 => fs::inotify_init(0),
+        254 => fs::inotify_add_watch(a[0] as i32, a[1], a[2] as u32),
+        255 => fs::inotify_rm_watch(a[0] as i32, a[1] as i32),
         // setfsuid / setfsgid: file access here goes by the effective ids, so say what those are.
         122 => Ok(crate::proc::current().creds.euid as u64),
         123 => Ok(crate::proc::current().creds.egid as u64),
@@ -205,6 +208,7 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         291 => epoll::create(a[0] as u32),
         292 => fs::dup3(a[0] as i32, a[1] as i32, a[2] as u32, false),
         293 => fs::pipe2(a[0], a[1] as u32),
+        294 => fs::inotify_init(a[0] as u32),
         302 => misc::prlimit64(a[1] as u32, a[3]),
         316 => fs::renameat(a[0] as i32, a[1], a[2] as i32, a[3]),
         310 => crate::proc::ptrace::process_vm(a[0] as u32, a[1], a[2], a[3], a[4], a[5], false),

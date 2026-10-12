@@ -2,7 +2,7 @@
 
 use super::SysResult;
 use super::errno::*;
-use crate::fs::{self, Device, New, Node, Type, eventfd, pipe};
+use crate::fs::{self, Device, New, Node, Type, eventfd, notify, pipe};
 use crate::net::unix;
 use crate::mm::user;
 use crate::proc::{self, fd::Handle, fd::OpenFile};
@@ -74,6 +74,9 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
                 let n = node.read_at(at.unwrap_or(*offset), buf)?;
                 if at.is_none() {
                     *offset += n as u64;
+                }
+                if n > 0 {
+                    notify::path_changed(&file.path, notify::IN_ACCESS);
                 }
                 Ok(n as u64)
             }
@@ -156,6 +159,7 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
         }
         Handle::SignalFd(s) => Ok(super::signalfd::read(s, buf, nonblocking(file))? as u64),
         Handle::TimerFd(t) => Ok(super::timerfd::read(t, buf, nonblocking(file))? as u64),
+        Handle::Inotify(n) => Ok(notify::read(n, buf, nonblocking(file))? as u64),
         Handle::Epoll(_) | Handle::PidFd(_) => Err(EINVAL),
     }
 }
@@ -177,6 +181,8 @@ fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
                 if at.is_none() {
                     *offset = pos + n as u64;
                 }
+                drop(offset);
+                notify::path_changed(&file.path, notify::IN_MODIFY);
                 Ok(n as u64)
             }
             Type::Dir => Err(EISDIR),
@@ -228,7 +234,7 @@ fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
             eventfd::write(e, value, nonblocking(file))?;
             Ok(8)
         }
-        Handle::Epoll(_) | Handle::SignalFd(_) | Handle::TimerFd(_) | Handle::PidFd(_) => Err(EINVAL),
+        Handle::Epoll(_) | Handle::SignalFd(_) | Handle::TimerFd(_) | Handle::PidFd(_) | Handle::Inotify(_) => Err(EINVAL),
     }
 }
 
@@ -321,7 +327,9 @@ pub fn open_path(path: &str, flags: u32, mode: u32) -> SysResult {
         }
         Err(ENOENT) if flags & O_CREAT != 0 => {
             let (dir, name) = fs::parent_of(path)?;
-            dir.create(&name, New::File(mode & 0o7777 & !p.files().umask))?
+            let node = dir.create(&name, New::File(mode & 0o7777 & !p.files().umask))?;
+            notify::changed(Some(&dir), &name, Some(&node), notify::IN_CREATE);
+            node
         }
         Err(e) => return Err(e),
     };
@@ -374,6 +382,9 @@ pub fn open_path(path: &str, flags: u32, mode: u32) -> SysResult {
         }
         _ => Handle::Node(node),
     };
+    if flags & O_PATH == 0 {
+        notify::path_changed(path, notify::IN_OPEN);
+    }
     let file = OpenFile::new(handle, kept, String::from(path));
     Ok(p.files().fds.insert(file, flags & O_CLOEXEC != 0, 0)? as u64)
 }
@@ -521,7 +532,7 @@ fn stat_of(handle: &Handle) -> Stat {
             Stat { mode: fs::S_IFSOCK | 0o777, nlink: 1, blksize: 4096, ..Default::default() }
         }
         // Like Linux's "anonymous inodes": no file type, only permissions.
-        Handle::EventFd(_) | Handle::Epoll(_) | Handle::SignalFd(_) | Handle::TimerFd(_) | Handle::PidFd(_) => Stat { mode: 0o600, nlink: 1, blksize: 4096, ..Default::default() },
+        Handle::EventFd(_) | Handle::Epoll(_) | Handle::SignalFd(_) | Handle::TimerFd(_) | Handle::PidFd(_) | Handle::Inotify(_) => Stat { mode: 0o600, nlink: 1, blksize: 4096, ..Default::default() },
     }
 }
 
@@ -630,6 +641,10 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
     }
     if let Handle::Socket(_) | Handle::Tcp(_) | Handle::UnixStream(_) | Handle::UnixDatagram(_) = &file.handle {
         return super::net::net_ioctl(&file.handle, request, arg);
+    }
+    if let (Handle::Inotify(n), FIONREAD) = (&file.handle, request) {
+        user::write_struct(p.space(), arg, &(notify::pending(n) as u32))?;
+        return Ok(0);
     }
     if let Handle::Window(window) = &file.handle {
         return match request {
@@ -922,14 +937,20 @@ pub fn fchdir(fd: i32) -> SysResult {
 pub fn mkdirat(dirfd: i32, path_ptr: u64, mode: u32) -> SysResult {
     let path = resolve(dirfd, path_ptr)?;
     let (dir, name) = fs::parent_of(&path)?;
-    dir.create(&name, New::Dir(mode & 0o7777 & !proc::current().files().umask))?;
+    let node = dir.create(&name, New::Dir(mode & 0o7777 & !proc::current().files().umask))?;
+    notify::changed(Some(&dir), &name, Some(&node), notify::IN_CREATE);
     Ok(0)
 }
 
 pub fn unlinkat(dirfd: i32, path_ptr: u64, flags: u32) -> SysResult {
     let path = resolve(dirfd, path_ptr)?;
     let (dir, name) = fs::parent_of(&path)?;
+    let node = dir.child(&name).ok();
+    let last_name = node.as_ref().is_some_and(|n| n.is_dir() || n.nlink() <= 1);
     dir.remove(&name, flags & AT_REMOVEDIR != 0)?;
+    if let Some(node) = node {
+        notify::removed(&dir, &name, &node, last_name);
+    }
     Ok(0)
 }
 
@@ -941,7 +962,9 @@ pub fn renameat(olddir: i32, old_ptr: u64, newdir: i32, new_ptr: u64) -> SysResu
     }
     let (odir, oname) = fs::parent_of(&old)?;
     let (ndir, nname) = fs::parent_of(&new)?;
+    let node = odir.child(&oname)?;
     fs::rename(&odir, &oname, &ndir, &nname)?;
+    notify::moved(&odir, &oname, &ndir, &nname, &node);
     Ok(0)
 }
 
@@ -956,6 +979,7 @@ pub fn linkat(olddir: i32, old_ptr: u64, newdir: i32, new_ptr: u64, flags: u32) 
     }
     let (dir, name) = fs::parent_of(&new)?;
     dir.add_link(&name, &node)?;
+    notify::changed(Some(&dir), &name, Some(&node), notify::IN_CREATE);
     Ok(0)
 }
 
@@ -963,7 +987,8 @@ pub fn symlinkat(target_ptr: u64, dirfd: i32, path_ptr: u64) -> SysResult {
     let target = user::read_cstr(proc::current().space(), target_ptr, 4096)?;
     let path = resolve(dirfd, path_ptr)?;
     let (dir, name) = fs::parent_of(&path)?;
-    dir.create(&name, New::Symlink(&target))?;
+    let node = dir.create(&name, New::Symlink(&target))?;
+    notify::changed(Some(&dir), &name, Some(&node), notify::IN_CREATE);
     Ok(0)
 }
 
@@ -985,20 +1010,25 @@ pub fn faccessat(dirfd: i32, path_ptr: u64, mode: u32) -> SysResult {
 }
 
 pub fn chmod(n: u64, a: [u64; 6]) -> SysResult {
-    let (node, mode) = match n {
-        90 => (fs::lookup(&resolve(AT_FDCWD, a[0])?, true)?, a[1]),
-        91 => match &proc::current().files().fds.get(a[0] as i32)?.handle {
-            Handle::Node(n) => (n.clone(), a[1]),
-            _ => return Ok(0),
-        },
-        _ => (fs::lookup(&resolve(a[0] as i32, a[1])?, true)?, a[2]),
+    let (path, mode) = match n {
+        90 => (resolve(AT_FDCWD, a[0])?, a[1]),
+        91 => {
+            let file = proc::current().files().fds.get(a[0] as i32)?;
+            match &file.handle {
+                Handle::Node(_) => (file.path.clone(), a[1]),
+                _ => return Ok(0),
+            }
+        }
+        _ => (resolve(a[0] as i32, a[1])?, a[2]),
     };
+    let node = fs::lookup(&path, true)?;
     let p = proc::current();
     let (owner, _) = node.owner();
     if !p.creds.is_root() && p.creds.euid != owner {
         return Err(EPERM);
     }
     node.set_mode(mode as u32 & 0o7777)?;
+    notify::path_changed(&path, notify::IN_ATTRIB);
     Ok(0)
 }
 
@@ -1018,6 +1048,7 @@ pub fn chown(n: u64, a: [u64; 6]) -> SysResult {
     }
     let (old_uid, old_gid) = node.owner();
     node.set_owner(if uid == u32::MAX { old_uid } else { uid }, if gid == u32::MAX { old_gid } else { gid })?;
+    notify::changed(None, "", Some(&node), notify::IN_ATTRIB);
     Ok(0)
 }
 
@@ -1027,14 +1058,51 @@ fn truncate_node(node: &Node, len: u64) -> SysResult {
 }
 
 pub fn truncate_path(path_ptr: u64, len: u64) -> SysResult {
-    truncate_node(&*fs::lookup(&resolve(AT_FDCWD, path_ptr)?, true)?, len)
+    let path = resolve(AT_FDCWD, path_ptr)?;
+    truncate_node(&*fs::lookup(&path, true)?, len)?;
+    notify::path_changed(&path, notify::IN_MODIFY);
+    Ok(0)
 }
 
 pub fn ftruncate(fd: i32, len: u64) -> SysResult {
+    let file = proc::current().files().fds.get(fd)?;
+    match &file.handle {
+        Handle::Node(n) => truncate_node(n, len)?,
+        _ => return Err(EINVAL),
+    };
+    notify::path_changed(&file.path, notify::IN_MODIFY);
+    Ok(0)
+}
+
+/// inotify_init / inotify_init1: a descriptor to read file events from (fs/notify.rs).
+pub fn inotify_init(flags: u32) -> SysResult {
+    if flags & !(O_NONBLOCK | O_CLOEXEC) != 0 {
+        return Err(EINVAL);
+    }
+    let file = OpenFile::new(Handle::Inotify(notify::new()), flags & O_NONBLOCK, String::from("anon_inode:inotify"));
+    Ok(proc::current().files().fds.insert(file, flags & O_CLOEXEC != 0, 0)? as u64)
+}
+
+fn inotify_of(fd: i32) -> Result<alloc::sync::Arc<notify::Inotify>, Errno> {
     match &proc::current().files().fds.get(fd)?.handle {
-        Handle::Node(n) => truncate_node(n, len),
+        Handle::Inotify(n) => Ok(n.clone()),
         _ => Err(EINVAL),
     }
+}
+
+/// inotify_add_watch: watches a file or folder; it must be readable by the caller.
+pub fn inotify_add_watch(fd: i32, path_ptr: u64, mask: u32) -> SysResult {
+    let inotify = inotify_of(fd)?;
+    let node = fs::lookup(&resolve(AT_FDCWD, path_ptr)?, mask & notify::IN_DONT_FOLLOW == 0)?;
+    if !allowed(&node, 4) {
+        return Err(EACCES);
+    }
+    Ok(notify::add_watch(&inotify, &node, mask)? as u64)
+}
+
+pub fn inotify_rm_watch(fd: i32, wd: i32) -> SysResult {
+    notify::rm_watch(&*inotify_of(fd)?, wd)?;
+    Ok(0)
 }
 
 pub fn pipe2(fds_ptr: u64, flags: u32) -> SysResult {
@@ -1152,6 +1220,7 @@ pub fn file_readiness(file: &OpenFile) -> i16 {
         Handle::SignalFd(s) => if super::signalfd::readable(s) { POLLIN } else { 0 },
         Handle::TimerFd(t) => if super::timerfd::readable(t) { POLLIN } else { 0 },
         Handle::PidFd(p) => if super::pidfd::readable(p) { POLLIN } else { 0 },
+        Handle::Inotify(n) => if notify::pending(n) > 0 { POLLIN } else { 0 },
     }
 }
 

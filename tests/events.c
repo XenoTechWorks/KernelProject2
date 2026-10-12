@@ -13,6 +13,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/file.h>
+#include <sys/inotify.h>
 #include <sys/pidfd.h>
 #include <sys/signalfd.h>
 #include <sys/ioctl.h>
@@ -380,6 +381,87 @@ static void locks(void) {
 static volatile sig_atomic_t usr1s;
 static void on_usr1(int sig) { (void)sig; usr1s++; }
 
+/* What an inotify descriptor has to say right now, as "MASK:name" items (names may be empty),
+ * with the cookie of the last rename half seen. */
+struct seen { int count; uint32_t mask[16]; char name[16][32]; uint32_t cookie[16]; };
+
+static struct seen take_events(int fd) {
+    struct seen s = {0};
+    char buf[4096] __attribute__((aligned(8)));
+    ssize_t n = read(fd, buf, sizeof buf);
+    for (char *p = buf; n > 0 && p < buf + n && s.count < 16;) {
+        struct inotify_event *e = (struct inotify_event *)p;
+        s.mask[s.count] = e->mask;
+        s.cookie[s.count] = e->cookie;
+        snprintf(s.name[s.count], sizeof s.name[0], "%s", e->len ? e->name : "");
+        s.count++;
+        p += sizeof *e + e->len;
+    }
+    return s;
+}
+
+static int has(struct seen *s, uint32_t mask, const char *name) {
+    for (int i = 0; i < s->count; i++)
+        if (s->mask[i] == mask && !strcmp(s->name[i], name)) return i + 1;
+    return 0;
+}
+
+static void watching(void) {
+    const char *dir = "/tmp/notify-test";
+    mkdir(dir, 0755);
+    unlink("/tmp/notify-test/a");
+    unlink("/tmp/notify-test/b");
+    unlink("/tmp/notify-test/c");
+    rmdir("/tmp/notify-test/sub");
+    int in = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    int wd = inotify_add_watch(in, dir, IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVED_FROM | IN_MOVED_TO | IN_CLOSE_WRITE);
+
+    int ep = epoll_create1(0);
+    add(ep, in, EPOLLIN);
+    int quiet = ready_now(ep) == 0;
+    int fd = open("/tmp/notify-test/a", O_WRONLY | O_CREAT, 0644);
+    write(fd, "x", 1);
+    close(fd);
+    int woke = ready_now(ep) == 1;
+    struct seen s = take_events(in);
+    check("inotify: a folder's watch sees a file made, written and closed, by name (and wakes epoll)",
+          quiet && woke && has(&s, IN_CREATE, "a") && has(&s, IN_MODIFY, "a") && has(&s, IN_CLOSE_WRITE, "a"));
+
+    rename("/tmp/notify-test/a", "/tmp/notify-test/b");
+    s = take_events(in);
+    int from = has(&s, IN_MOVED_FROM, "a"), to = has(&s, IN_MOVED_TO, "b");
+    check("...a rename as two halves with the same cookie", from && to && s.cookie[from - 1] && s.cookie[from - 1] == s.cookie[to - 1]);
+
+    unlink("/tmp/notify-test/b");
+    mkdir("/tmp/notify-test/sub", 0755);
+    s = take_events(in);
+    check("...a file removed, a folder made", has(&s, IN_DELETE, "b") && has(&s, IN_CREATE | IN_ISDIR, "sub"));
+
+    /* A watch on one file: it hears about itself (no name), and its own deletion ends it. */
+    fd = open("/tmp/notify-test/c", O_WRONLY | O_CREAT, 0644);
+    take_events(in);
+    int self = inotify_add_watch(in, "/tmp/notify-test/c", IN_MODIFY | IN_DELETE_SELF);
+    write(fd, "y", 1);
+    close(fd);
+    unlink("/tmp/notify-test/c");
+    s = take_events(in);
+    int modified = 0, deleted = 0, ignored = 0;
+    for (int i = 0; i < s.count; i++) {
+        /* (the folder's watch also reports c: those carry its name) */
+        if (s.name[i][0]) continue;
+        modified |= s.mask[i] == IN_MODIFY;
+        deleted |= s.mask[i] == IN_DELETE_SELF;
+        ignored |= s.mask[i] == IN_IGNORED;
+    }
+    check("...a file's own watch: changes, then its deletion, which ends the watch", self > 0 && modified && deleted && ignored);
+
+    check("...and removing a watch says so (IN_IGNORED)", inotify_rm_watch(in, wd) == 0 && take_events(in).mask[0] == IN_IGNORED);
+    rmdir("/tmp/notify-test/sub");
+    rmdir(dir);
+    close(ep);
+    close(in);
+}
+
 static void more_fds(void) {
     /* timerfd: first after 30 ms, then every 20 ms. */
     int t = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
@@ -500,6 +582,7 @@ int main(void) {
     named();
     signalfds();
     locks();
+    watching();
     more_fds();
     timers();
     printf("events: %d/%d passed\n", passed, total);

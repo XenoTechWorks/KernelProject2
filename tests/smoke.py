@@ -28,7 +28,7 @@ CHECKS = [
     ("kpfetch", "Kernel"),
     ("signal-test", "signals: 11/11 passed"),
     ("thread-test", "threads: 6/6 passed"),
-    ("events-test", "events: 38/38 passed"),
+    ("events-test", "events: 43/43 passed"),
     ("pty-test", "ptys: 15/15 passed"),
     ("jail-test", "jail: 5/5 passed"),
     ("trace-test", "trace: 10/10 passed"),

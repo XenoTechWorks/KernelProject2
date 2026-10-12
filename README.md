@@ -30,7 +30,8 @@ kernel answers those calls the way Linux does, the program can't tell the differ
 - What event loops and servers are built on: `epoll` (level- and edge-triggered, one-shot),
   `eventfd`, `signalfd`, `timerfd`, `pidfd` (with `waitid`), Unix sockets (see Networking), timers
   that really go off (`alarm`, `setitimer`, and the timeouts of `poll`, `ppoll` and `epoll_wait`,
-  which also take a signal mask to wait with), `sigwaitinfo`, and `flock`.
+  which also take a signal mask to wait with), `sigwaitinfo`, `flock`, and `inotify` (watching
+  files and folders: made, changed, closed, renamed, removed).
   Signals carry who sent them and why (a child's exit status for `SIGCHLD`). Python's `asyncio`
   runs on them.
 - `ptrace`, so one program can watch and steer another: Ubuntu's own `strace` runs (`strace -f`
@@ -445,8 +446,8 @@ python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
 
 Roughly in order; each step is checked by running a real program.
 
-1. **More of Linux for real tools**: `inotify`, and what gdb needs beyond ptrace (single-stepping
-   and breakpoints in read-only code).
+1. **More of Linux for real tools**: what gdb needs beyond ptrace (single-stepping, breakpoints
+   in read-only code), and more CPUs.
 2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
    archive), interrupt-driven I/O, and AHCI for real PCs.
 3. **Run the targets**: fastfetch and git run; next then coreutils as a compatibility test.

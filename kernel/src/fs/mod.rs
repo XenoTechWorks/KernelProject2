@@ -17,6 +17,7 @@ pub mod cpio;
 pub mod eventfd;
 pub mod ext2;
 pub mod lock;
+pub mod notify;
 pub mod pipe;
 pub mod procfs;
 pub mod sysfs;

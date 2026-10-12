@@ -1,7 +1,7 @@
 //! Open files and file descriptor tables. Like Linux, a descriptor points at an "open file
 //! description" (the file plus a position and flags), which fork and dup share.
 
-use crate::fs::Node;
+use crate::fs::{Node, notify};
 use crate::fs::pipe::Pipe;
 use crate::sys::errno::*;
 use alloc::string::String;
@@ -32,6 +32,8 @@ pub enum Handle {
     EventFd(Arc<crate::fs::eventfd::EventFd>),
     /// epoll (sys/epoll.rs).
     Epoll(Arc<crate::sys::epoll::Epoll>),
+    /// inotify (fs/notify.rs).
+    Inotify(Arc<crate::fs::notify::Inotify>),
     /// signalfd (sys/signalfd.rs).
     SignalFd(Arc<crate::sys::signalfd::SignalFd>),
     /// timerfd (sys/timerfd.rs).
@@ -73,6 +75,13 @@ impl Drop for OpenFile {
             Handle::PipeWrite(p) => *p.writers.lock() -= 1,
             Handle::Node(node) => {
                 crate::fs::lock::release((node.dev(), node.inode_number()), self as *const OpenFile as usize);
+                // Closed: watchers hear whether it was open for writing. (O_PATH isn't an open.)
+                const O_PATH: u32 = 0o10000000;
+                let flags = *self.flags.get_mut();
+                if flags & O_PATH == 0 && self.path.starts_with('/') {
+                    let mask = if flags & 3 != 0 { notify::IN_CLOSE_WRITE } else { notify::IN_CLOSE_NOWRITE };
+                    notify::path_changed(&self.path, mask);
+                }
                 return;
             }
             // The last descriptor for a window is gone: take it off the screen.
@@ -83,7 +92,7 @@ impl Drop for OpenFile {
             Handle::Tty(..) => return,
             Handle::PtyMaster(t) => crate::pty::master_closed(t),
             // These let go when the last reference to them goes (their Drop).
-            Handle::UnixStream(_) | Handle::UnixDatagram(_) | Handle::EventFd(_) | Handle::Epoll(_) | Handle::SignalFd(_) | Handle::TimerFd(_) | Handle::PidFd(_) => {}
+            Handle::UnixStream(_) | Handle::UnixDatagram(_) | Handle::EventFd(_) | Handle::Epoll(_) | Handle::SignalFd(_) | Handle::TimerFd(_) | Handle::PidFd(_) | Handle::Inotify(_) => {}
         }
         crate::proc::wake_all();
     }
