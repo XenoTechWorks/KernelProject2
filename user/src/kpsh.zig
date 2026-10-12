@@ -363,8 +363,11 @@ fn setSignal(sig: usize, handler: usize) void {
 /// In a child process: run one command and never return. `pgid` is its job's process group (0:
 /// start one).
 fn runInChild(cmd: *const Command, background: bool, pgid: usize) noreturn {
-    // Its own process group, so Ctrl+C and Ctrl+Z reach the job and not the shell.
+    // Its own process group, so Ctrl+C and Ctrl+Z reach the job and not the shell. A job in front
+    // takes the terminal itself too: the shell does the same, but the child may run first, and
+    // reading the terminal before it has it would stop it (SIGTTIN).
     _ = sys.syscall2(sys.nr.setpgid, 0, pgid);
+    if (!background) giveTerminal(if (pgid == 0) sys.syscall0(sys.nr.getpid) else pgid);
     if (background) {
         // A background job doesn't read the terminal: its input is /dev/null unless redirected.
         switch (sys.open("/dev/null", sys.O_RDONLY, 0)) {
