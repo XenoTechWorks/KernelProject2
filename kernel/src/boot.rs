@@ -20,7 +20,16 @@ pub fn report(status: Status, text: &str) {
     };
     let line = format!("[{tag}] {text}\n");
     crate::arch::serial::write_str(&line);
+    // Under the splash too: any key shows them.
     crate::console::write(line.as_bytes());
+    if crate::console::splash_up() {
+        crate::console::splash_step(text);
+    }
+}
+
+/// Whether `option` is one of the kernel command line's words.
+pub fn option(option: &str) -> bool {
+    cmdline().split_whitespace().any(|w| w == option)
 }
 
 pub fn ok(text: &str) {

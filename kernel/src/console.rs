@@ -343,6 +343,15 @@ pub struct Screen {
     focus: Option<u32>,
     mouse: Mouse,
     next_id: u32,
+    /// The boot splash, while it's up (see splash.rs): it covers the console until the desktop
+    /// shows, a key is pressed, or 20 seconds pass without a desktop.
+    splash: Option<Splash>,
+}
+
+struct Splash {
+    status: String,
+    done: u32,
+    total: u32,
 }
 
 unsafe impl Send for Screen {}
@@ -372,10 +381,43 @@ pub fn init(fb: &limine::framebuffer::Framebuffer) {
         focus: None,
         mouse: Mouse::default(),
         next_id: 1,
+        splash: None,
     };
     screen.flush_console();
     screen.show(screen.screen_rect());
     *CONSOLE.lock() = Some(screen);
+}
+
+/// Puts the boot splash up, for a boot of about `total` steps.
+pub fn splash_begin(total: u32) {
+    if let Some(screen) = CONSOLE.lock().as_mut() {
+        screen.splash = Some(Splash { status: String::new(), done: 0, total });
+        crate::splash::draw(&mut screen.layer, screen.width, screen.height, "", 0, total);
+        screen.show(screen.screen_rect());
+    }
+}
+
+/// The boot moved on a step: the bar grows and `status` shows under it.
+pub fn splash_step(status: &str) {
+    if let Some(screen) = CONSOLE.lock().as_mut() {
+        let Some(splash) = screen.splash.as_mut() else { return };
+        splash.done += 1;
+        splash.status = String::from(status);
+        let (done, total) = (splash.done, splash.total);
+        crate::splash::progress(&mut screen.layer, screen.width, screen.height, status, done, total);
+        screen.show(screen.screen_rect());
+    }
+}
+
+pub fn splash_up() -> bool {
+    CONSOLE.lock().as_ref().is_some_and(|s| s.splash.is_some())
+}
+
+/// Takes the splash down, showing the console (and its boot messages) under it.
+pub fn splash_end() {
+    if let Some(screen) = CONSOLE.lock().as_mut() {
+        screen.end_splash();
+    }
 }
 
 /// Columns and rows, for TIOCGWINSZ.
@@ -386,6 +428,9 @@ pub fn size() -> (usize, usize) {
 pub fn write(bytes: &[u8]) {
     if let Some(screen) = CONSOLE.lock().as_mut() {
         screen.console.write(bytes);
+        if screen.splash.is_some() && crate::arch::irq::ticks() > 20 * crate::arch::irq::TIMER_HZ {
+            screen.end_splash(); // no desktop came: the console is what there is
+        }
         screen.flush_console();
     }
 }
@@ -415,6 +460,9 @@ pub fn raw_key(scancode: u32, down: bool) {
 }
 
 pub fn key(bytes: &[u8], key: u32, mods: u32) {
+    if splash_up() {
+        splash_end();
+    }
     let target = CONSOLE.lock().as_ref().and_then(|s| s.focused()).map(|v| v.window.clone());
     match target {
         Some(window) if window.pixels.load(Ordering::Relaxed) => window.event(event::KEY, mods as i32, 0, key),
@@ -1133,8 +1181,21 @@ impl Screen {
 
     // ---- drawing ----
 
+    fn end_splash(&mut self) {
+        if self.splash.take().is_none() {
+            return;
+        }
+        self.console.dirty.fill(true);
+        self.console.scrolled = 0;
+        self.flush_console();
+        self.show(self.screen_rect());
+    }
+
     /// Draws the console's changed cells. When it scrolled, its pixels move up instead.
     fn flush_console(&mut self) {
+        if self.splash.is_some() {
+            return; // the splash covers it; it's all drawn when the splash goes
+        }
         let scrolled = core::mem::take(&mut self.console.scrolled);
         if scrolled >= self.rows {
             self.console.dirty.fill(true);
@@ -1208,7 +1269,10 @@ impl Screen {
         }
         let c = view.content_rect();
         let shown = if first { view.bounds() } else { Rect { x: c.x + r.x, y: c.y + r.y, w: r.w, h: r.h } };
-        let (id, framed) = (view.window.id, view.framed());
+        let (id, framed, role) = (view.window.id, view.framed(), view.role);
+        if first && role == Role::Desktop {
+            self.end_splash();
+        }
         self.show(shown);
         if first {
             // On a desktop, an app that opens is what the user wants to use next. (Over the
@@ -1389,8 +1453,9 @@ fn blend_frame(view: &mut View, fx: i32, fy: i32, color: u32, alpha: u32) {
 fn draw_title(view: &mut View, focused: usize) {
     let room = view.button_rect(Button::Minimize).x - 14 - 12;
     let mut title = view.title.clone();
-    if crate::title_font::width(&title) > room {
-        while !title.is_empty() && crate::title_font::width(&title) + crate::title_font::width("…") > room {
+    let font = &crate::title_font::TITLE;
+    if font.width(&title) > room {
+        while !title.is_empty() && font.width(&title) + font.width("…") > room {
             title.pop();
         }
         title.push('…');
@@ -1399,7 +1464,7 @@ fn draw_title(view: &mut View, focused: usize) {
     for (dx, dy, color, strength) in [(0, 1, 0x000000u32, 150u32), (0, 0, TITLE_COLOR[focused], 255)] {
         let mut pen = 14 * 64;
         for c in title.chars() {
-            let Some(g) = crate::title_font::glyph_or_box(c) else { continue };
+            let Some(g) = font.glyph_or_box(c) else { continue };
             let gx = pen / 64 + g.left + dx;
             let gy = baseline - g.top + dy;
             for y in 0..g.h {
@@ -1539,7 +1604,7 @@ fn over(top: u32, bottom: u32) -> u32 {
 }
 
 /// `a` mixed into `b`, `amount` of 255 being all `a`.
-fn mix(a: u32, b: u32, amount: u32) -> u32 {
+pub fn mix(a: u32, b: u32, amount: u32) -> u32 {
     let channel = |shift: u32| ((a >> shift & 0xff) * amount + (b >> shift & 0xff) * (255 - amount)) / 255 << shift;
     channel(16) | channel(8) | channel(0)
 }

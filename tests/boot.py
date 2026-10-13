@@ -63,6 +63,16 @@ os.close(fd)
 shutil.copyfile(os.path.join(ROOT, "out/disk.img"), disk)
 try:
     with Machine(disk=disk, scratch_disk=False, desktop=True) as m:
+        # The splash is up until Vela shows its wallpaper (which takes a few seconds to decode
+        # under emulation): Vela's orb in the middle of the screen, blue.
+        path = os.path.join(tempfile.gettempdir(), f"kp2-splash-{os.getpid()}.png")
+        m.screenshot(path)
+        _, _, rows = read_png(path)
+        if out:
+            shutil.copyfile(path, os.path.join(out, "boot-splash.png"))
+        os.unlink(path)
+        orb = rows[800 // 2 - 70 + 30][1280 // 2]
+        check("booting to the desktop shows the splash", orb[2] > 150 and orb[2] > orb[0] + 60, orb)
         m.drain(1.5)  # init's last lines can come just after the prompt
         lines = statuses(m.text())
         check("booting normally starts Vela", any(t.startswith("Started Vela") for _, t in lines), lines)

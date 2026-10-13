@@ -19,6 +19,7 @@ mod net;
 mod proc;
 mod pty;
 mod smbios;
+mod splash;
 mod sys;
 mod term;
 mod time;
@@ -115,6 +116,11 @@ extern "C" fn kmain() -> ! {
     }
     boot::set_cmdline(CMDLINE.response().map_or("", |r| r.cmdline()));
     announce(&alloc::format!("\x1b[1;36mKernelProject2\x1b[0m {VERSION}\n\n"));
+    // On the way to the desktop, the splash (the messages are written under it); with `text`,
+    // just the messages.
+    if !boot::option("text") {
+        console::splash_begin(14);
+    }
     // From here on, each step says how it went, the way Linux distributions do.
     if !boot::cmdline().is_empty() {
         boot::ok(&alloc::format!("Kernel command line: {}", boot::cmdline()));
