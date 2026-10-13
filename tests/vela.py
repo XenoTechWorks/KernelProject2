@@ -64,6 +64,8 @@ def save(m, name):
 
 
 with Machine() as m:
+    # Vela's defaults, whatever the disk's settings are (this is the test's own copy of it).
+    m.run("rm -f /root/.config/vela.conf")
     started = m.run("vela &")
     check("vela & starts in the background", started is not None and "[1]" in started, started)
     time.sleep(10)  # the wallpaper takes a while under emulation

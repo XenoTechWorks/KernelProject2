@@ -23,6 +23,8 @@ pub const KEY_HOME: u32 = 0x104;
 pub const KEY_END: u32 = 0x105;
 pub const KEY_PAGE_UP: u32 = 0x106;
 pub const KEY_PAGE_DOWN: u32 = 0x107;
+/// F1..F11: 0x110..0x11A (F12 is the kernel's own: it moves the keyboard between windows).
+pub const KEY_F1: u32 = 0x110;
 
 const NORMAL: &[u8; 58] = b"\0\x1b1234567890-=\x7f\tqwertyuiop[]\r\0asdfghjkl;'`\0\\zxcvbnm,./\0*\0 ";
 const SHIFTED: &[u8; 58] = b"\0\x1b!@#$%^&*()_+\x7f\tQWERTYUIOP{}\r\0ASDFGHJKL:\"~\0|ZXCVBNM<>?\0*\0 ";
@@ -82,6 +84,23 @@ pub fn scancode(code: u8) {
         let mods = mods(&s);
         drop(s);
         crate::console::key(seq, code, mods);
+        return;
+    }
+
+    // Function keys: what xterm sends for them, and KEY_F1 + n for graphical windows.
+    let function = match key {
+        0x3B..=0x44 => Some(key as u32 - 0x3B),
+        0x57 => Some(10),
+        _ => None,
+    };
+    if let Some(n) = function {
+        const SEQ: [&[u8]; 11] = [
+            b"\x1bOP", b"\x1bOQ", b"\x1bOR", b"\x1bOS", b"\x1b[15~", b"\x1b[17~", b"\x1b[18~", b"\x1b[19~",
+            b"\x1b[20~", b"\x1b[21~", b"\x1b[23~",
+        ];
+        let mods = mods(&s);
+        drop(s);
+        crate::console::key(SEQ[n as usize], KEY_F1 + n, mods);
         return;
     }
 

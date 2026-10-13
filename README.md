@@ -326,7 +326,8 @@ and windows sit on top of it; `vela` starts the desktop (see Vela, below).
 ```sh
 clock &            # the time, big
 calc &             # a calculator (click, or type: 7*6 Enter)
-files /etc &       # browse folders, peek into files
+files /etc &       # the file explorer (after Vista's Explorer)
+pictures a.jpg &   # a picture viewer (JPEG, PNG)
 textedit notes &   # a text editor
 eyes &             # two eyes that follow the mouse, after X11's xeyes
 widgets &          # a tour of the widgets
@@ -499,7 +500,7 @@ disk/            what a new disk starts with (out/disk.img is made from it once)
 tests/           test programs (C, and Windows ones in windows/) and the test scripts:
                  smoke.py, persist.py, windows.py, edit.py, textedit.py, archive.py,
                  pkg.py, accounts.py, net.py, tcp.py, ssh.py, terminals.py, gdb.py, doom.py,
-                 vela.py, boot.py, install.py, smp.py, session.sh; events.c is events-test, ptys.c pty-test, jail.c jail-test,
+                 vela.py, boot.py, install.py, smp.py, files.py, session.sh; events.c is events-test, ptys.c pty-test, jail.c jail-test,
                  trace.c trace-test
 ```
 
@@ -536,6 +537,7 @@ python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
 python3 tests/vela.py     # the desktop: dock, terminal, taskbar, maximize, star menu, Personalize
 python3 tests/boot.py     # the boot messages, the splash, starting Vela at boot, and turning that off
 python3 tests/install.py  # install onto a blank disk, check it from outside, boot it with UEFI
+python3 tests/files.py    # the file explorer: new folder, copy and paste, delete, details, pictures
 python3 tests/smp.py      # 4 CPUs: started, counted, and four programs at once in the time of one
 ```
 

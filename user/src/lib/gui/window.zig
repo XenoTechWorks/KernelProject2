@@ -66,6 +66,10 @@ pub const Key = struct {
     pub const end = 0x105;
     pub const page_up = 0x106;
     pub const page_down = 0x107;
+    /// F1..F11 (F12 belongs to the kernel).
+    pub const f1 = 0x110;
+    pub const f2 = 0x111;
+    pub const f5 = 0x114;
 };
 
 pub const Event = union(enum) {
