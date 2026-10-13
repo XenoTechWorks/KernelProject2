@@ -22,7 +22,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 
 const CELL_W: usize = 8;
@@ -58,10 +58,37 @@ const MIN_SIZE: (i32, i32) = (120, 60);
 
 // Frames after Windows Vista's Aero, a darker modern take: a glassy header (a gradient with a
 // shine over its top half), a light rim inside a dark edge, titles with a soft shadow.
-// [unfocused, focused]
+// [unfocused, focused]; the focused ones are the window color a desktop can set (set_theme).
 const HEADER_TOP: [u32; 2] = [0x41464f, 0x4d6488];
 const HEADER_BOTTOM: [u32; 2] = [0x2c3037, 0x253247];
 const RIM: [u32; 2] = [0x5d636e, 0x8ea7cf];
+static THEME_TOP: AtomicU32 = AtomicU32::new(HEADER_TOP[1]);
+static THEME_BOTTOM: AtomicU32 = AtomicU32::new(HEADER_BOTTOM[1]);
+static THEME_RIM: AtomicU32 = AtomicU32::new(RIM[1]);
+
+/// The frame colors (header top, bottom, rim) for the window that has the keyboard, or the others.
+fn frame_colors(focused: usize) -> (u32, u32, u32) {
+    if focused == 0 {
+        return (HEADER_TOP[0], HEADER_BOTTOM[0], RIM[0]);
+    }
+    let get = |a: &AtomicU32| a.load(Ordering::Relaxed);
+    (get(&THEME_TOP), get(&THEME_BOTTOM), get(&THEME_RIM))
+}
+
+/// The window color (Personalize): the header of the window in front, from `top` to `bottom`,
+/// with a `rim` of light inside its edge. Every frame is drawn again.
+pub fn set_theme(top: u32, bottom: u32, rim: u32) {
+    THEME_TOP.store(top & 0xff_ffff, Ordering::Relaxed);
+    THEME_BOTTOM.store(bottom & 0xff_ffff, Ordering::Relaxed);
+    THEME_RIM.store(rim & 0xff_ffff, Ordering::Relaxed);
+    if let Some(screen) = CONSOLE.lock().as_mut() {
+        for i in 0..screen.views.len() {
+            if screen.views[i].framed() {
+                screen.refresh_frame(i);
+            }
+        }
+    }
+}
 const EDGE: u32 = 0x07090d;
 const TITLE_COLOR: [u32; 2] = [0xb4bbc6, 0xffffff];
 
@@ -90,11 +117,13 @@ pub enum Role {
     Panel,
     /// Frameless, over everything, and takes the keyboard (a menu).
     Popup,
+    /// Frameless, over everything, but never takes the keyboard or room (a tooltip).
+    Tooltip,
 }
 
 impl Role {
     pub fn from(n: u32) -> Option<Role> {
-        [Role::Normal, Role::Desktop, Role::Panel, Role::Popup].get(n as usize).copied()
+        [Role::Normal, Role::Desktop, Role::Panel, Role::Popup, Role::Tooltip].get(n as usize).copied()
     }
 }
 
@@ -213,7 +242,7 @@ impl View {
             Role::Desktop => 0,
             Role::Normal => 1,
             Role::Panel => 2,
-            Role::Popup => 3,
+            Role::Popup | Role::Tooltip => 3,
         }
     }
     /// On the screen now: it has drawn something and isn't minimized.
@@ -1018,7 +1047,7 @@ impl Screen {
         let i = self.raise(i);
         let id = self.views[i].window.id;
         // A bar or dock leaves the keyboard where it was (its taskbar acts on that window).
-        if self.views[i].role != Role::Panel {
+        if !matches!(self.views[i].role, Role::Panel | Role::Tooltip) {
             self.set_focus(Some(id));
         }
         match Self::part(&self.views[i], mx, my) {
@@ -1329,16 +1358,17 @@ fn frame_color(fy: i32, d: i32, focused: usize) -> u32 {
     if d > -16 {
         return EDGE;
     }
-    let below = if fy < HEADER { HEADER_TOP[focused] } else { HEADER_BOTTOM[focused] };
+    let (top, bottom, rim) = frame_colors(focused);
+    let below = if fy < HEADER { top } else { bottom };
     if d > -32 {
         // The rim: bright along the header, fading down the sides.
         let k = if fy < HEADER { 150 } else { 70 };
-        return mix(RIM[focused], below, k);
+        return mix(rim, below, k);
     }
     if fy >= HEADER - 1 {
-        return if fy == HEADER - 1 { EDGE } else { HEADER_BOTTOM[focused] };
+        return if fy == HEADER - 1 { EDGE } else { bottom };
     }
-    let base = mix(HEADER_BOTTOM[focused], HEADER_TOP[focused], (fy * 255 / HEADER) as u32);
+    let base = mix(bottom, top, (fy * 255 / HEADER) as u32);
     let half = HEADER / 2;
     if fy < half { mix(0xffffff, base, (34 * (half - fy) / half) as u32) } else { base }
 }

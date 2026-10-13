@@ -44,11 +44,12 @@ fn to_mouse(byte: u8) -> Option<u8> {
 }
 
 /// Turns the mouse on. Runs before interrupts are enabled, so the answers can be read here.
-pub fn init() {
+/// Returns whether it answered (and whether it has a wheel).
+pub fn init() -> Option<bool> {
     command(0xA8); // enable the second port
     command(0x20); // read the configuration byte
     if !wait_read() {
-        return;
+        return None;
     }
     let config = unsafe { inb(DATA) };
     command(0x60); // write it back with the second port's interrupt on and its clock running
@@ -69,7 +70,9 @@ pub fn init() {
     let enabled = to_mouse(0xF4); // start sending packets
     if defaults == Some(0xFA) && enabled == Some(0xFA) {
         crate::log!("ps/2 mouse enabled{}", if wheel { " (with wheel)" } else { "" });
+        return Some(wheel);
     }
+    None
 }
 
 /// A byte from the mouse (interrupt 12).

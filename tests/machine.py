@@ -18,10 +18,12 @@ PROMPT = re.compile(rb"[A-Za-z0-9_.-]+:[^\r\n]*[#$] $")
 
 
 class Machine:
-    def __init__(self, disk=None, scratch_disk=True, forward=()):
+    def __init__(self, disk=None, scratch_disk=True, forward=(), desktop=False):
         """disk: a disk image to attach (default: out/disk.img when it exists). With scratch_disk,
         a copy is used, so tests don't change the real one. forward: (host port, guest port) pairs,
-        so something on this machine can connect to a server inside the guest."""
+        so something on this machine can connect to a server inside the guest. desktop: boot
+        into Vela as a user would; otherwise the kernel command line gets `text` (through QEMU's
+        fw_cfg) and the screen stays the console."""
         self.output = b""
         self._scratch = None
         if disk is None and os.path.exists(os.path.join(ROOT, "out/disk.img")):
@@ -37,6 +39,8 @@ class Machine:
                 "-serial", "stdio", "-display", "none", "-no-reboot",
                 "-monitor", f"unix:{self._monitor},server,nowait",
                 "-qmp", f"unix:{self._monitor}-qmp,server,nowait"]
+        if not desktop:
+            args += ["-fw_cfg", "name=opt/kernelproject2/cmdline,string=text"]
         if disk:
             args += ["-drive", f"file={disk},if=none,id=home,format=raw",
                      "-device", "virtio-blk-pci,drive=home,disable-legacy=on"]

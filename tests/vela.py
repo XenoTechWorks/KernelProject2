@@ -126,30 +126,59 @@ with Machine() as m:
     time.sleep(2)
     check("Escape closes it", screen(m)[spot[1]][spot[0]] == closed)
 
-    # The wallpaper picker: the star menu's row after the apps (eight of them: Doom is in the
-    # image), then the second picture (alphabetically Budapest; Lake Tahoe is the default).
+    # Personalize: the star menu's row after the apps (eight of them: Doom is in the image).
+    PZ_W, PZ_H = 470, 414
+    pzx, pzy = (W - PZ_W) // 2, (H - PZ_H) // 2 - 20
+
+    def open_personalize():
+        click(m, *ORB)
+        time.sleep(3)
+        click(m, 6 + 8 + 100, BAR_H + 6 + 70 + 13 + 8 * 42 + 19)
+        time.sleep(4)
+
+    header = (W // 2, BAR_H + 10)  # the maximized terminal's header, while it has the keyboard
+    sky_header = screen(m)[header[1]][header[0]]
+    inside = (pzx + 300, pzy + 30)
+    under = screen(m)[inside[1]][inside[0]]
+    open_personalize()
+    save(m, "vela-5.png")
+    check("Personalize opens from the star menu", screen(m)[inside[1]][inside[0]] != under)
+
+    # The fifth swatch (Violet); then Escape gives the keyboard back to the terminal.
+    click(m, pzx + 22 + 15 + 4 * 46, pzy + 252)
+    time.sleep(2)
+    m.monitor("sendkey esc")
+    time.sleep(2)
+    violet_header = screen(m)[header[1]][header[0]]
+    check("a window color changes the frame of the window in front", violet_header != sky_header and violet_header[2] > violet_header[1],
+          (sky_header, violet_header))
+
+    # "Change…" opens the wallpaper picker; the second picture is Budapest (Lake Tahoe's the default).
     corner = (W - 30, H - 10)  # below the maximized terminal, beside the dock: wallpaper
     before = screen(m)[corner[1]][corner[0]]
     picker_w, picker_h = 2 * 22 + 4 * 192 + 3 * 16, 58 + 4 * 150 + 8
     px, py = (W - picker_w) // 2, max(BAR_H + 8, (H - picker_h) // 2 - 20)
-    first = (px + 22 + 40, py + 58 + 40)  # inside the first thumbnail
-    under = screen(m)[first[1]][first[0]]
-    click(m, *ORB)
-    time.sleep(3)
-    click(m, 6 + 8 + 100, BAR_H + 6 + 70 + 13 + 8 * 42 + 19)
+    open_personalize()
+    click(m, pzx + 202 + 56, pzy + 120 + 15)
     time.sleep(4)
-    save(m, "vela-5.png")
-    shown = screen(m)[first[1]][first[0]]
-    check("Desktop Background opens the picker", shown != under, (under, shown))
+    save(m, "vela-6.png")
     click(m, px + 22 + 208 + 96, py + 58 + 60)
     time.sleep(8)  # decoding a 1280x800 JPEG under emulation
-    save(m, "vela-6.png")
+    save(m, "vela-7.png")
     after = screen(m)[corner[1]][corner[0]]
-    check("clicking a picture changes the wallpaper", after != before, (before, after))
+    check("Change… opens the picker, and a picture changes the wallpaper", after != before, (before, after))
     m.monitor("sendkey esc")
     time.sleep(1)
     conf = m.run("cat /root/.config/vela.conf")
-    check("the choice is saved in /root/.config/vela.conf", conf is not None and "wallpaper=budapest" in conf, conf)
+    check("the settings are saved in /root/.config/vela.conf", conf is not None and "wallpaper=budapest" in conf and "color=violet" in conf, conf)
+
+    # Hovering over a dock icon shows its name above it.
+    above = (DOCK_X + 11 + 24, DOCK_Y - 21)
+    no_tip = screen(m)[above[1]][above[0]]
+    m.tablet(DOCK_X + 11 + 24, DOCK_Y + 11 + 24)
+    time.sleep(2)
+    save(m, "vela-8.png")
+    check("a dock icon shows its name on hover", screen(m)[above[1]][above[0]] != no_tip)
 
 print(f"{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

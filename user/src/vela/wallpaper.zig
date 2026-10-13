@@ -1,5 +1,5 @@
 //! Vela's wallpaper: one of the photos in /usr/share/backgrounds (JPEGs, with small copies in
-//! thumbs/ for the picker; credits in CREDITS.txt there), the one chosen in /root/.config/vela.conf.
+//! thumbs/ for the picker; credits in CREDITS.txt there), the one chosen in Vela's settings.
 //! When none can be read, a night sky drawn here, with the stars of Vela joined up on the right.
 
 const std = @import("std");
@@ -7,12 +7,11 @@ const gui = @import("../lib/gui.zig");
 const file = @import("../lib/file.zig");
 const jpeg = @import("../lib/jpeg.zig");
 const sys = @import("../lib/sys.zig");
+const settings = @import("settings.zig");
 const Canvas = gui.Canvas;
 
 const gpa = std.heap.page_allocator;
 const dir = "/usr/share/backgrounds";
-const config_path = "/root/.config/vela.conf";
-pub const default_choice = "lake-tahoe";
 
 /// A wallpaper: its file's name without ".jpg", and what the picker calls it.
 pub const Choice = struct { slug: []const u8, title: []const u8 };
@@ -20,12 +19,14 @@ pub const Choice = struct { slug: []const u8, title: []const u8 };
 var slugs_buf: [4096]u8 = undefined;
 var choices_buf: [48]Choice = undefined;
 pub var choices: []Choice = choices_buf[0..0];
-var chosen_buf: [64]u8 = undefined;
+
 /// The wallpaper in use (a slug).
-pub var chosen: []const u8 = default_choice;
+pub fn chosen() []const u8 {
+    return settings.wallpaper();
+}
 
 /// Finds the wallpapers (every .jpg in /usr/share/backgrounds, named after the index file there
-/// when it lists them) and reads which one was chosen.
+/// when it lists them).
 pub fn init() void {
     var names_buf: [4096]u8 = undefined;
     const index = readSmall(dir ++ "/index", &names_buf) orelse "";
@@ -64,20 +65,6 @@ pub fn init() void {
             return std.mem.order(u8, a.title, b.title) == .lt;
         }
     }.less);
-
-    var conf_buf: [512]u8 = undefined;
-    if (readSmall(config_path, &conf_buf)) |conf| {
-        var lines = std.mem.splitScalar(u8, conf, '\n');
-        while (lines.next()) |line| {
-            if (std.mem.startsWith(u8, line, "wallpaper=")) {
-                const v = std.mem.trim(u8, line["wallpaper=".len..], " \r\t");
-                if (v.len > 0 and v.len <= chosen_buf.len) {
-                    @memcpy(chosen_buf[0..v.len], v);
-                    chosen = chosen_buf[0..v.len];
-                }
-            }
-        }
-    }
 }
 
 /// The index file's name for a slug ("slug<TAB>Title" lines), or the slug itself.
@@ -105,18 +92,13 @@ fn readSmall(path: [*:0]const u8, buf: []u8) ?[]const u8 {
 
 /// Makes `slug` the wallpaper, and remembers it (in /root, which is kept across boots).
 pub fn choose(slug: []const u8) void {
-    const n = @min(slug.len, chosen_buf.len);
-    std.mem.copyForwards(u8, chosen_buf[0..n], slug[0..n]);
-    chosen = chosen_buf[0..n];
-    var out: [128]u8 = undefined;
-    const text = std.fmt.bufPrint(&out, "wallpaper={s}\n", .{chosen}) catch return;
-    file.makeParents(config_path);
-    file.write(config_path, text, 0o644) catch {};
+    settings.setWallpaper(slug);
+    settings.save();
 }
 
 /// Fills the canvas with the chosen wallpaper (or the first one there is, or the drawn sky).
 pub fn paint(c: *Canvas) void {
-    if (paintPhoto(c, chosen)) return;
+    if (paintPhoto(c, chosen())) return;
     for (choices) |ch| {
         if (paintPhoto(c, ch.slug)) return;
     }

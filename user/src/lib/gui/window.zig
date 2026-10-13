@@ -16,6 +16,7 @@ const WINDOW_ROLE = 0x5706;
 const WINDOW_LIST = 0x5707;
 const WINDOW_ACTIVATE = 0x5708;
 const WINDOW_MINIMIZE = 0x5709;
+const WINDOW_THEME = 0x570A;
 
 /// What a window is for (kernel/src/console.rs Role). A desktop uses the others for itself.
 pub const Role = enum(u32) {
@@ -27,6 +28,8 @@ pub const Role = enum(u32) {
     panel,
     /// Frameless, over everything, with the keyboard.
     popup,
+    /// Frameless, over everything, without the keyboard or room of its own (a tooltip).
+    tooltip,
 };
 
 /// A normal window, as a taskbar sees it.
@@ -185,6 +188,13 @@ pub const Window = struct {
 
     pub fn minimize(self: *Window, id: u32) void {
         _ = ioctl(self.fd, WINDOW_MINIMIZE, id);
+    }
+
+    /// The window color: frames of the window in front go from `top` to `bottom` (0xRRGGBB),
+    /// with a `rim` of light inside their edge.
+    pub fn setTheme(self: *Window, top: u32, bottom: u32, rim: u32) void {
+        var colors = [3]u32{ top, bottom, rim };
+        _ = ioctl(self.fd, WINDOW_THEME, @intFromPtr(&colors));
     }
 
     /// Waits up to `timeout_ms` (null: forever) for the next event. Null once the window is closed.

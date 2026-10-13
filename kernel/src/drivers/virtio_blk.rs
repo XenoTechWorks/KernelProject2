@@ -23,17 +23,19 @@ unsafe impl Send for Disk {}
 
 pub static DISK: Mutex<Option<Disk>> = Mutex::new(None);
 
-/// Finds the first virtio block device and sets it up.
-pub fn init() {
-    let Some(mut dev) = virtio::start(&[0x1001, 0x1042], "virtio-blk", 0) else { return };
+/// Finds the first virtio block device and sets it up. Returns its size in MiB.
+pub fn init() -> Option<u64> {
+    let mut dev = virtio::start(&[0x1001, 0x1042], "virtio-blk", 0)?;
     let (Some(queue), Some(request_page)) = (dev.queue(0, QUEUE_SIZE), frame::alloc()) else {
         crate::log!("virtio-blk: out of memory");
-        return;
+        return None;
     };
     dev.ready();
     let sectors = r32(dev.config, 0) as u64 | (r32(dev.config, 4) as u64) << 32;
-    crate::log!("virtio-blk: {} MiB disk", sectors * SECTOR as u64 / (1024 * 1024));
+    let mib = sectors * SECTOR as u64 / (1024 * 1024);
+    crate::log!("virtio-blk: {mib} MiB disk");
     *DISK.lock() = Some(Disk { queue, last_used: 0, request_page });
+    Some(mib)
 }
 
 impl Disk {

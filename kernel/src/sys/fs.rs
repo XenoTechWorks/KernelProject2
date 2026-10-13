@@ -721,6 +721,12 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
             }
             WINDOW_ACTIVATE => crate::console::window_activate(arg as u32).map(|_| 0).ok_or(ENOENT),
             WINDOW_MINIMIZE => crate::console::window_minimize(arg as u32).map(|_| 0).ok_or(ENOENT),
+            // The window color: three 0xRRGGBB values (header top, bottom, rim).
+            WINDOW_THEME => {
+                let [top, bottom, rim]: [u32; 3] = user::read_struct(p.space(), arg)?;
+                crate::console::set_theme(top, bottom, rim);
+                Ok(0)
+            }
             _ => Err(ENOTTY),
         };
     }
@@ -885,6 +891,7 @@ const WINDOW_ROLE: u32 = 0x5706;
 const WINDOW_LIST: u32 = 0x5707;
 const WINDOW_ACTIVATE: u32 = 0x5708;
 const WINDOW_MINIMIZE: u32 = 0x5709;
+const WINDOW_THEME: u32 = 0x570A;
 
 /// The WINDOW_ROLE argument: the role (console::Role's order), where and how big, and how round
 /// its corners are.

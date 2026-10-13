@@ -43,9 +43,10 @@ unsafe impl Send for Tablet {}
 
 static TABLET: Mutex<Option<Tablet>> = Mutex::new(None);
 
-pub fn init() {
-    let Some(mut dev) = virtio::start(&[0x1052], "virtio-input", 0) else { return };
-    let (Some(queue), Some(page)) = (dev.queue(0, EVENTS), frame::alloc()) else { return };
+/// Sets up the virtio tablet, if there is one.
+pub fn init() -> bool {
+    let Some(mut dev) = virtio::start(&[0x1052], "virtio-input", 0) else { return false };
+    let (Some(queue), Some(page)) = (dev.queue(0, EVENTS), frame::alloc()) else { return false };
     // Ask the device for each axis's range (select ABS_INFO, subselect the axis).
     let mut range = [(0, 32767); 2];
     for (axis, r) in range.iter_mut().enumerate() {
@@ -65,6 +66,7 @@ pub fn init() {
     tablet.queue.notify();
     crate::log!("virtio tablet: absolute pointer");
     *TABLET.lock() = Some(tablet);
+    true
 }
 
 /// Handles the events that arrived (called from the timer interrupt).

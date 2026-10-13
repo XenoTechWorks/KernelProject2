@@ -209,7 +209,7 @@ pub fn build() -> Arc<Node> {
         ("mounts".into(), file(mounts())),
         ("swaps".into(), file("Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n")),
         ("filesystems".into(), file("nodev\ttmpfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\n")),
-        ("cmdline".into(), file("\n")),
+        ("cmdline".into(), file(format!("{}\n", crate::boot::cmdline()))),
         (
             "sys".into(),
             dir(alloc::vec![

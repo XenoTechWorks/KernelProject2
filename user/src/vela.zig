@@ -14,6 +14,7 @@ const icons = @import("vela/icons.zig");
 const shell = @import("vela/shell.zig");
 const wallpaper = @import("vela/wallpaper.zig");
 const glass = @import("vela/glass.zig");
+const settings = @import("vela/settings.zig");
 const jpeg = @import("lib/jpeg.zig");
 const sys = rt.sys;
 pub const _start = rt._start;
@@ -28,10 +29,18 @@ const text = 0xf2f5f9;
 const dim = 0xa9b2bf;
 const accent = 0x3a8ee6;
 
-/// The glass of the bar and the dock, and the darker glass of the menus (which may be over
-/// windows as well as the wallpaper, so less shows through).
-const panel_glass = glass.Style{};
-const popup_glass = glass.Style{ .tint = 0x0e131c, .strength = 205, .radius = 12, .shine = 22 };
+/// The glass of the bar and the dock: tinted with the window color, as clear as Personalize says.
+fn panelGlass() glass.Style {
+    const color = settings.colors[settings.color];
+    return .{ .tint = gui.mix(color.bottom, 0x000000, 110), .strength = settings.glasses[settings.glass].strength };
+}
+
+/// The darker glass of the menus (which may be over windows as well as the wallpaper, so less
+/// shows through).
+fn popupGlass() glass.Style {
+    const color = settings.colors[settings.color];
+    return .{ .tint = gui.mix(color.bottom, 0x05070a, 70), .strength = 205, .radius = 12, .shine = 22 };
+}
 
 /// Text that stays readable on glass: a soft dark shadow under it.
 fn shadowText(c: *gui.Canvas, size: f32, x: f32, y: i32, s: []const u8, color: u32) void {
@@ -130,7 +139,7 @@ const orb_center = [2]f32{ 23, bar_h / 2 };
 
 fn drawBar() void {
     const c = &bar.canvas;
-    glass.frost(c, sky, desktop.canvas.w, 0, 0, panel_glass);
+    glass.frost(c, sky, desktop.canvas.w, 0, 0, panelGlass());
 
     const star_lit = menu != null or (bar_hover != null and bar_hover.? == .star);
     glass.orb(c, orb_center[0], orb_center[1], 13, star_lit, icons.star);
@@ -260,7 +269,7 @@ fn dockSlot(i: usize) Rect {
 
 fn drawDock() void {
     const c = &dock.canvas;
-    glass.frost(c, sky, desktop.canvas.w, dock_x, dock_y, panel_glass);
+    glass.frost(c, sky, desktop.canvas.w, dock_x, dock_y, panelGlass());
     glass.outline(c, c.bounds(), 18, 0xffffff, 70);
     for (dock_apps[0..dock_count], 0..) |app, i| {
         const r = dockSlot(i);
@@ -303,6 +312,33 @@ fn setDockHover(h: ?usize) void {
     if (h == dock_hover) return;
     dock_hover = h;
     drawDock();
+    showTooltip(if (h) |i| i else null);
+}
+
+// ---- the dock's tooltips: an app's name above its icon ----
+
+var tooltip: ?gui.Window = null;
+
+fn showTooltip(slot: ?usize) void {
+    if (tooltip) |*t| t.close();
+    tooltip = null;
+    const i = slot orelse return;
+    const name = dock_apps[i].name;
+    const w: u32 = @intFromFloat(gui.measure(shell.font, 13, name) + 22);
+    const h: u32 = 26;
+    var t = gui.Window.open("Tooltip", w, h) orelse return;
+    const r = dockSlot(i);
+    const x = dock_x + r.x + dock_icon / 2 - @as(i32, @intCast(w / 2));
+    if (!t.setRole(.tooltip, x, dock_y - @as(i32, h) - 8, w, h, 7)) {
+        t.close();
+        return;
+    }
+    const c = &t.canvas;
+    c.fill(0x1a202b);
+    glass.outline(c, c.bounds(), 7, 0xffffff, 70);
+    shadowText(c, 13, 11, 18, name, text);
+    t.present();
+    tooltip = t;
 }
 
 // ---- the star menu ----
@@ -316,7 +352,7 @@ var menu_hover: ?usize = null;
 const menu_x = 6;
 const menu_y = bar_h + 6;
 
-/// Rows: each app, then "Desktop Background..." and "Leave Vela".
+/// Rows: each app, then "Personalize…" and "Leave Vela".
 fn menuRows() usize {
     return apps.count + 2;
 }
@@ -348,7 +384,7 @@ fn closeMenu() void {
 fn drawMenu() void {
     const m = &(menu orelse return);
     const c = &m.canvas;
-    glass.frost(c, sky, desktop.canvas.w, menu_x, menu_y, popup_glass);
+    glass.frost(c, sky, desktop.canvas.w, menu_x, menu_y, popupGlass());
     glass.outline(c, c.bounds(), 14, 0xffffff, 60);
     glass.orb(c, 33, 35, 15, false, icons.star);
     shadowText(c, 19, 58, 33, "Vela", text);
@@ -366,7 +402,7 @@ fn drawMenu() void {
         } else {
             if (i == apps.count) glass.tint(c, .{ .x = 16, .y = r.y - 8, .w = menu_w - 32, .h = 1 }, 0, 0xffffff, 40);
             icons.drawExtra(c, if (i == apps.count) .wallpaper else .leave, r.x + 6, r.y + 3, 32);
-            shadowText(c, 14, @floatFromInt(r.x + 48), r.y + 24, if (i == apps.count) "Desktop Background…" else "Leave Vela", text);
+            shadowText(c, 14, @floatFromInt(r.x + 48), r.y + 24, if (i == apps.count) "Personalize…" else "Leave Vela", text);
         }
     }
     m.present();
@@ -413,10 +449,166 @@ fn choose(i: usize) void {
     if (i < apps.count) {
         shell.launch(apps.list()[i].path);
     } else if (i == apps.count) {
-        openPicker();
+        openPersonalize();
     } else {
         leaving = true;
     }
+}
+
+// ---- Personalize: the wallpaper, the window color, the glass, starting at boot ----
+
+const pz_w = 470;
+const pz_pad = 22;
+const swatch_r = 15;
+const swatch_step = 46;
+
+var personalize: ?gui.Window = null;
+var pz_x: i32 = 0;
+var pz_y: i32 = 0;
+var pz_thumb: ?jpeg.Image = null;
+
+const PzHit = union(enum) { change, color: usize, glass: usize, autostart };
+
+const pz_change = Rect{ .x = 202, .y = 120, .w = 112, .h = 30 };
+fn pzSwatch(i: usize) [2]f32 {
+    return .{ @floatFromInt(pz_pad + swatch_r + @as(i32, @intCast(i)) * swatch_step), 252 };
+}
+fn pzGlass(i: usize) Rect {
+    return .{ .x = pz_pad + @as(i32, @intCast(i)) * 104, .y = 312, .w = 98, .h = 30 };
+}
+const pz_check = Rect{ .x = pz_pad, .y = 372, .w = 330, .h = 22 };
+const pz_h = 414;
+
+fn openPersonalize() void {
+    if (personalize != null) return;
+    const screen = desktop.screenSize();
+    var p = gui.Window.open("Personalize", pz_w, pz_h) orelse return;
+    const x: i32 = @intCast((screen.w - pz_w) / 2);
+    const y: i32 = @intCast((screen.h - pz_h) / 2 - 20);
+    if (!p.setRole(.popup, x, y, pz_w, pz_h, 14)) {
+        p.close();
+        return;
+    }
+    personalize = p;
+    pz_x = x;
+    pz_y = y;
+    loadPzThumb();
+    drawPersonalize();
+}
+
+fn loadPzThumb() void {
+    if (pz_thumb) |*t| t.deinit();
+    pz_thumb = wallpaper.thumbnail(wallpaper.chosen());
+}
+
+fn closePersonalize() void {
+    if (personalize) |*p| p.close();
+    personalize = null;
+}
+
+fn drawPersonalize() void {
+    const p = &(personalize orelse return);
+    const c = &p.canvas;
+    glass.frost(c, sky, desktop.canvas.w, pz_x, pz_y, popupGlass());
+    glass.outline(c, c.bounds(), 14, 0xffffff, 60);
+    shadowText(c, 18, pz_pad, 36, "Personalize", text);
+
+    // The wallpaper: what's there now, and a button to choose another.
+    shadowText(c, 13, pz_pad, 72, "Desktop background", dim);
+    const thumb = Rect{ .x = pz_pad, .y = 82, .w = 160, .h = 100 };
+    if (pz_thumb) |img| wallpaper.drawCover(c, img, thumb, 255) else c.rect(thumb, 0x2a2f39);
+    glass.outline(c, thumb, 0, 0xffffff, 80);
+    var title: []const u8 = wallpaper.chosen();
+    for (wallpaper.choices) |ch| {
+        if (std.mem.eql(u8, ch.slug, wallpaper.chosen())) title = ch.title;
+    }
+    shadowText(c, 15, 202, 108, title, text);
+    button(c, pz_change, "Change…", false);
+
+    // The window color: a row of swatches.
+    var label_buf: [64]u8 = undefined;
+    const label = std.fmt.bufPrint(&label_buf, "Window color: {s}", .{settings.colors[settings.color].label}) catch "";
+    shadowText(c, 13, pz_pad, 222, label, dim);
+    for (settings.colors, 0..) |color, i| {
+        const at = pzSwatch(i);
+        if (i == settings.color) c.circle(at[0], at[1], swatch_r + 4, 0xffffff);
+        glass.sphere(c, at[0], at[1], swatch_r, color.rim, color.bottom);
+    }
+
+    // The glass: how much the bar and dock let through.
+    shadowText(c, 13, pz_pad, 302, "Glass", dim);
+    for (settings.glasses, 0..) |g, i| button(c, pzGlass(i), g.label, i == settings.glass);
+
+    // Starting at boot.
+    const box = Rect{ .x = pz_check.x, .y = pz_check.y + 2, .w = 18, .h = 18 };
+    if (settings.autostart) {
+        glass.tint(c, box, 4, accent, 255);
+        c.line(@floatFromInt(box.x + 4), @floatFromInt(box.y + 9), @floatFromInt(box.x + 8), @floatFromInt(box.y + 13), 2, 0xffffff);
+        c.line(@floatFromInt(box.x + 8), @floatFromInt(box.y + 13), @floatFromInt(box.x + 14), @floatFromInt(box.y + 5), 2, 0xffffff);
+    } else {
+        glass.tint(c, box, 4, 0xffffff, 30);
+    }
+    glass.outline(c, box, 4, 0xffffff, 120);
+    shadowText(c, 14, @floatFromInt(box.right() + 10), box.y + 14, "Start Vela when the computer starts", text);
+    p.present();
+}
+
+/// A glassy push button; `on` lights it up (the chosen one of a set).
+fn button(c: *gui.Canvas, r: Rect, label: []const u8, on: bool) void {
+    glass.tint(c, r, 6, if (on) accent else 0xffffff, if (on) 200 else 30);
+    glass.outline(c, r, 6, 0xffffff, if (on) 150 else 80);
+    const w = gui.measure(shell.font, 14, label);
+    shadowText(c, 14, @as(f32, @floatFromInt(r.x)) + (@as(f32, @floatFromInt(r.w)) - w) / 2, r.y + 20, label, text);
+}
+
+fn pzAt(x: i32, y: i32) ?PzHit {
+    if (pz_change.contains(x, y)) return .change;
+    for (0..settings.colors.len) |i| {
+        const at = pzSwatch(i);
+        const dx = @as(f32, @floatFromInt(x)) - at[0];
+        const dy = @as(f32, @floatFromInt(y)) - at[1];
+        if (dx * dx + dy * dy <= (swatch_r + 4) * (swatch_r + 4)) return .{ .color = i };
+    }
+    for (0..settings.glasses.len) |i| {
+        if (pzGlass(i).contains(x, y)) return .{ .glass = i };
+    }
+    if (pz_check.contains(x, y)) return .autostart;
+    return null;
+}
+
+fn personalizeEvent(e: gui.Event) void {
+    switch (e) {
+        .press => |m| if (m.button == 1) {
+            const hit = pzAt(m.x, m.y) orelse return;
+            switch (hit) {
+                .change => {
+                    closePersonalize();
+                    openPicker();
+                    return;
+                },
+                .color => |i| {
+                    settings.color = i;
+                    applyColor();
+                },
+                .glass => |i| settings.glass = i,
+                .autostart => settings.autostart = !settings.autostart,
+            }
+            settings.save();
+            drawBar();
+            drawDock();
+            drawPersonalize();
+        },
+        .key => |k| if (k.code == 27) closePersonalize(),
+        .focus => |on| if (!on) closePersonalize(),
+        .windows => windowsChanged(),
+        else => {},
+    }
+}
+
+/// Tells the kernel the window color (the frames of the window in front take it).
+fn applyColor() void {
+    const color = settings.colors[settings.color];
+    desktop.setTheme(color.top, color.bottom, color.rim);
 }
 
 // ---- the wallpaper picker ----
@@ -474,14 +666,14 @@ fn closePicker() void {
 fn drawPicker() void {
     const p = &(picker orelse return);
     const c = &p.canvas;
-    glass.frost(c, sky, desktop.canvas.w, picker_x, picker_y, popup_glass);
+    glass.frost(c, sky, desktop.canvas.w, picker_x, picker_y, popupGlass());
     glass.outline(c, c.bounds(), 14, 0xffffff, 60);
     shadowText(c, 18, picker_pad, 36, "Desktop Background", text);
     const hint = "Click a picture to use it. Esc closes.";
     shadowText(c, 13, @as(f32, @floatFromInt(c.w)) - picker_pad - gui.measure(shell.font, 13, hint), 35, hint, dim);
     for (wallpaper.choices, 0..) |ch, i| {
         const r = pickerSlot(i);
-        const current = std.mem.eql(u8, ch.slug, wallpaper.chosen);
+        const current = std.mem.eql(u8, ch.slug, wallpaper.chosen());
         const ring = Rect{ .x = r.x - 4, .y = r.y - 4, .w = r.w + 8, .h = r.h + 8 };
         if (current) {
             glass.tint(c, ring, 6, 0x9cc8ff, 150);
@@ -573,6 +765,8 @@ pub fn main(_: rt.Args) u8 {
         return 1;
     }
     sky = std.heap.page_allocator.alloc(u32, desktop.canvas.pixels.len) catch return 1;
+    settings.load();
+    applyColor();
     wallpaper.init();
     wallpaper.paint(&desktop.canvas);
     @memcpy(sky, desktop.canvas.pixels);
@@ -591,12 +785,12 @@ pub fn main(_: rt.Args) u8 {
     drawDock();
 
     while (!leaving) {
-        var fds: [5]extern struct { fd: i32, events: i16 = 1, revents: i16 = 0 } = undefined;
+        var fds: [7]extern struct { fd: i32, events: i16 = 1, revents: i16 = 0 } = undefined;
         fds[0] = .{ .fd = desktop.fd };
         fds[1] = .{ .fd = bar.fd };
         fds[2] = .{ .fd = dock.fd };
         var n: usize = 3;
-        for ([_]?gui.Window{ menu, picker }) |w| {
+        for ([_]?gui.Window{ menu, picker, personalize, tooltip }) |w| {
             if (w) |m| {
                 fds[n] = .{ .fd = m.fd };
                 n += 1;
@@ -610,6 +804,8 @@ pub fn main(_: rt.Args) u8 {
         while (dock.pending()) dockEvent(dock.next(0) orelse break);
         while (menu != null and menu.?.pending()) menuEvent(menu.?.next(0) orelse break);
         while (picker != null and picker.?.pending()) pickerEvent(picker.?.next(0) orelse break);
+        while (personalize != null and personalize.?.pending()) personalizeEvent(personalize.?.next(0) orelse break);
+        while (tooltip != null and tooltip.?.pending()) _ = tooltip.?.next(0); // nothing to do
 
         if (windows_dirty) {
             windows_dirty = false;
@@ -626,6 +822,8 @@ pub fn main(_: rt.Args) u8 {
     }
     if (menu) |*m| m.close();
     closePicker();
+    closePersonalize();
+    showTooltip(null);
     dock.close();
     bar.close();
     desktop.close();

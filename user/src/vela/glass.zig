@@ -144,6 +144,26 @@ pub fn orb(c: *Canvas, cx: f32, cy: f32, r: f32, lit: bool, star: *const fn (*Ca
     gloss(c, cx, cy - r * 0.42, r * 0.72, r * 0.45, 120);
 }
 
+/// A glossy ball: `top` fading to `bottom` downward, a dark rim, and a shine over its top half
+/// (the window color swatches).
+pub fn sphere(c: *Canvas, cx: f32, cy: f32, r: f32, top: u32, bottom: u32) void {
+    c.circle(cx, cy, r + 1, 0x07090d);
+    const y0: i32 = @intFromFloat(@floor(cy - r - 1));
+    var y = y0;
+    while (y <= @as(i32, @intFromFloat(@ceil(cy + r + 1)))) : (y += 1) {
+        const t = std.math.clamp((@as(f32, @floatFromInt(y)) + 0.5 - (cy - r)) / (2 * r), 0, 1);
+        const color = gui.mix(bottom, top, @intFromFloat(t * 255));
+        var x: i32 = @intFromFloat(@floor(cx - r - 1));
+        while (x <= @as(i32, @intFromFloat(@ceil(cx + r + 1)))) : (x += 1) {
+            const dx = @as(f32, @floatFromInt(x)) + 0.5 - cx;
+            const dy = @as(f32, @floatFromInt(y)) + 0.5 - cy;
+            const cover = std.math.clamp(r - @sqrt(dx * dx + dy * dy) + 0.5, 0, 1);
+            c.blend(x, y, color, @intFromFloat(cover * 255));
+        }
+    }
+    gloss(c, cx, cy - r * 0.42, r * 0.7, r * 0.45, 110);
+}
+
 /// A soft round light: `alpha` at the center fading to nothing at `r`.
 fn glow(c: *Canvas, cx: f32, cy: f32, r: f32, color: u32, alpha: u32) void {
     const x0: i32 = @intFromFloat(@floor(cx - r));

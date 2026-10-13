@@ -47,11 +47,12 @@ fn buffer_pages(into: &mut [u64; QUEUE_SIZE as usize]) -> bool {
     true
 }
 
-pub fn init() {
-    let Some(mut dev) = virtio::start(&[0x1000, 0x1041], "virtio-net", F_MAC) else { return };
+/// Sets up the virtio network card, if there is one. Returns its MAC address.
+pub fn init() -> Option<crate::net::Mac> {
+    let mut dev = virtio::start(&[0x1000, 0x1041], "virtio-net", F_MAC)?;
     let (Some(rx), Some(tx)) = (dev.queue(0, QUEUE_SIZE), dev.queue(1, QUEUE_SIZE)) else {
         crate::log!("virtio-net: out of memory");
-        return;
+        return None;
     };
     let mut net = Net {
         rx,
@@ -65,7 +66,7 @@ pub fn init() {
     };
     if !buffer_pages(&mut net.rx_buffers) || !buffer_pages(&mut net.tx_buffers) {
         crate::log!("virtio-net: out of memory");
-        return;
+        return None;
     }
     if dev.features & F_MAC != 0 {
         for (i, byte) in net.mac.iter_mut().enumerate() {
@@ -92,6 +93,7 @@ pub fn init() {
     );
     *NET.lock() = Some(net);
     crate::net::init(mac);
+    Some(mac)
 }
 
 pub fn present() -> bool {

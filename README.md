@@ -366,20 +366,40 @@ The graphical toolkit (`user/src/lib/gui.zig`, Zig, a working name) is our own, 
   [JetBrains Mono](https://www.jetbrains.com/lp/mono/) (SIL Open Font License).
 - `user/src/lib/ui.zig` is the smaller helper for text windows (`textclock`).
 
+## Booting
+
+Each step of the boot says how it went, the way Linux distributions show it: `[  OK  ]` when it
+worked, `[ WARN ]` when the system carries on without it (no disk: /root lasts only until a
+reboot; no network card), `[FAILED]` when it didn't. The kernel reports memory, the screen, the
+clock, the machine (SMBIOS), the root file system, the disk, the network (card, address, gateway,
+DNS), mounting /root, the pointer and interrupts, then starting init as pid 1; init reports the
+shell and the desktop, with their pids.
+
+Then init starts Vela, the desktop. The boot menu's second entry, "command line only", puts
+`text` on the kernel command line (`/proc/cmdline`), and init leaves the console as it is; so does
+turning off "Start Vela when the computer starts" in Personalize. The tests boot with `text` too:
+`tests/machine.py` adds it through QEMU's fw_cfg (`opt/kernelproject2/cmdline`), which the kernel
+reads on top of the bootloader's command line.
+
 ## Vela
 
-Vela is KernelProject2's desktop. Type `vela` (or `vela &` to keep the shell) and you get:
+Vela is KernelProject2's desktop. It starts at boot (or type `vela`, or `vela &` to keep the
+shell), and you get:
 
 - a photo as the wallpaper (15 landscapes and night cities from Wikimedia Commons; pick one with
   "Desktop Background…" in the star menu, and it's remembered in `/root/.config/vela.conf`), and
   the apps as icons on it (double-click one);
 - glass, after Windows Vista: the bar, the dock and the menus show the wallpaper behind them,
   blurred and tinted, with a shine; the apps' icons are KDE's Oxygen icons;
-- a bar along the top: the orb with the star menu (every app, "Desktop Background…", and "Leave
-  Vela" to go back to the command line),
+- a bar along the top: the orb with the star menu (every app, "Personalize…", and "Leave Vela" to
+  go back to the command line),
   a button for each open window (click to bring it forward, again to minimize it), and the clock
   (UTC);
-- a dock of favorite apps at the bottom, with a dot under the ones that are running.
+- a dock of favorite apps at the bottom, with a dot under the ones that are running and each
+  one's name above it under the pointer;
+- Personalize: the desktop background (any of the pictures), the window color (eight, after
+  Vista's: the frame of the window in front and the glass take it), how clear the glass is, and
+  whether Vela starts at boot. It's all kept in `/root/.config/vela.conf`.
 
 `terminal` is the shell in a window: kpsh on a pseudo-terminal, told when the window changes size.
 New windows get the keyboard on the desktop, and maximized ones fill the room between the bar and
@@ -447,7 +467,7 @@ disk/            what a new disk starts with (out/disk.img is made from it once)
 tests/           test programs (C, and Windows ones in windows/) and the test scripts:
                  smoke.py, persist.py, windows.py, edit.py, textedit.py, archive.py,
                  pkg.py, accounts.py, net.py, tcp.py, ssh.py, terminals.py, gdb.py, doom.py,
-                 vela.py, session.sh; events.c is events-test, ptys.c pty-test, jail.c jail-test,
+                 vela.py, boot.py, session.sh; events.c is events-test, ptys.c pty-test, jail.c jail-test,
                  trace.c trace-test
 ```
 
@@ -480,7 +500,8 @@ python3 tests/ssh.py      # ssh, scp and ssh-agent against an SSH server on this
 python3 tests/terminals.py # script and tmux, in pseudo-terminals, and job control
 python3 tests/gdb.py      # gdb: breakpoints, a step, attaching (in an image built WITH_GDB=1)
 python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
-python3 tests/vela.py     # the desktop: dock, terminal, taskbar, maximize, star menu, wallpaper picker
+python3 tests/vela.py     # the desktop: dock, terminal, taskbar, maximize, star menu, Personalize
+python3 tests/boot.py     # the boot messages, starting Vela at boot, and turning that off
 ```
 
 ## Roadmap

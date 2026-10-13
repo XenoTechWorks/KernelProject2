@@ -606,19 +606,24 @@ pub fn uninstall(path: &str) {
 /// Where the disk is mounted, if one is (for /proc/mounts and statfs).
 pub static DISK_MOUNT: Once<(String, Arc<Ext2>)> = Once::new();
 
-/// Mounts an ext2 disk, if there is one, at `path`. Programs' files there survive a reboot.
-pub fn mount_disk(path: &str) {
+/// Mounts an ext2 disk, if there is one (None when there isn't), at `path`. Programs' files there
+/// survive a reboot.
+pub fn mount_disk(path: &str) -> Option<Result<(), String>> {
     if crate::drivers::virtio_blk::DISK.lock().is_none() {
-        return;
+        return None;
     }
-    match Ext2::mount() {
+    Some(match Ext2::mount() {
         Ok(fs) => {
             install(path, Node::ext2(fs.clone(), ext2::ROOT_INO));
             DISK_MOUNT.call_once(|| (path.to_string(), fs));
             crate::log!("ext2 disk mounted at {path}");
+            Ok(())
         }
-        Err(why) => crate::log!("disk not mounted: {why}"),
-    }
+        Err(why) => {
+            crate::log!("disk not mounted: {why}");
+            Err(alloc::format!("{why}"))
+        }
+    })
 }
 
 pub fn init_devices() {
