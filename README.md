@@ -367,8 +367,9 @@ The graphical toolkit (`user/src/lib/gui.zig`, Zig, a working name) is our own, 
 
 Vela is KernelProject2's desktop. Type `vela` (or `vela &` to keep the shell) and you get:
 
-- a photo of the Vela supernova remnant (what's left of a star that exploded in the
-  constellation Vela, by ESO) as the wallpaper, and the apps as icons on it (double-click one);
+- a photo as the wallpaper (15 landscapes and night cities from Wikimedia Commons; pick one with
+  "Desktop Background…" in the star menu, and it's remembered in `/root/.config/vela.conf`), and
+  the apps as icons on it (double-click one);
 - a bar along the top: the star menu (every app, and "Leave Vela" to go back to the command line),
   a button for each open window (click to bring it forward, again to minimize it), and the clock
   (UTC);
@@ -383,7 +384,12 @@ as any app, with roles the kernel gives them through the `WINDOW_ROLE` ioctl: it
 *desktop* window (frameless, under every other), the bar and the dock are *panels* (frameless, on
 top, kept clear of normal windows, and clicking them doesn't take the keyboard from your app), and
 the star menu is a *popup* (on top, with the keyboard; it closes when it loses it). Frameless
-windows can have rounded corners, smoothed by the kernel. `WINDOW_LIST`, `WINDOW_ACTIVATE` and
+windows can have rounded corners, smoothed by the kernel.
+
+The wallpapers are JPEG files in `/usr/share/backgrounds` (with small copies in `thumbs/` for the
+picker); any `.jpg` put there shows up in the picker. They're decoded by our own JPEG decoder,
+`user/src/lib/jpeg.zig` (baseline JPEG, any color sampling, restart markers; not progressive).
+`jpegcheck` (built on the build machine only) compares its output with another decoder's. `WINDOW_LIST`, `WINDOW_ACTIVATE` and
 `WINDOW_MINIMIZE` are the taskbar's, and desktop windows hear when the windows change.
 
 ## Doom
@@ -468,7 +474,7 @@ python3 tests/ssh.py      # ssh, scp and ssh-agent against an SSH server on this
 python3 tests/terminals.py # script and tmux, in pseudo-terminals, and job control
 python3 tests/gdb.py      # gdb: breakpoints, a step, attaching (in an image built WITH_GDB=1)
 python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
-python3 tests/vela.py     # the desktop: dock, terminal, taskbar, maximize, the star menu
+python3 tests/vela.py     # the desktop: dock, terminal, taskbar, maximize, star menu, wallpaper picker
 ```
 
 ## Roadmap
@@ -497,7 +503,6 @@ Roughly in order; each step is checked by running a real program.
 - [SDL 2](https://libsdl.org/) (zlib license) is downloaded at build time. Chocolate Doom
   (GPL-2.0) and Freedoom (BSD-3-Clause, its copyright file is copied next to the WAD) come from
   the build machine's packages.
-- Vela's wallpaper is ESO's [Giant cosmic networks](https://www.eso.org/public/images/potw2322a/)
-  (the Vela supernova remnant), credit ESO/VPHAS+ team, acknowledgement Cambridge Astronomical
-  Survey Unit, under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); cropped and scaled
-  (`rootfs/usr/share/backgrounds/vela.txt`).
+- Vela's wallpapers are photos from [Wikimedia Commons](https://commons.wikimedia.org/) under
+  CC BY, CC BY-SA and CC0, cropped and scaled; each one's author, license and source page are in
+  `rootfs/usr/share/backgrounds/CREDITS.txt`.

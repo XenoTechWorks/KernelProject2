@@ -1,0 +1,78 @@
+Vela's wallpapers: photos from Wikimedia Commons, each under its own free license.
+All were cropped to 16:10 and scaled to 1280x800 (and 192x120 in thumbs/), saved as JPEG.
+
+lake-tahoe.jpg: Lake Tahoe
+  Author: John D.
+  License: CC BY 2.0 (https://creativecommons.org/licenses/by/2.0)
+  Source: https://commons.wikimedia.org/wiki/File:Lake_Tahoe_at_morning_-_7-2023.jpg
+
+dolomites.jpg: Dolomites
+  Author: Photo by Wolfgang Moroder
+  License: CC BY-SA 3.0 (https://creativecommons.org/licenses/by-sa/3.0)
+  Source: https://commons.wikimedia.org/wiki/File:Saslonch_udu_da_Mont_de_Seuc.jpg
+
+kleinarl.jpg: Kleinarl
+  Author: Uoaei1
+  License: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0)
+  Source: https://commons.wikimedia.org/wiki/File:Kleinarl_J%C3%A4gersee_20180209.jpg
+
+lake-mystery.jpg: Lake Mystery
+  Author: Michal Klajban
+  License: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0)
+  Source: https://commons.wikimedia.org/wiki/File:Lake_Mystery,_Canterbury,_New_Zealand_05.jpg
+
+baleia-franca.jpg: Baleia Franca
+  Author: Ctseelig
+  License: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0)
+  Source: https://commons.wikimedia.org/wiki/File:%C3%81rea_de_Prote%C3%A7%C3%A3o_Ambiental_da_Baleia_Franca_Claudio_Seelig_(01).jpg
+
+loch-tummel.jpg: Loch Tummel
+  Author: Eric Kilby
+  License: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0)
+  Source: https://commons.wikimedia.org/wiki/File:Foggy_Reflections_-_Loch_Tummel.jpg
+
+myvatn.jpg: Mývatn
+  Author: © Giles Laurent, gileslaurent.com
+  License: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0)
+  Source: https://commons.wikimedia.org/wiki/File:039_Northern_lights_over_M%C3%BDvatn_(Iceland)_Photo_by_Giles_Laurent.jpg
+
+tuscany.jpg: Tuscany
+  Author: Martin Falbisoner
+  License: CC BY-SA 3.0 (https://creativecommons.org/licenses/by-sa/3.0)
+  Source: https://commons.wikimedia.org/wiki/File:Tuscan_Landscape_6.JPG
+
+llyn-ogwen.jpg: Llyn Ogwen
+  Author: John Badham
+  License: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0)
+  Source: https://commons.wikimedia.org/wiki/File:Llyn_Ogwen_Milky_Way.jpg
+
+budapest.jpg: Budapest
+  Author: Wilfredor
+  License: CC0 (http://creativecommons.org/publicdomain/zero/1.0/deed.en)
+  Source: https://commons.wikimedia.org/wiki/File:Sz%C3%A9chenyi_Chain_Bridge_in_Budapest_at_night.jpg
+
+frankfurt.jpg: Frankfurt
+  Author: Jörg Braukmann
+  License: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0)
+  Source: https://commons.wikimedia.org/wiki/File:Frankfurt_Skyline_2022_bei_Nacht.jpg
+
+new-york.jpg: New York
+  Author: King of Hearts
+  License: CC BY-SA 3.0 (https://creativecommons.org/licenses/by-sa/3.0)
+  Source: https://commons.wikimedia.org/wiki/File:Lower_Manhattan_from_Jersey_City_November_2014_panorama_3.jpg
+
+quebec.jpg: Québec
+  Author: Wilfredor
+  License: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0)
+  Source: https://commons.wikimedia.org/wiki/File:Qu%C3%A9bec_city_at_night,_view_from_L%C3%A9vis_city.jpg
+
+seattle.jpg: Seattle
+  Author: Dllu
+  License: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0)
+  Source: https://commons.wikimedia.org/wiki/File:Seattle_I-5_skyline_dllu.jpg
+
+shanghai.jpg: Shanghai
+  Author: King of Hearts
+  License: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0)
+  Source: https://commons.wikimedia.org/wiki/File:Pudong_Shanghai_November_2017_HDR_panorama.jpg
+

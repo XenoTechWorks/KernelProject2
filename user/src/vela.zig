@@ -13,6 +13,7 @@ const apps = @import("vela/apps.zig");
 const icons = @import("vela/icons.zig");
 const shell = @import("vela/shell.zig");
 const wallpaper = @import("vela/wallpaper.zig");
+const jpeg = @import("lib/jpeg.zig");
 const sys = rt.sys;
 pub const _start = rt._start;
 comptime {
@@ -310,13 +311,13 @@ const menu_row = 42;
 var menu: ?gui.Window = null;
 var menu_hover: ?usize = null;
 
-/// Rows: each app, then "Leave Vela".
+/// Rows: each app, then "Desktop Background..." and "Leave Vela".
 fn menuRows() usize {
-    return apps.count + 1;
+    return apps.count + 2;
 }
 
 fn menuRow(i: usize) Rect {
-    const extra: i32 = if (i == apps.count) 13 else 0; // below the line before "Leave Vela"
+    const extra: i32 = if (i >= apps.count) 13 else 0; // below the line before the last two
     return .{ .x = 8, .y = menu_head + extra + @as(i32, @intCast(i)) * menu_row, .w = menu_w - 16, .h = menu_row - 4 };
 }
 
@@ -354,8 +355,10 @@ fn drawMenu() void {
             const app = apps.list()[i];
             icons.draw(c, shell.font, app.icon, r.x + 8, r.y + 5, 28);
             _ = c.text(shell.font, 14, @floatFromInt(r.x + 48), r.y + 24, app.name, text);
-        } else {
+        } else if (i == apps.count) {
             c.rect(.{ .x = 16, .y = r.y - 8, .w = menu_w - 32, .h = 1 }, 0x2e3440);
+            _ = c.text(shell.font, 14, @floatFromInt(r.x + 12), r.y + 24, "Desktop Background…", text);
+        } else {
             _ = c.text(shell.font, 14, @floatFromInt(r.x + 12), r.y + 24, "Leave Vela", dim);
         }
     }
@@ -400,7 +403,127 @@ var leaving = false;
 
 fn choose(i: usize) void {
     closeMenu();
-    if (i < apps.count) shell.launch(apps.list()[i].path) else leaving = true;
+    if (i < apps.count) {
+        shell.launch(apps.list()[i].path);
+    } else if (i == apps.count) {
+        openPicker();
+    } else {
+        leaving = true;
+    }
+}
+
+// ---- the wallpaper picker ----
+
+const thumb_w = 192;
+const thumb_h = 120;
+const picker_cols = 4;
+const picker_pad = 22;
+const picker_gap = 16;
+const picker_head = 58;
+const picker_row = thumb_h + 30;
+
+var picker: ?gui.Window = null;
+var picker_hover: ?usize = null;
+var thumbs: [48]?jpeg.Image = @splat(null);
+var thumbs_loaded = false;
+
+fn pickerSlot(i: usize) Rect {
+    const col: i32 = @intCast(i % picker_cols);
+    const row: i32 = @intCast(i / picker_cols);
+    return .{ .x = picker_pad + col * (thumb_w + picker_gap), .y = picker_head + row * picker_row, .w = thumb_w, .h = thumb_h };
+}
+
+fn openPicker() void {
+    if (picker != null or wallpaper.choices.len == 0) return;
+    if (!thumbs_loaded) {
+        for (wallpaper.choices, 0..) |ch, i| thumbs[i] = wallpaper.thumbnail(ch.slug);
+        thumbs_loaded = true;
+    }
+    const rows = (wallpaper.choices.len + picker_cols - 1) / picker_cols;
+    const w: u32 = 2 * picker_pad + picker_cols * thumb_w + (picker_cols - 1) * picker_gap;
+    const h: u32 = @intCast(picker_head + @as(i32, @intCast(rows)) * picker_row + 8);
+    const screen = desktop.screenSize();
+    var p = gui.Window.open("Desktop Background", w, h) orelse return;
+    const x: i32 = @intCast((screen.w -| w) / 2);
+    const y: i32 = @max(bar_h + 8, @as(i32, @intCast((screen.h -| h) / 2)) - 20);
+    if (!p.setRole(.popup, x, y, w, h, 14)) {
+        p.close();
+        return;
+    }
+    picker = p;
+    picker_hover = null;
+    drawPicker();
+}
+
+fn closePicker() void {
+    if (picker) |*p| p.close();
+    picker = null;
+}
+
+fn drawPicker() void {
+    const p = &(picker orelse return);
+    const c = &p.canvas;
+    c.fill(0x1c2029);
+    c.roundRectOutline(c.bounds(), 14, 1, 0x343a47);
+    _ = c.text(shell.font, 18, picker_pad, 36, "Desktop Background", text);
+    const hint = "Click a picture to use it. Esc closes.";
+    _ = c.text(shell.font, 13, @as(f32, @floatFromInt(c.w)) - picker_pad - gui.measure(shell.font, 13, hint), 35, hint, dim);
+    for (wallpaper.choices, 0..) |ch, i| {
+        const r = pickerSlot(i);
+        const current = std.mem.eql(u8, ch.slug, wallpaper.chosen);
+        if (current) {
+            c.roundRect(.{ .x = r.x - 4, .y = r.y - 4, .w = r.w + 8, .h = r.h + 8 }, 8, accent);
+        } else if (picker_hover == i) {
+            c.roundRect(.{ .x = r.x - 3, .y = r.y - 3, .w = r.w + 6, .h = r.h + 6 }, 7, 0x5a6273);
+        }
+        if (thumbs[i]) |img| wallpaper.drawCover(c, img, r, 255) else c.rect(r, 0x2a2f39);
+        var buf: [64]u8 = undefined;
+        const label = shell.fit(&buf, ch.title, 13, thumb_w);
+        const lw = gui.measure(shell.font, 13, label);
+        _ = c.text(shell.font, 13, @as(f32, @floatFromInt(r.x)) + (thumb_w - lw) / 2, r.bottom() + 19, label, if (current) text else 0xc3c9d4);
+    }
+    p.present();
+}
+
+fn pickerAt(x: i32, y: i32) ?usize {
+    for (0..wallpaper.choices.len) |i| {
+        const r = pickerSlot(i);
+        if ((Rect{ .x = r.x - 4, .y = r.y - 4, .w = r.w + 8, .h = r.h + 26 }).contains(x, y)) return i;
+    }
+    return null;
+}
+
+fn pickerEvent(e: gui.Event) void {
+    switch (e) {
+        .motion => |m| {
+            const h = pickerAt(m.x, m.y);
+            if (h != picker_hover) {
+                picker_hover = h;
+                drawPicker();
+            }
+        },
+        .leave => if (picker_hover != null) {
+            picker_hover = null;
+            drawPicker();
+        },
+        .press => |m| if (m.button == 1) {
+            const i = pickerAt(m.x, m.y) orelse return;
+            wallpaper.choose(wallpaper.choices[i].slug);
+            drawPicker();
+            applyWallpaper();
+        },
+        .key => |k| if (k.code == 27) closePicker(),
+        .focus => |on| if (!on) closePicker(),
+        .windows => windowsChanged(),
+        else => {},
+    }
+}
+
+/// Paints the chosen wallpaper and the icons over it.
+fn applyWallpaper() void {
+    wallpaper.paint(&desktop.canvas);
+    @memcpy(sky, desktop.canvas.pixels);
+    drawDesktop();
 }
 
 // ---- together ----
@@ -434,6 +557,7 @@ pub fn main(_: rt.Args) u8 {
         return 1;
     }
     sky = std.heap.page_allocator.alloc(u32, desktop.canvas.pixels.len) catch return 1;
+    wallpaper.init();
     wallpaper.paint(&desktop.canvas);
     @memcpy(sky, desktop.canvas.pixels);
 
@@ -449,14 +573,16 @@ pub fn main(_: rt.Args) u8 {
     drawDock();
 
     while (!leaving) {
-        var fds: [4]extern struct { fd: i32, events: i16 = 1, revents: i16 = 0 } = undefined;
+        var fds: [5]extern struct { fd: i32, events: i16 = 1, revents: i16 = 0 } = undefined;
         fds[0] = .{ .fd = desktop.fd };
         fds[1] = .{ .fd = bar.fd };
         fds[2] = .{ .fd = dock.fd };
         var n: usize = 3;
-        if (menu) |m| {
-            fds[3] = .{ .fd = m.fd };
-            n = 4;
+        for ([_]?gui.Window{ menu, picker }) |w| {
+            if (w) |m| {
+                fds[n] = .{ .fd = m.fd };
+                n += 1;
+            }
         }
         // Wake at least once a second for the clock.
         _ = sys.syscall3(7, @intFromPtr(&fds), n, 1000); // poll
@@ -465,6 +591,7 @@ pub fn main(_: rt.Args) u8 {
         while (bar.pending()) barEvent(bar.next(0) orelse break);
         while (dock.pending()) dockEvent(dock.next(0) orelse break);
         while (menu != null and menu.?.pending()) menuEvent(menu.?.next(0) orelse break);
+        while (picker != null and picker.?.pending()) pickerEvent(picker.?.next(0) orelse break);
 
         if (windows_dirty) {
             windows_dirty = false;
@@ -480,6 +607,7 @@ pub fn main(_: rt.Args) u8 {
         shell.reap();
     }
     if (menu) |*m| m.close();
+    closePicker();
     dock.close();
     bar.close();
     desktop.close();

@@ -1,9 +1,0 @@
-vela.ppm.gz: part of the Vela supernova remnant, the cloud left by a star that exploded about
-11,000 years ago in the constellation Vela.
-
-Credit: ESO/VPHAS+ team. Acknowledgement: Cambridge Astronomical Survey Unit
-Source: https://www.eso.org/public/images/potw2322a/ ("Giant cosmic networks")
-License: Creative Commons Attribution 4.0 International (https://creativecommons.org/licenses/by/4.0/)
-
-Changed from the original: cropped from 4:3 to 16:10 and scaled to 1280x800, stored as a
-gzipped binary PPM so Vela can read it without an image decoder.

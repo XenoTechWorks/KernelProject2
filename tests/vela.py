@@ -117,5 +117,27 @@ with Machine() as m:
     time.sleep(2)
     check("Escape closes it", screen(m)[BAR_H + 6 + 120][6 + 140] != MENU_BG)
 
+    # The wallpaper picker: the star menu's row after the apps (eight of them: Doom is in the
+    # image), then the second picture (alphabetically Budapest; Lake Tahoe is the default).
+    corner = (W - 30, H - 10)  # below the maximized terminal, beside the dock: wallpaper
+    before = screen(m)[corner[1]][corner[0]]
+    click(m, 47, BAR_H // 2)
+    time.sleep(2)
+    click(m, 6 + 8 + 100, BAR_H + 6 + 70 + 13 + 8 * 42 + 19)
+    time.sleep(3)
+    picker_w, picker_h = 2 * 22 + 4 * 192 + 3 * 16, 58 + 4 * 150 + 8
+    px, py = (W - picker_w) // 2, max(BAR_H + 8, (H - picker_h) // 2 - 20)
+    save(m, "vela-5.png")
+    check("Desktop Background opens the picker", screen(m)[py + 30][px + 300] == MENU_BG)
+    click(m, px + 22 + 208 + 96, py + 58 + 60)
+    time.sleep(8)  # decoding a 1280x800 JPEG under emulation
+    save(m, "vela-6.png")
+    after = screen(m)[corner[1]][corner[0]]
+    check("clicking a picture changes the wallpaper", after != before, (before, after))
+    m.monitor("sendkey esc")
+    time.sleep(1)
+    conf = m.run("cat /root/.config/vela.conf")
+    check("the choice is saved in /root/.config/vela.conf", conf is not None and "wallpaper=budapest" in conf, conf)
+
 print(f"{sum(results)}/{len(results)} passed")
 sys.exit(0 if all(results) else 1)

@@ -1,67 +1,171 @@
-//! Vela's wallpaper: a photo of the Vela supernova remnant (ESO, see
-//! /usr/share/backgrounds/vela.txt), or, when it's missing, a night sky drawn here with the stars
-//! of Vela joined up on the right.
+//! Vela's wallpaper: one of the photos in /usr/share/backgrounds (JPEGs, with small copies in
+//! thumbs/ for the picker; credits in CREDITS.txt there), the one chosen in /root/.config/vela.conf.
+//! When none can be read, a night sky drawn here, with the stars of Vela joined up on the right.
 
 const std = @import("std");
 const gui = @import("../lib/gui.zig");
 const file = @import("../lib/file.zig");
-const gzip = @import("../lib/gzip.zig");
+const jpeg = @import("../lib/jpeg.zig");
+const sys = @import("../lib/sys.zig");
 const Canvas = gui.Canvas;
 
-const photo_path = "/usr/share/backgrounds/vela.ppm.gz";
+const gpa = std.heap.page_allocator;
+const dir = "/usr/share/backgrounds";
+const config_path = "/root/.config/vela.conf";
+pub const default_choice = "lake-tahoe";
 
-/// Fills the canvas with the photo, or the drawn sky if the photo can't be read.
-pub fn paint(c: *Canvas) void {
-    if (!paintPhoto(c, photo_path)) paintSky(c);
+/// A wallpaper: its file's name without ".jpg", and what the picker calls it.
+pub const Choice = struct { slug: []const u8, title: []const u8 };
+
+var slugs_buf: [4096]u8 = undefined;
+var choices_buf: [48]Choice = undefined;
+pub var choices: []Choice = choices_buf[0..0];
+var chosen_buf: [64]u8 = undefined;
+/// The wallpaper in use (a slug).
+pub var chosen: []const u8 = default_choice;
+
+/// Finds the wallpapers (every .jpg in /usr/share/backgrounds, named after the index file there
+/// when it lists them) and reads which one was chosen.
+pub fn init() void {
+    var names_buf: [4096]u8 = undefined;
+    const index = readSmall(dir ++ "/index", &names_buf) orelse "";
+    var used: usize = 0;
+    var n: usize = 0;
+    const fd: i32 = switch (sys.open(dir, sys.O_RDONLY | sys.O_DIRECTORY, 0)) {
+        .ok => |fd| @intCast(fd),
+        .err => return,
+    };
+    defer sys.close(fd);
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const got = switch (sys.check(sys.syscall3(sys.nr.getdents64, @bitCast(@as(isize, fd)), @intFromPtr(&buf), buf.len))) {
+            .ok => |k| k,
+            .err => break,
+        };
+        if (got == 0) break;
+        var at: usize = 0;
+        while (at < got) {
+            const reclen = std.mem.readInt(u16, buf[at + 16 ..][0..2], .little);
+            const entry = std.mem.sliceTo(buf[at + 19 .. at + reclen], 0);
+            at += reclen;
+            if (!std.mem.endsWith(u8, entry, ".jpg") or n == choices_buf.len) continue;
+            const slug = entry[0 .. entry.len - 4];
+            if (used + 2 * slug.len + 2 > slugs_buf.len) continue;
+            @memcpy(slugs_buf[used..][0..slug.len], slug);
+            const kept = slugs_buf[used..][0..slug.len];
+            used += slug.len;
+            choices_buf[n] = .{ .slug = kept, .title = titleFor(index, kept, &used) };
+            n += 1;
+        }
+    }
+    choices = choices_buf[0..n];
+    std.mem.sort(Choice, choices, {}, struct {
+        fn less(_: void, a: Choice, b: Choice) bool {
+            return std.mem.order(u8, a.title, b.title) == .lt;
+        }
+    }.less);
+
+    var conf_buf: [512]u8 = undefined;
+    if (readSmall(config_path, &conf_buf)) |conf| {
+        var lines = std.mem.splitScalar(u8, conf, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "wallpaper=")) {
+                const v = std.mem.trim(u8, line["wallpaper=".len..], " \r\t");
+                if (v.len > 0 and v.len <= chosen_buf.len) {
+                    @memcpy(chosen_buf[0..v.len], v);
+                    chosen = chosen_buf[0..v.len];
+                }
+            }
+        }
+    }
 }
 
-/// A gzipped binary PPM (P6, 8 bits), scaled to cover the canvas (cut at the sides or top and
-/// bottom if the shape differs) and dimmed a little so icons and their labels stand out.
-fn paintPhoto(c: *Canvas, path: [*:0]const u8) bool {
-    const packed_data = file.read(path) catch return false;
-    defer std.heap.page_allocator.free(packed_data);
-    const ppm = gzip.decompress(packed_data) catch return false;
-    defer std.heap.page_allocator.free(ppm);
-
-    // The header: "P6", width, height, maxval, then one whitespace character and the pixels.
-    var fields: [4]u32 = undefined;
-    var at: usize = 0;
-    for (&fields, 0..) |*f, i| {
-        while (at < ppm.len and std.ascii.isWhitespace(ppm[at])) at += 1;
-        const start = at;
-        while (at < ppm.len and !std.ascii.isWhitespace(ppm[at])) at += 1;
-        const word = ppm[start..at];
-        if (i == 0) {
-            if (!std.mem.eql(u8, word, "P6")) return false;
-            f.* = 0;
-        } else {
-            f.* = std.fmt.parseInt(u32, word, 10) catch return false;
-        }
+/// The index file's name for a slug ("slug<TAB>Title" lines), or the slug itself.
+fn titleFor(index: []const u8, slug: []const u8, used: *usize) []const u8 {
+    var lines = std.mem.splitScalar(u8, index, '\n');
+    while (lines.next()) |line| {
+        var parts = std.mem.splitScalar(u8, line, '\t');
+        if (!std.mem.eql(u8, parts.next() orelse "", slug)) continue;
+        const title = parts.next() orelse break;
+        if (used.* + title.len > slugs_buf.len) break;
+        @memcpy(slugs_buf[used.*..][0..title.len], title);
+        defer used.* += title.len;
+        return slugs_buf[used.*..][0..title.len];
     }
-    at += 1;
-    const pw = fields[1];
-    const ph = fields[2];
-    if (fields[3] != 255 or pw == 0 or ph == 0 or ppm.len < at + @as(usize, pw) * ph * 3) return false;
-    const pixels = ppm[at..];
+    return slug;
+}
 
-    // Cover: the same scale both ways, big enough to fill the canvas, centered.
-    const sx = @as(f32, @floatFromInt(pw)) / @as(f32, @floatFromInt(c.w));
-    const sy = @as(f32, @floatFromInt(ph)) / @as(f32, @floatFromInt(c.h));
-    const scale = @min(sx, sy);
-    const ox = (@as(f32, @floatFromInt(pw)) - scale * @as(f32, @floatFromInt(c.w))) / 2;
-    const oy = (@as(f32, @floatFromInt(ph)) - scale * @as(f32, @floatFromInt(c.h))) / 2;
-    var y: u32 = 0;
-    while (y < c.h) : (y += 1) {
-        const py: u32 = @min(ph - 1, @as(u32, @intFromFloat(oy + (@as(f32, @floatFromInt(y)) + 0.5) * scale)));
-        var x: u32 = 0;
-        while (x < c.w) : (x += 1) {
-            const px: u32 = @min(pw - 1, @as(u32, @intFromFloat(ox + (@as(f32, @floatFromInt(x)) + 0.5) * scale)));
-            const p = pixels[(@as(usize, py) * pw + px) * 3 ..][0..3];
-            const dimmed = [3]u32{ @as(u32, p[0]) * 218 / 255, @as(u32, p[1]) * 218 / 255, @as(u32, p[2]) * 218 / 255 };
-            c.pixels[y * c.w + x] = dimmed[0] << 16 | dimmed[1] << 8 | dimmed[2];
-        }
+fn readSmall(path: [*:0]const u8, buf: []u8) ?[]const u8 {
+    const data = file.read(path) catch return null;
+    defer gpa.free(data);
+    const n = @min(data.len, buf.len);
+    @memcpy(buf[0..n], data[0..n]);
+    return buf[0..n];
+}
+
+/// Makes `slug` the wallpaper, and remembers it (in /root, which is kept across boots).
+pub fn choose(slug: []const u8) void {
+    const n = @min(slug.len, chosen_buf.len);
+    std.mem.copyForwards(u8, chosen_buf[0..n], slug[0..n]);
+    chosen = chosen_buf[0..n];
+    var out: [128]u8 = undefined;
+    const text = std.fmt.bufPrint(&out, "wallpaper={s}\n", .{chosen}) catch return;
+    file.makeParents(config_path);
+    file.write(config_path, text, 0o644) catch {};
+}
+
+/// Fills the canvas with the chosen wallpaper (or the first one there is, or the drawn sky).
+pub fn paint(c: *Canvas) void {
+    if (paintPhoto(c, chosen)) return;
+    for (choices) |ch| {
+        if (paintPhoto(c, ch.slug)) return;
     }
+    paintSky(c);
+}
+
+/// A wallpaper's small picture for the picker, decoded (the caller deinits it).
+pub fn thumbnail(slug: []const u8) ?jpeg.Image {
+    var path: [256]u8 = undefined;
+    const p = std.fmt.bufPrint(&path, dir ++ "/thumbs/{s}.jpg\x00", .{slug}) catch return null;
+    const data = file.read(@ptrCast(p.ptr)) catch return null;
+    defer gpa.free(data);
+    return jpeg.decode(data) catch null;
+}
+
+/// A photo scaled to cover the canvas (cut at the sides or top and bottom if the shape differs),
+/// dimmed a little so icons and their labels stand out.
+fn paintPhoto(c: *Canvas, slug: []const u8) bool {
+    var path: [256]u8 = undefined;
+    const p = std.fmt.bufPrint(&path, dir ++ "/{s}.jpg\x00", .{slug}) catch return false;
+    const data = file.read(@ptrCast(p.ptr)) catch return false;
+    defer gpa.free(data);
+    var img = jpeg.decode(data) catch return false;
+    defer img.deinit();
+    drawCover(c, img, c.bounds(), 218);
     return true;
+}
+
+/// Draws `img` scaled to cover `r` (centered, cut to fit), each channel times `level`/255.
+pub fn drawCover(c: *Canvas, img: jpeg.Image, r: gui.Rect, level: u32) void {
+    const sx = @as(f32, @floatFromInt(img.w)) / @as(f32, @floatFromInt(r.w));
+    const sy = @as(f32, @floatFromInt(img.h)) / @as(f32, @floatFromInt(r.h));
+    const scale = @min(sx, sy);
+    const ox = (@as(f32, @floatFromInt(img.w)) - scale * @as(f32, @floatFromInt(r.w))) / 2;
+    const oy = (@as(f32, @floatFromInt(img.h)) - scale * @as(f32, @floatFromInt(r.h))) / 2;
+    const clip = r.intersect(c.clip);
+    var y = clip.y;
+    while (y < clip.bottom()) : (y += 1) {
+        const py: u32 = @min(img.h - 1, @as(u32, @intFromFloat(oy + (@as(f32, @floatFromInt(y - r.y)) + 0.5) * scale)));
+        var x = clip.x;
+        while (x < clip.right()) : (x += 1) {
+            const px: u32 = @min(img.w - 1, @as(u32, @intFromFloat(ox + (@as(f32, @floatFromInt(x - r.x)) + 0.5) * scale)));
+            const p = img.pixels[py * img.w + px];
+            const rr = (p >> 16 & 0xff) * level / 255;
+            const gg = (p >> 8 & 0xff) * level / 255;
+            const bb = (p & 0xff) * level / 255;
+            c.pixels[@as(usize, @intCast(y)) * c.w + @as(usize, @intCast(x))] = rr << 16 | gg << 8 | bb;
+        }
+    }
 }
 
 const top = 0x0a0f1f;
