@@ -11,6 +11,40 @@ const WINDOW_PIXELS = 0x5701;
 const WINDOW_TITLE = 0x5702;
 const WINDOW_BLIT = 0x5703;
 const WINDOW_POINTER = 0x5704;
+const WINDOW_SCREEN = 0x5705;
+const WINDOW_ROLE = 0x5706;
+const WINDOW_LIST = 0x5707;
+const WINDOW_ACTIVATE = 0x5708;
+const WINDOW_MINIMIZE = 0x5709;
+
+/// What a window is for (kernel/src/console.rs Role). A desktop uses the others for itself.
+pub const Role = enum(u32) {
+    normal,
+    /// Frameless, under all other windows, filling the screen.
+    desktop,
+    /// Frameless, over normal windows, which stay out of its strip of screen. Clicks on it leave
+    /// the keyboard where it was.
+    panel,
+    /// Frameless, over everything, with the keyboard.
+    popup,
+};
+
+/// A normal window, as a taskbar sees it.
+pub const Listed = extern struct {
+    id: u32,
+    flags: u32,
+    title: [56]u8,
+
+    pub fn focused(l: *const Listed) bool {
+        return l.flags & 1 != 0;
+    }
+    pub fn minimized(l: *const Listed) bool {
+        return l.flags & 2 != 0;
+    }
+    pub fn name(l: *const Listed) []const u8 {
+        return std.mem.sliceTo(&l.title, 0);
+    }
+};
 
 const Blit = extern struct { x: u32, y: u32, w: u32, h: u32, stride: u32, pad: u32 = 0, pixels: u64 };
 const Raw = extern struct { kind: u32, x: i32, y: i32, data: u32 };
@@ -45,6 +79,8 @@ pub const Event = union(enum) {
     resize: struct { w: u32, h: u32 },
     /// Nothing happened before the timeout given to next().
     tick,
+    /// (Desktop windows only) a window opened, closed, changed its title, or got the keyboard.
+    windows,
 };
 
 pub const Window = struct {
@@ -110,6 +146,47 @@ pub const Window = struct {
         sys.close(self.fd);
     }
 
+    /// Gives the window a role, puts it at (x, y) and makes it w x h (a desktop fills the screen),
+    /// with its corners rounded by `radius`. The canvas gets the new size.
+    pub fn setRole(self: *Window, role: Role, x: i32, y: i32, w: u32, h: u32, radius: u32) bool {
+        var arg = extern struct { role: u32, x: i32, y: i32, w: u32, h: u32, radius: u32 }{ .role = @intFromEnum(role), .x = x, .y = y, .w = w, .h = h, .radius = radius };
+        if (ioctl(self.fd, WINDOW_ROLE, @intFromPtr(&arg)) != .ok) return false;
+        const screen = self.screenSize();
+        const size_w = if (role == .desktop) screen.w else w;
+        const size_h = if (role == .desktop) screen.h else h;
+        if (size_w != self.canvas.w or size_h != self.canvas.h) {
+            const c = Canvas.init(size_w, size_h) orelse return false;
+            self.canvas.deinit();
+            self.canvas = c;
+        }
+        return true;
+    }
+
+    /// The whole screen's size in pixels.
+    pub fn screenSize(self: *Window) struct { w: u32, h: u32 } {
+        var size = [2]u32{ 0, 0 };
+        _ = ioctl(self.fd, WINDOW_SCREEN, @intFromPtr(&size));
+        return .{ .w = size[0], .h = size[1] };
+    }
+
+    /// The normal windows, bottom to top, into `out`. Returns how many it filled in.
+    pub fn list(self: *Window, out: []Listed) usize {
+        var arg = extern struct { entries: u64, capacity: u32, pad: u32 = 0 }{ .entries = @intFromPtr(out.ptr), .capacity = @intCast(out.len) };
+        return switch (ioctl(self.fd, WINDOW_LIST, @intFromPtr(&arg))) {
+            .ok => |n| @min(n, out.len),
+            .err => 0,
+        };
+    }
+
+    /// Brings a window (by id, from list) forward with the keyboard, back from minimized.
+    pub fn activate(self: *Window, id: u32) void {
+        _ = ioctl(self.fd, WINDOW_ACTIVATE, id);
+    }
+
+    pub fn minimize(self: *Window, id: u32) void {
+        _ = ioctl(self.fd, WINDOW_MINIMIZE, id);
+    }
+
     /// Waits up to `timeout_ms` (null: forever) for the next event. Null once the window is closed.
     pub fn next(self: *Window, timeout_ms: ?u32) ?Event {
         if (self.taken == self.queued) {
@@ -149,6 +226,7 @@ pub const Window = struct {
                 }
                 break :blk .{ .resize = .{ .w = self.canvas.w, .h = self.canvas.h } };
             },
+            10 => .windows,
             else => .tick,
         };
     }

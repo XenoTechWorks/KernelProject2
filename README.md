@@ -316,8 +316,9 @@ tmux attach                     # ...and this comes back to it
 
 ## Apps in windows
 
-Programs can open windows that float over the console, with a header, a close button and a soft
-shadow. It isn't a desktop: the command line stays the whole screen, and windows sit on top of it.
+Programs can open windows that float over the console, with a header, buttons to minimize,
+maximize and close, and a soft shadow. Without a desktop the command line stays the whole screen,
+and windows sit on top of it; `vela` starts the desktop (see Vela, below).
 
 ```sh
 clock &            # the time, big
@@ -362,6 +363,29 @@ The graphical toolkit (`user/src/lib/gui.zig`, Zig, a working name) is our own, 
   [JetBrains Mono](https://www.jetbrains.com/lp/mono/) (SIL Open Font License).
 - `user/src/lib/ui.zig` is the smaller helper for text windows (`textclock`).
 
+## Vela
+
+Vela is KernelProject2's desktop. Type `vela` (or `vela &` to keep the shell) and you get:
+
+- a night-sky wallpaper, with the stars of Vela (the constellation it's named after), and the
+  apps as icons on it (double-click one);
+- a bar along the top: the star menu (every app, and "Leave Vela" to go back to the command line),
+  a button for each open window (click to bring it forward, again to minimize it), and the clock
+  (UTC);
+- a dock of favorite apps at the bottom, with a dot under the ones that are running.
+
+`terminal` is the shell in a window: kpsh on a pseudo-terminal, told when the window changes size.
+New windows get the keyboard on the desktop, and maximized ones fill the room between the bar and
+the dock.
+
+Vela is an ordinary program (`user/src/vela.zig` and `user/src/vela/`, Zig) using the same windows
+as any app, with roles the kernel gives them through the `WINDOW_ROLE` ioctl: its wallpaper is a
+*desktop* window (frameless, under every other), the bar and the dock are *panels* (frameless, on
+top, kept clear of normal windows, and clicking them doesn't take the keyboard from your app), and
+the star menu is a *popup* (on top, with the keyboard; it closes when it loses it). Frameless
+windows can have rounded corners, smoothed by the kernel. `WINDOW_LIST`, `WINDOW_ACTIVATE` and
+`WINDOW_MINIMIZE` are the taskbar's, and desktop windows hear when the windows change.
+
 ## Doom
 
 Chocolate Doom runs: Ubuntu's own `chocolate-doom`, unchanged, playing
@@ -402,7 +426,8 @@ kernel/          the kernel (Rust)
   src/term.rs      a terminal: character cells and escape sequences
   src/console.rs   the screen: the console and windows over it, composited; the pointer
   src/keyboard.rs, src/mouse.rs   PS/2 keyboard and mouse
-user/src/        init, the shell, the commands and apps (Zig); lib/gui is the toolkit
+user/src/        init, the shell, the commands and apps (Zig); lib/gui is the toolkit,
+                 vela.zig and vela/ the desktop
 windows/src/     the Windows layer: PE loader, kernel32, msvcrt (C++)
 sdl2/            SDL 2's video driver for our windows, and the script that builds SDL with it
 rootfs/          files copied into the root file system (/etc ...)
@@ -410,7 +435,7 @@ disk/            what a new disk starts with (out/disk.img is made from it once)
 tests/           test programs (C, and Windows ones in windows/) and the test scripts:
                  smoke.py, persist.py, windows.py, edit.py, textedit.py, archive.py,
                  pkg.py, accounts.py, net.py, tcp.py, ssh.py, terminals.py, gdb.py, doom.py,
-                 session.sh; events.c is events-test, ptys.c pty-test, jail.c jail-test,
+                 vela.py, session.sh; events.c is events-test, ptys.c pty-test, jail.c jail-test,
                  trace.c trace-test
 ```
 
@@ -443,6 +468,7 @@ python3 tests/ssh.py      # ssh, scp and ssh-agent against an SSH server on this
 python3 tests/terminals.py # script and tmux, in pseudo-terminals, and job control
 python3 tests/gdb.py      # gdb: breakpoints, a step, attaching (in an image built WITH_GDB=1)
 python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
+python3 tests/vela.py     # the desktop: dock, terminal, taskbar, maximize, the star menu
 ```
 
 ## Roadmap

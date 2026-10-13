@@ -691,6 +691,36 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
                 user::write_struct(p.space(), arg, &(window.input.lock().len() as u32))?;
                 Ok(0)
             }
+            // For a desktop (Vela): the screen's size, roles for its own windows, and a taskbar.
+            WINDOW_SCREEN => {
+                let (w, h) = crate::console::pixel_size();
+                user::write_struct(p.space(), arg, &[w as u32, h as u32])?;
+                Ok(0)
+            }
+            WINDOW_ROLE => {
+                let r: RoleArg = user::read_struct(p.space(), arg)?;
+                let role = crate::console::Role::from(r.role).ok_or(EINVAL)?;
+                crate::console::window_set_role(window.id, role, r.x, r.y, r.w as i32, r.h as i32, r.radius as i32).ok_or(EINVAL)?;
+                Ok(0)
+            }
+            WINDOW_LIST => {
+                // Up to `capacity` entries of 64 bytes: id, flags (1 has the keyboard, 2 minimized),
+                // then the title (cut short, NUL-terminated). Returns how many windows there are.
+                let l: ListArg = user::read_struct(p.space(), arg)?;
+                let windows = crate::console::window_list();
+                for (n, w) in windows.iter().take(l.capacity as usize).enumerate() {
+                    let mut entry = [0u8; 64];
+                    entry[..4].copy_from_slice(&w.id.to_le_bytes());
+                    entry[4..8].copy_from_slice(&(w.focused as u32 | (w.minimized as u32) << 1).to_le_bytes());
+                    let title = w.title.as_bytes();
+                    let len = floor_char_boundary(&w.title, title.len().min(55));
+                    entry[8..8 + len].copy_from_slice(&title[..len]);
+                    user::write(p.space(), l.entries + n as u64 * 64, &entry)?;
+                }
+                Ok(windows.len() as u64)
+            }
+            WINDOW_ACTIVATE => crate::console::window_activate(arg as u32).map(|_| 0).ok_or(ENOENT),
+            WINDOW_MINIMIZE => crate::console::window_minimize(arg as u32).map(|_| 0).ok_or(ENOENT),
             _ => Err(ENOTTY),
         };
     }
@@ -850,6 +880,38 @@ const WINDOW_PIXELS: u32 = 0x5701;
 const WINDOW_TITLE: u32 = 0x5702;
 const WINDOW_BLIT: u32 = 0x5703;
 const WINDOW_POINTER: u32 = 0x5704;
+const WINDOW_SCREEN: u32 = 0x5705;
+const WINDOW_ROLE: u32 = 0x5706;
+const WINDOW_LIST: u32 = 0x5707;
+const WINDOW_ACTIVATE: u32 = 0x5708;
+const WINDOW_MINIMIZE: u32 = 0x5709;
+
+/// The WINDOW_ROLE argument: the role (console::Role's order), where and how big, and how round
+/// its corners are.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+struct RoleArg {
+    role: u32,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    radius: u32,
+}
+
+/// The WINDOW_LIST argument: room for `capacity` 64-byte entries at `entries`.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+struct ListArg {
+    entries: u64,
+    capacity: u32,
+    _pad: u32,
+}
+
+/// The longest start of `s` no longer than `max` bytes that ends between characters.
+fn floor_char_boundary(s: &str, max: usize) -> usize {
+    (0..=max.min(s.len())).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0)
+}
 
 /// The WINDOW_BLIT argument: a w x h piece of a picture in the program's memory (rows `stride`
 /// pixels apart), for (x, y) in the window.

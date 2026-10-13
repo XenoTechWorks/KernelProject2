@@ -436,7 +436,7 @@ pub const App = struct {
                 app.dirty = true;
             },
             .focus => app.dirty = true,
-            .tick => {},
+            .tick, .windows => {},
         }
     }
 

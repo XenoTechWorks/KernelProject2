@@ -4,7 +4,13 @@
 //! to get a window floating over the console, in a frame with a title, a close button and a soft
 //! shadow. A window shows either a small terminal of its own (what the program writes), or pixels
 //! the program draws itself (after the WINDOW_PIXELS ioctl), which is what graphical apps use.
-//! Windows are dragged by their header with the mouse and resized by their edges; clicking one raises it and gives it the keyboard. It's not a desktop: the command line stays underneath.
+//! Windows are dragged by their header with the mouse and resized by their edges; clicking one raises it and gives it the keyboard. Their buttons close, maximize and minimize them.
+//!
+//! A desktop (Vela) gives some of its windows a role (WINDOW_ROLE): its wallpaper is a frameless
+//! window under all the others, its bar and dock are panels over them, and its menus are popups.
+//! Panels keep normal windows out of the strip of screen they sit on (the work area), and a desktop
+//! can list the normal windows and bring one forward or minimize it (its taskbar). Without one the
+//! command line stays underneath.
 //!
 //! This is a small compositor. The console is drawn into its own layer of pixels, and each window
 //! into its own image (frame, shadow and contents, with alpha at the edges). Showing part of the
@@ -40,6 +46,10 @@ const SHADOW_DROP: i32 = 3;
 const SHADOW_ALPHA: i32 = 100;
 const PAD: i32 = 6; // around a text window's cells
 const CLOSE_RADIUS: i32 = 9;
+/// The header's buttons, from the right edge of the frame to their centers.
+const CLOSE_AT: i32 = 20;
+const MAXIMIZE_AT: i32 = 46;
+const MINIMIZE_AT: i32 = 72;
 /// How far outside a window's edges the pointer can grab them to resize.
 const GRIP: i32 = 6;
 const MIN_SIZE: (i32, i32) = (120, 60);
@@ -61,6 +71,34 @@ pub mod event {
     pub const SCROLL: u32 = 7; // the mouse wheel (data: steps, as a signed number; down is positive)
     pub const RESIZE: u32 = 8; // the user resized the window: x, y are its new width and height
     pub const RAWKEY: u32 = 9; // a physical key: x its PC scancode (0x100+ after 0xE0), data 1 down, 0 up
+    pub const WINDOWS: u32 = 10; // (to desktop windows) the list of windows, or which has the keyboard, changed
+}
+
+/// What a window is for. Normal windows have a frame; the others are a desktop's own.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Role {
+    Normal,
+    /// Frameless, under every other window (wallpaper and desktop icons).
+    Desktop,
+    /// Frameless, over normal windows, in a strip they don't go into (a bar or a dock). Clicking
+    /// it doesn't take the keyboard from the window that has it.
+    Panel,
+    /// Frameless, over everything, and takes the keyboard (a menu).
+    Popup,
+}
+
+impl Role {
+    pub fn from(n: u32) -> Option<Role> {
+        [Role::Normal, Role::Desktop, Role::Panel, Role::Popup].get(n as usize).copied()
+    }
+}
+
+/// A normal window, for a desktop's taskbar.
+pub struct ListedWindow {
+    pub id: u32,
+    pub focused: bool,
+    pub minimized: bool,
+    pub title: String,
 }
 
 /// The part of a window the rest of the kernel sees: what was typed into it, and whether the user
@@ -131,41 +169,95 @@ struct View {
     visible: bool,
     /// The user dragged it (until then it stays centered on where it opened when it changes size).
     moved: bool,
-    close_hover: bool,
+    /// The header button under the pointer (lit up).
+    hover_button: Option<Button>,
+    role: Role,
+    /// A frameless window's corners are rounded this much.
+    radius: i32,
+    minimized: bool,
+    /// Maximized: where it was and its size before, to go back to.
+    restore: Option<(i32, i32, i32, i32)>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Button {
+    Close,
+    Maximize,
+    Minimize,
 }
 
 impl View {
+    fn framed(&self) -> bool {
+        self.role == Role::Normal
+    }
+    fn header(&self) -> i32 {
+        if self.framed() { HEADER } else { 0 }
+    }
+    fn border(&self) -> i32 {
+        self.framed() as i32
+    }
+    fn shadow(&self) -> i32 {
+        if matches!(self.role, Role::Normal | Role::Popup) { SHADOW } else { 0 }
+    }
+    fn corner(&self) -> i32 {
+        if self.framed() { RADIUS } else { self.radius }
+    }
+    /// Bottom to top: the desktop, normal windows, panels, popups.
+    fn layer(&self) -> u8 {
+        match self.role {
+            Role::Desktop => 0,
+            Role::Normal => 1,
+            Role::Panel => 2,
+            Role::Popup => 3,
+        }
+    }
+    /// On the screen now: it has drawn something and isn't minimized.
+    fn shown(&self) -> bool {
+        self.visible && !self.minimized
+    }
     fn fw(&self) -> i32 {
-        self.cw + 2
+        self.cw + 2 * self.border()
     }
     fn fh(&self) -> i32 {
-        self.ch + HEADER + 1
+        self.ch + self.header() + self.border()
     }
     fn iw(&self) -> i32 {
-        self.fw() + 2 * SHADOW
+        self.fw() + 2 * self.shadow()
     }
     fn ih(&self) -> i32 {
-        self.fh() + 2 * SHADOW
+        self.fh() + 2 * self.shadow()
+    }
+    fn frame_rect(&self) -> Rect {
+        Rect { x: self.x, y: self.y, w: self.fw(), h: self.fh() }
     }
     /// Where the pointer reaches the window: its frame and a little past its edges (to resize).
     fn reach(&self) -> Rect {
+        if !self.framed() {
+            return self.frame_rect();
+        }
         Rect { x: self.x - GRIP, y: self.y - GRIP, w: self.fw() + 2 * GRIP, h: self.fh() + 2 * GRIP }
     }
     fn bounds(&self) -> Rect {
-        Rect { x: self.x - SHADOW, y: self.y - SHADOW, w: self.iw(), h: self.ih() }
+        let s = self.shadow();
+        Rect { x: self.x - s, y: self.y - s, w: self.iw(), h: self.ih() }
     }
     fn content_rect(&self) -> Rect {
-        Rect { x: self.x + 1, y: self.y + HEADER, w: self.cw, h: self.ch }
+        Rect { x: self.x + self.border(), y: self.y + self.header(), w: self.cw, h: self.ch }
     }
-    /// Center of the close button, in frame coordinates.
-    fn close_center(&self) -> (i32, i32) {
-        (self.fw() - 20, HEADER / 2)
+    /// Center of a header button, in frame coordinates.
+    fn button_center(&self, button: Button) -> (i32, i32) {
+        let from_right = match button {
+            Button::Close => CLOSE_AT,
+            Button::Maximize => MAXIMIZE_AT,
+            Button::Minimize => MINIMIZE_AT,
+        };
+        (self.fw() - from_right, HEADER / 2)
     }
 }
 
 /// Where a point falls in a window.
 enum Part {
-    Close,
+    Button(Button),
     Header,
     Border,
     /// Edges that resize the window: bit 0 right, 1 bottom, 2 left, 3 top (two at a corner).
@@ -301,7 +393,7 @@ pub fn key(bytes: &[u8], key: u32, mods: u32) {
 /// Moves the keyboard to the next window (and after the last one, back to the console).
 pub fn cycle_focus() {
     if let Some(screen) = CONSOLE.lock().as_mut() {
-        let visible: Vec<u32> = screen.views.iter().filter(|v| v.visible).map(|v| v.window.id).collect();
+        let visible: Vec<u32> = screen.views.iter().filter(|v| v.shown() && v.framed()).map(|v| v.window.id).collect();
         let next = match screen.focus.and_then(|id| visible.iter().position(|&v| v == id)) {
             None => visible.first().copied(),
             Some(i) => visible.get(i + 1).copied(),
@@ -337,16 +429,85 @@ pub fn open_window() -> Option<Arc<Window>> {
         image: Vec::new(),
         visible: false,
         moved: false,
-        close_hover: false,
+        hover_button: None,
+        role: Role::Normal,
+        radius: 0,
+        minimized: false,
+        restore: None,
     };
     let (cw, ch) = text_size(view.text.as_ref().unwrap());
     // Each new window a little below and right of the last, so they don't hide each other.
+    let work = screen.work_area();
     view.x = (screen.width as i32 - (cw + 2)) / 2 + 32 * (n % 8);
-    view.y = 64 + 32 * (n % 8);
-    screen.views.push(view);
-    let i = screen.views.len() - 1;
+    view.y = work.y + 64 + 32 * (n % 8);
+    let i = screen.insert(view);
     screen.resize_view(i, cw, ch);
     Some(window)
+}
+
+/// Gives a graphical window a role (see Role) and puts it at x, y with contents w x h (a desktop
+/// always covers the whole screen), its corners rounded by `radius`.
+pub fn window_set_role(id: u32, role: Role, x: i32, y: i32, w: i32, h: i32, radius: i32) -> Option<()> {
+    let mut guard = CONSOLE.lock();
+    let screen = guard.as_mut()?;
+    let i = screen.index_of(id)?;
+    if !screen.views[i].window.pixels.load(Ordering::Relaxed) {
+        return None;
+    }
+    let mut view = screen.views.remove(i);
+    let old = view.bounds();
+    let was_shown = view.shown();
+    view.role = role;
+    view.radius = radius.clamp(0, 64);
+    view.moved = true;
+    view.restore = None;
+    view.minimized = false;
+    let (sw, sh) = (screen.width as i32, screen.height as i32);
+    let (x, y, w, h) = if role == Role::Desktop { (0, 0, sw, sh) } else { (x, y, w, h) };
+    (view.x, view.y) = (x.clamp(0, sw - 16), y.clamp(0, sh - 16));
+    let i = screen.insert(view);
+    screen.resize_view(i, w.clamp(16, sw), h.clamp(16, sh));
+    if was_shown {
+        screen.show(old);
+    }
+    if role == Role::Popup {
+        screen.set_focus(Some(id));
+    }
+    screen.windows_changed();
+    Some(())
+}
+
+/// The normal windows (that have shown themselves), bottom to top.
+pub fn window_list() -> Vec<ListedWindow> {
+    let guard = CONSOLE.lock();
+    let Some(screen) = guard.as_ref() else { return Vec::new() };
+    screen.views.iter().filter(|v| v.framed() && v.visible).map(|v| ListedWindow {
+        id: v.window.id,
+        focused: screen.focus == Some(v.window.id),
+        minimized: v.minimized,
+        title: v.title.clone(),
+    }).collect()
+}
+
+/// Brings a window forward (back from minimized) and gives it the keyboard.
+pub fn window_activate(id: u32) -> Option<()> {
+    let mut guard = CONSOLE.lock();
+    let screen = guard.as_mut()?;
+    let i = screen.index_of(id)?;
+    screen.views[i].minimized = false;
+    let i = screen.raise(i);
+    screen.show(screen.views[i].bounds());
+    screen.set_focus(Some(id));
+    screen.windows_changed();
+    Some(())
+}
+
+pub fn window_minimize(id: u32) -> Option<()> {
+    let mut guard = CONSOLE.lock();
+    let screen = guard.as_mut()?;
+    let i = screen.index_of(id)?;
+    screen.minimize(i);
+    Some(())
 }
 
 /// Removes a window from the screen (its program closed it or exited).
@@ -393,6 +554,7 @@ pub fn window_set_title(id: u32, title: &str) {
         if let Some(i) = screen.index_of(id) {
             screen.views[i].title = String::from(title);
             screen.refresh_frame(i);
+            screen.windows_changed();
         }
     }
 }
@@ -469,12 +631,93 @@ impl Screen {
 
     /// The topmost visible window the pointer reaches at a point.
     fn top_at(&self, x: i32, y: i32) -> Option<usize> {
-        self.views.iter().rposition(|v| v.visible && v.reach().contains(x, y))
+        self.views.iter().rposition(|v| v.shown() && v.reach().contains(x, y))
+    }
+
+    /// Adds a window above the others of its layer. Returns where it went.
+    fn insert(&mut self, view: View) -> usize {
+        let layer = view.layer();
+        let at = self.views.iter().position(|v| v.layer() > layer).unwrap_or(self.views.len());
+        self.views.insert(at, view);
+        at
+    }
+
+    /// The part of the screen the panels leave for normal windows: below panels in the top half,
+    /// above those in the bottom half.
+    fn work_area(&self) -> Rect {
+        let (mut top, mut bottom) = (0, self.height as i32);
+        for v in self.views.iter().filter(|v| v.role == Role::Panel && v.visible) {
+            let r = v.frame_rect();
+            if r.y + r.h / 2 < self.height as i32 / 2 {
+                top = top.max(r.bottom());
+            } else {
+                bottom = bottom.min(r.y);
+            }
+        }
+        Rect { x: 0, y: top, w: self.width as i32, h: (bottom - top).max(2 * HEADER) }
+    }
+
+    /// Tells the desktop's windows (its taskbar) that the windows changed.
+    fn windows_changed(&self) {
+        for v in self.views.iter().filter(|v| !v.framed()) {
+            v.window.event(event::WINDOWS, 0, 0, 0);
+        }
+    }
+
+    /// Who gets the keyboard when the window that had it goes: the top normal window, or else the
+    /// desktop.
+    fn fallback_focus(&self) -> Option<u32> {
+        let normal = self.views.iter().rev().find(|v| v.shown() && v.framed());
+        normal.or_else(|| self.views.iter().find(|v| v.shown() && v.role == Role::Desktop)).map(|v| v.window.id)
+    }
+
+    fn minimize(&mut self, i: usize) {
+        let view = &mut self.views[i];
+        if !view.framed() || view.minimized {
+            return;
+        }
+        view.minimized = true;
+        let (id, bounds) = (view.window.id, view.bounds());
+        self.show(bounds);
+        if self.focus == Some(id) {
+            self.focus = None;
+            let next = self.fallback_focus();
+            self.set_focus(next);
+        }
+        self.windows_changed();
+    }
+
+    /// Fills the work area with a window, or puts it back how it was.
+    fn toggle_maximize(&mut self, i: usize) {
+        let old = self.views[i].bounds();
+        let (x, y, w, h) = match self.views[i].restore.take() {
+            Some(before) => before,
+            None => {
+                let v = &self.views[i];
+                let before = (v.x, v.y, v.cw, v.ch);
+                self.views[i].restore = Some(before);
+                let work = self.work_area();
+                (work.x, work.y, work.w - 2, work.h - HEADER - 1)
+            }
+        };
+        (self.views[i].x, self.views[i].y) = (x, y);
+        self.user_resize(i, w, h);
+        self.show(old);
+        let bounds = self.views[i].bounds();
+        self.show(bounds);
     }
 
     fn part(view: &View, x: i32, y: i32) -> Part {
         let (fx, fy) = (x - view.x, y - view.y);
-        let (cx, cy) = view.close_center();
+        if !view.framed() {
+            return Part::Content(fx, fy);
+        }
+        for button in [Button::Close, Button::Maximize, Button::Minimize] {
+            let (cx, cy) = view.button_center(button);
+            if (fx - cx).pow(2) + (fy - cy).pow(2) <= (CLOSE_RADIUS + 2).pow(2) {
+                return Part::Button(button);
+            }
+        }
         let (right, bottom) = (fx >= view.fw() - 3, fy >= view.fh() - 3);
         let (left, top) = (fx < 3, fy < 3);
         // The sides below the header (its sides are for dragging); the top only at its very edge.
@@ -482,9 +725,7 @@ impl Screen {
             | (bottom as u8) << 1
             | ((left && (fy >= HEADER || top)) as u8) << 2
             | (top as u8) << 3;
-        if (fx - cx).pow(2) + (fy - cy).pow(2) <= (CLOSE_RADIUS + 2).pow(2) {
-            Part::Close
-        } else if edges != 0 {
+        if edges != 0 {
             Part::Resize(edges)
         } else if fy < HEADER {
             Part::Header
@@ -513,14 +754,20 @@ impl Screen {
         let (x, y) = self.console.cursor();
         self.console.dirty[y * self.cols + x] = true;
         self.flush_console();
+        self.windows_changed();
     }
 
+    /// Puts a window on top of the others of its layer. Returns where it is now.
     fn raise(&mut self, i: usize) -> usize {
+        let layer = self.views[i].layer();
+        if self.views.get(i + 1).is_none_or(|v| v.layer() > layer) {
+            return i;
+        }
         let view = self.views.remove(i);
         let bounds = view.bounds();
-        self.views.push(view);
+        let i = self.insert(view);
         self.show(bounds);
-        self.views.len() - 1
+        i
     }
 
     fn remove(&mut self, id: u32) {
@@ -537,10 +784,12 @@ impl Screen {
         if self.mouse.resize.is_some_and(|r| r.0 == id) {
             self.mouse.resize = None;
         }
-        self.show(view.bounds());
+        if view.shown() {
+            self.show(view.bounds());
+        }
         if self.focus == Some(id) {
             self.focus = None;
-            let next = self.views.iter().rev().find(|v| v.visible).map(|v| v.window.id);
+            let next = self.fallback_focus();
             self.set_focus(next);
             if next.is_none() {
                 let (x, y) = self.console.cursor();
@@ -548,6 +797,7 @@ impl Screen {
                 self.flush_console();
             }
         }
+        self.windows_changed();
     }
 
     /// Gives a window new contents size (keeping its center until the user has moved it).
@@ -576,7 +826,7 @@ impl Screen {
         view.image = vec![0; (view.iw() * view.ih()) as usize];
         self.render_text(i, true);
         self.render_frame(i);
-        if self.views[i].visible {
+        if self.views[i].shown() {
             let new = self.views[i].bounds();
             self.show(old.union(new));
         }
@@ -601,6 +851,7 @@ impl Screen {
         if term.title != view.title {
             view.title = term.title.clone();
             self.refresh_frame(i);
+            self.windows_changed();
         }
         let changed = self.render_text(i, false);
         if changed.is_some() || !self.views[i].visible {
@@ -723,9 +974,15 @@ impl Screen {
         let top = self.top_at(mx, my);
         self.mouse.resize_shape = top.is_some_and(|i| matches!(Self::part(&self.views[i], mx, my), Part::Resize(_)));
         for i in 0..self.views.len() {
-            let over_close = top == Some(i) && matches!(Self::part(&self.views[i], mx, my), Part::Close);
-            if self.views[i].close_hover != over_close {
-                self.views[i].close_hover = over_close;
+            let over = match top == Some(i) {
+                true => match Self::part(&self.views[i], mx, my) {
+                    Part::Button(b) => Some(b),
+                    _ => None,
+                },
+                false => None,
+            };
+            if self.views[i].hover_button != over {
+                self.views[i].hover_button = over;
                 self.refresh_frame(i);
             }
         }
@@ -752,16 +1009,21 @@ impl Screen {
         let Some(i) = self.top_at(mx, my) else {
             return self.set_focus(None);
         };
-        let i = if i + 1 == self.views.len() { i } else { self.raise(i) };
+        let i = self.raise(i);
         let id = self.views[i].window.id;
-        self.set_focus(Some(id));
+        // A bar or dock leaves the keyboard where it was (its taskbar acts on that window).
+        if self.views[i].role != Role::Panel {
+            self.set_focus(Some(id));
+        }
         match Self::part(&self.views[i], mx, my) {
-            Part::Close if pressed & 1 != 0 => {
+            Part::Button(Button::Close) if pressed & 1 != 0 => {
                 // Closing tells the program (its reads end); the window goes away now.
                 self.views[i].window.closed.store(true, Ordering::Relaxed);
                 crate::proc::wake_all();
                 self.remove(id);
             }
+            Part::Button(Button::Maximize) if pressed & 1 != 0 => self.toggle_maximize(i),
+            Part::Button(Button::Minimize) if pressed & 1 != 0 => self.minimize(i),
             Part::Resize(edges) if pressed & 1 != 0 => {
                 let view = &self.views[i];
                 self.mouse.resize = Some((id, edges, (mx, my), (view.cw, view.ch), (view.x, view.y)));
@@ -805,15 +1067,17 @@ impl Screen {
     }
 
     fn move_view(&mut self, i: usize, x: i32, y: i32) {
-        let (w, h) = (self.width as i32, self.height as i32);
+        let w = self.width as i32;
+        let work = self.work_area();
         let view = &mut self.views[i];
-        // Keep enough of the header on the screen to grab it again.
-        let (x, y) = (x.clamp(-(view.fw() - 60), w - 60), y.clamp(0, h - HEADER));
+        // Keep enough of the header on the screen to grab it again, and out from under the panels.
+        let (x, y) = (x.clamp(-(view.fw() - 60), w - 60), y.clamp(work.y, work.bottom() - HEADER));
         if (x, y) == (view.x, view.y) {
             return;
         }
         let old = view.bounds();
         (view.x, view.y) = (x, y);
+        view.restore = None; // dragged away: no longer maximized
         let new = view.bounds();
         self.show(old.union(new));
     }
@@ -904,15 +1168,28 @@ impl Screen {
         copy_content(view, r);
         let first = !view.visible;
         view.visible = true;
-        let shown = if first { view.bounds() } else { Rect { x: view.x + 1 + r.x, y: view.y + HEADER + r.y, w: r.w, h: r.h } };
+        if view.minimized {
+            return;
+        }
+        let c = view.content_rect();
+        let shown = if first { view.bounds() } else { Rect { x: c.x + r.x, y: c.y + r.y, w: r.w, h: r.h } };
+        let (id, framed) = (view.window.id, view.framed());
         self.show(shown);
+        if first {
+            // On a desktop, an app that opens is what the user wants to use next. (Over the
+            // command line it isn't: after `clock &` you keep typing in the shell.)
+            if framed && self.views.iter().any(|v| v.role == Role::Desktop) {
+                self.set_focus(Some(id));
+            }
+            self.windows_changed();
+        }
     }
 
     /// Redraws a window's frame (focus, title or hover changed) and shows it.
     fn refresh_frame(&mut self, i: usize) {
         self.render_frame(i);
         let view = &self.views[i];
-        if view.visible {
+        if view.shown() {
             self.show(view.bounds());
         }
     }
@@ -922,51 +1199,37 @@ impl Screen {
     fn render_frame(&mut self, i: usize) {
         let focused = (self.focus == Some(self.views[i].window.id)) as usize;
         let view = &mut self.views[i];
-        let (iw, ih, fw, fh) = (view.iw(), view.ih(), view.fw(), view.fh());
+        let (iw, ih, fw, fh, s, r) = (view.iw(), view.ih(), view.fw(), view.fh(), view.shadow(), view.corner());
         let (header, border) = (HEADER_COLOR[focused], BORDER_COLOR[focused]);
         for iy in 0..ih {
             for ix in 0..iw {
-                let (fx, fy) = (ix - SHADOW, iy - SHADOW);
-                // The shadow, a little below the window, fading out.
-                let ds = rounded_distance(fx, fy - SHADOW_DROP, fw, fh, RADIUS);
-                let reach = SHADOW * 16;
-                let k = (reach - ds.max(0)).max(0);
-                let mut pixel = ((SHADOW_ALPHA * k / reach * k / reach) as u32) << 24;
-                // The window itself, smoothed at its edges.
-                let d = rounded_distance(fx, fy, fw, fh, RADIUS);
-                let cover = (8 - d).clamp(0, 16) as u32;
-                if cover > 0 {
-                    let color = if d > -24 || fy == HEADER - 1 { border } else { header };
-                    pixel = over(premultiply(color, cover * 255 / 16), pixel);
+                let (fx, fy) = (ix - s, iy - s);
+                let mut pixel = if s > 0 { shadow_at(fx, fy, fw, fh, r) } else { 0 };
+                // The window itself, smoothed at its edges (a frameless one is all contents).
+                if view.framed() {
+                    let d = rounded_distance(fx, fy, fw, fh, r);
+                    let cover = (8 - d).clamp(0, 16) as u32;
+                    if cover > 0 {
+                        let color = if d > -24 || fy == HEADER - 1 { border } else { header };
+                        pixel = over(premultiply(color, cover * 255 / 16), pixel);
+                    }
                 }
                 view.image[(iy * iw + ix) as usize] = pixel;
             }
         }
-        // The title, centered (and cut short before the close button).
-        let room = ((fw - 2 * 44) / CELL_W as i32).max(0) as usize;
-        let title: Vec<char> = view.title.chars().take(room).collect();
-        let tx = (fw - (title.len() * CELL_W) as i32) / 2;
-        let ty = (HEADER - CELL_H as i32) / 2;
-        for (n, &c) in title.iter().enumerate() {
-            let at = ((SHADOW + ty) * iw + SHADOW + tx + (n * CELL_W) as i32) as usize;
-            let cell = Cell { ch: c as u32, fg: 0, bg: 0 };
-            draw_glyph_colors(&mut view.image[at..], iw as usize, cell, TITLE_COLOR[focused], header);
-        }
-        // The close button: a circle with an ×, red under the pointer.
-        let (cx, cy) = view.close_center();
-        let circle = if view.close_hover { CLOSE_HOVER } else { CLOSE_COLOR };
-        let mark = if view.close_hover { 0xffffff } else { TITLE_COLOR[focused] };
-        for dy in -CLOSE_RADIUS - 1..=CLOSE_RADIUS + 1 {
-            for dx in -CLOSE_RADIUS - 1..=CLOSE_RADIUS + 1 {
-                let d = isqrt(((dx * 16).pow(2) + (dy * 16).pow(2)) as u64) as i32 - CLOSE_RADIUS * 16;
-                let cover = (8 - d).clamp(0, 16) as u32;
-                if cover == 0 {
-                    continue;
-                }
-                let on_mark = dx.abs() <= 3 && dy.abs() <= 3 && ((dx - dy).abs() <= 0 || (dx + dy).abs() <= 0);
-                let color = if on_mark { mark } else { circle };
-                let at = ((SHADOW + cy + dy) * iw + SHADOW + cx + dx) as usize;
-                view.image[at] = mix(color, header, cover * 255 / 16) | 0xff00_0000;
+        if view.framed() {
+            // The title, centered (and cut short before the buttons).
+            let room = ((fw - 2 * (MINIMIZE_AT + 16)) / CELL_W as i32).max(0) as usize;
+            let title: Vec<char> = view.title.chars().take(room).collect();
+            let tx = (fw - (title.len() * CELL_W) as i32) / 2;
+            let ty = (HEADER - CELL_H as i32) / 2;
+            for (n, &c) in title.iter().enumerate() {
+                let at = ((s + ty) * iw + s + tx + (n * CELL_W) as i32) as usize;
+                let cell = Cell { ch: c as u32, fg: 0, bg: 0 };
+                draw_glyph_colors(&mut view.image[at..], iw as usize, cell, TITLE_COLOR[focused], header);
+            }
+            for button in [Button::Close, Button::Maximize, Button::Minimize] {
+                draw_button(view, button, focused, header);
             }
         }
         copy_content(view, Rect { x: 0, y: 0, w: view.cw, h: view.ch });
@@ -976,7 +1239,7 @@ impl Screen {
     fn show(&mut self, r: Rect) {
         let Some(r) = r.intersect(self.screen_rect()) else { return };
         let w = self.width;
-        let views: Vec<usize> = (0..self.views.len()).filter(|&i| self.views[i].visible && self.views[i].bounds().intersect(r).is_some()).collect();
+        let views: Vec<usize> = (0..self.views.len()).filter(|&i| self.views[i].shown() && self.views[i].bounds().intersect(r).is_some()).collect();
         let pointer = self.mouse.shown && self.pointer_rect().intersect(r).is_some();
         let (x0, x1) = (r.x as usize, r.right() as usize);
         let source = if views.is_empty() && !pointer {
@@ -1025,18 +1288,73 @@ impl Screen {
     }
 }
 
-/// Copies part of a window's contents into its image, leaving the rounded bottom corners alone.
+/// Copies part of a window's contents into its image. In a frame, the rounded bottom corners
+/// are left alone; a frameless window's corners are rounded off, smoothly, over its shadow.
 fn copy_content(view: &mut View, r: Rect) {
-    let (iw, fw, fh) = (view.iw(), view.fw(), view.fh());
+    let (iw, fw, fh, s, rad) = (view.iw(), view.fw(), view.fh(), view.shadow(), view.corner());
+    let (left, top) = (view.border(), view.header());
+    let framed = view.framed();
     for y in r.y..r.bottom() {
-        let fy = HEADER + y;
-        let near_bottom = fy >= fh - RADIUS - 1;
+        let fy = top + y;
+        let near_edge = fy < rad + 1 || fy >= fh - rad - 1;
         for x in r.x..r.right() {
-            let fx = 1 + x;
-            if near_bottom && (fx <= RADIUS || fx >= fw - RADIUS - 1) && rounded_distance(fx, fy, fw, fh, RADIUS) > -24 {
+            let fx = left + x;
+            let color = view.content[(y * view.cw + x) as usize] & 0xff_ffff;
+            let at = ((s + fy) * iw + s + fx) as usize;
+            if rad == 0 || !near_edge || (fx > rad && fx < fw - rad - 1) {
+                view.image[at] = color | 0xff00_0000;
                 continue;
             }
-            view.image[((SHADOW + fy) * iw + SHADOW + fx) as usize] = view.content[(y * view.cw + x) as usize] | 0xff00_0000;
+            let d = rounded_distance(fx, fy, fw, fh, rad);
+            if framed {
+                if d <= -24 {
+                    view.image[at] = color | 0xff00_0000;
+                }
+            } else {
+                let cover = (8 - d).clamp(0, 16) as u32;
+                let under = if s > 0 { shadow_at(fx, fy, fw, fh, rad) } else { 0 };
+                view.image[at] = over(premultiply(color, cover * 255 / 16), under);
+            }
+        }
+    }
+}
+
+/// The soft shadow under a window, a little below it, at a pixel of its image (in frame
+/// coordinates), as premultiplied black.
+fn shadow_at(fx: i32, fy: i32, fw: i32, fh: i32, radius: i32) -> u32 {
+    let ds = rounded_distance(fx, fy - SHADOW_DROP, fw, fh, radius);
+    let reach = SHADOW * 16;
+    let k = (reach - ds.max(0)).max(0);
+    ((SHADOW_ALPHA * k / reach * k / reach) as u32) << 24
+}
+
+/// A header button: a circle with its mark (× close, a square maximize, a bar minimize). Close
+/// turns red under the pointer, the others lighter.
+fn draw_button(view: &mut View, button: Button, focused: usize, header: u32) {
+    let (iw, s) = (view.iw(), view.shadow());
+    let (cx, cy) = view.button_center(button);
+    let hover = view.hover_button == Some(button);
+    let circle = match (button, hover) {
+        (Button::Close, true) => CLOSE_HOVER,
+        (_, true) => 0x4f5666,
+        _ => CLOSE_COLOR,
+    };
+    let mark = if hover { 0xffffff } else { TITLE_COLOR[focused] };
+    for dy in -CLOSE_RADIUS - 1..=CLOSE_RADIUS + 1 {
+        for dx in -CLOSE_RADIUS - 1..=CLOSE_RADIUS + 1 {
+            let d = isqrt(((dx * 16).pow(2) + (dy * 16).pow(2)) as u64) as i32 - CLOSE_RADIUS * 16;
+            let cover = (8 - d).clamp(0, 16) as u32;
+            if cover == 0 {
+                continue;
+            }
+            let on_mark = match button {
+                Button::Close => dx.abs() <= 3 && dy.abs() <= 3 && (dx == dy || dx == -dy),
+                Button::Maximize => dx.abs() <= 3 && dy.abs() <= 3 && (dx.abs() == 3 || dy.abs() == 3),
+                Button::Minimize => dx.abs() <= 3 && dy == 2,
+            };
+            let color = if on_mark { mark } else { circle };
+            let at = ((s + cy + dy) * iw + s + cx + dx) as usize;
+            view.image[at] = mix(color, header, cover * 255 / 16) | 0xff00_0000;
         }
     }
 }

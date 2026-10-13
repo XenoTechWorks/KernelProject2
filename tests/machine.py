@@ -5,9 +5,11 @@ import os
 import re
 import select
 import shutil
+import struct
 import subprocess
 import tempfile
 import time
+import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]")
@@ -145,3 +147,40 @@ class Machine:
 
     def __exit__(self, *exc):
         self.close()
+
+
+def read_png(path):
+    """(width, height, rows of RGB tuples) from an 8-bit RGB/RGBA PNG like QEMU's screendump."""
+    data = open(path, "rb").read()
+    pos, idat, width, height, channels = 8, b"", 0, 0, 3
+    while pos < len(data):
+        length, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + length]
+        if kind == b"IHDR":
+            width, height, _, color = struct.unpack(">IIBB", body[:10])
+            channels = 4 if color == 6 else 3
+        elif kind == b"IDAT":
+            idat += body
+        pos += 12 + length
+    raw = zlib.decompress(idat)
+    stride = width * channels
+    rows, prev, i = [], bytearray(stride), 0
+    for _ in range(height):
+        kind, line = raw[i], bytearray(raw[i + 1:i + 1 + stride])
+        i += 1 + stride
+        for x in range(stride):
+            a = line[x - channels] if x >= channels else 0
+            b, c = prev[x], prev[x - channels] if x >= channels else 0
+            if kind == 1:
+                line[x] = (line[x] + a) & 255
+            elif kind == 2:
+                line[x] = (line[x] + b) & 255
+            elif kind == 3:
+                line[x] = (line[x] + (a + b) // 2) & 255
+            elif kind == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows.append([tuple(line[x:x + 3]) for x in range(0, stride, channels)])
+        prev = line
+    return width, height, rows

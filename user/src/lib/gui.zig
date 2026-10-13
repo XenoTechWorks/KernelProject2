@@ -8,6 +8,9 @@ pub const measure = @import("gui/canvas.zig").measure;
 pub const Window = @import("gui/window.zig").Window;
 pub const Event = @import("gui/window.zig").Event;
 pub const Key = @import("gui/window.zig").Key;
+pub const Role = @import("gui/window.zig").Role;
+pub const Listed = @import("gui/window.zig").Listed;
+pub const mix = @import("gui/canvas.zig").mix;
 
 const widgets = @import("gui/widgets.zig");
 pub const App = widgets.App;
