@@ -1,0 +1,7 @@
+Icons from the Oxygen icon theme (KDE), version 6.31.0:
+https://invent.kde.org/frameworks/oxygen-icons
+
+Copyright 2007 Nuno Pinheiro, David Vignoni, David Miller, Johann Ollivier Lapeyre,
+Kenneth Wimer, Riccardo Iaconelli. License: LGPL-3.0-or-later (LGPL-3.0-or-later.txt here; the
+LGPL builds on the GNU GPL, COPYING-GPL-3.0.txt). The files are unchanged; only the ones Vela uses
+are copied, at 32, 48 and 64 pixels. Their sources (SVG) are in the repository above.

@@ -13,6 +13,7 @@ const apps = @import("vela/apps.zig");
 const icons = @import("vela/icons.zig");
 const shell = @import("vela/shell.zig");
 const wallpaper = @import("vela/wallpaper.zig");
+const glass = @import("vela/glass.zig");
 const jpeg = @import("lib/jpeg.zig");
 const sys = rt.sys;
 pub const _start = rt._start;
@@ -23,18 +24,26 @@ pub const panic = std.debug.FullPanic(rt.panicHandler);
 
 const Rect = gui.Rect;
 
-const text = 0xe6e9ef;
-const dim = 0x8b93a1;
-const accent = 0x3584e4;
-const panel_bg = 0x15181e;
-const hover_bg = 0x2a2f39;
-const gold = 0xf5c84c;
+const text = 0xf2f5f9;
+const dim = 0xa9b2bf;
+const accent = 0x3a8ee6;
+
+/// The glass of the bar and the dock, and the darker glass of the menus (which may be over
+/// windows as well as the wallpaper, so less shows through).
+const panel_glass = glass.Style{};
+const popup_glass = glass.Style{ .tint = 0x0e131c, .strength = 205, .radius = 12, .shine = 22 };
+
+/// Text that stays readable on glass: a soft dark shadow under it.
+fn shadowText(c: *gui.Canvas, size: f32, x: f32, y: i32, s: []const u8, color: u32) void {
+    _ = c.text(shell.font, size, x + 1, y + 1, s, 0x000000);
+    _ = c.text(shell.font, size, x, y, s, color);
+}
 
 // ---- the desktop: wallpaper and icons ----
 
-const icon_size = 56;
+const icon_size = 64;
 const cell_w = 96;
-const cell_h = 92;
+const cell_h = 100;
 
 var desktop: gui.Window = undefined;
 var sky: []u32 = undefined;
@@ -60,14 +69,17 @@ fn drawDesktop() void {
     @memcpy(c.pixels, sky);
     for (apps.list(), 0..) |app, i| {
         const cell = iconCell(i);
-        if (selected == i) tint(c, cell, 10, accent, 110);
-        icons.draw(c, shell.font, app.icon, cell.x + (cell_w - icon_size) / 2, cell.y + 8, icon_size);
+        if (selected == i) {
+            glass.tint(c, cell, 6, 0x9cc8ff, 70);
+            glass.outline(c, cell, 6, 0xcfe4ff, 120);
+        }
+        icons.draw(c, app.icon, cell.x + (cell_w - icon_size) / 2, cell.y + 6, icon_size);
         const size = 13;
         var buf: [64]u8 = undefined;
         const label = shell.fit(&buf, app.name, size, cell_w - 8);
         const w = gui.measure(shell.font, size, label);
         const lx = @as(f32, @floatFromInt(cell.x)) + (cell_w - w) / 2;
-        const ly = cell.y + 8 + icon_size + 18;
+        const ly = cell.y + 6 + icon_size + 17;
         _ = c.text(shell.font, size, lx + 1, ly + 1, label, 0x05070d);
         _ = c.text(shell.font, size, lx, ly, label, 0xf2f4f8);
     }
@@ -101,23 +113,6 @@ fn desktopEvent(e: gui.Event) void {
     }
 }
 
-/// Lays `color` over a rounded rectangle, `alpha` of 255 strong.
-fn tint(c: *gui.Canvas, r: Rect, radius: f32, color: u32, alpha: u32) void {
-    var y = r.y;
-    while (y < r.bottom()) : (y += 1) {
-        var x = r.x;
-        while (x < r.right()) : (x += 1) {
-            const hw = @as(f32, @floatFromInt(r.w)) / 2;
-            const hh = @as(f32, @floatFromInt(r.h)) / 2;
-            const qx = @abs(@as(f32, @floatFromInt(x - r.x)) + 0.5 - hw) - (hw - radius);
-            const qy = @abs(@as(f32, @floatFromInt(y - r.y)) + 0.5 - hh) - (hh - radius);
-            const d = @sqrt(@max(qx, 0) * @max(qx, 0) + @max(qy, 0) * @max(qy, 0)) + @min(@max(qx, qy), 0) - radius;
-            const cover = std.math.clamp(0.5 - d, 0, 1);
-            c.blend(x, y, color, @intFromFloat(cover * @as(f32, @floatFromInt(alpha))));
-        }
-    }
-}
-
 // ---- the bar: star menu, open windows, clock ----
 
 const bar_h = 34;
@@ -129,24 +124,23 @@ var task_rects: [32]struct { id: u32, rect: Rect } = undefined;
 var task_count: usize = 0;
 var shown_minute: u64 = std.math.maxInt(u64);
 
-const star_button = Rect{ .x = 6, .y = 4, .w = 82, .h = bar_h - 8 };
+/// The orb: the star menu's button, at the left end of the bar.
+const star_button = Rect{ .x = 3, .y = 0, .w = 40, .h = bar_h };
+const orb_center = [2]f32{ 23, bar_h / 2 };
 
 fn drawBar() void {
     const c = &bar.canvas;
-    c.fill(panel_bg);
-    c.rect(.{ .x = 0, .y = bar_h - 1, .w = @intCast(c.w), .h = 1 }, 0x262b35);
+    glass.frost(c, sky, desktop.canvas.w, 0, 0, panel_glass);
 
     const star_lit = menu != null or (bar_hover != null and bar_hover.? == .star);
-    if (star_lit) c.roundRect(star_button, 7, hover_bg);
-    icons.star(c, 22, @floatFromInt(bar_h / 2), 8, gold);
-    _ = c.text(shell.font, 14, 36, 22, "Vela", text);
+    glass.orb(c, orb_center[0], orb_center[1], 13, star_lit, icons.star);
 
     // The clock, on the right.
     var clock_buf: [48]u8 = undefined;
     const clock = clockText(&clock_buf);
     const clock_w = gui.measure(shell.font, 14, clock);
     const clock_x = @as(f32, @floatFromInt(c.w)) - clock_w - 16;
-    _ = c.text(shell.font, 14, clock_x, 22, clock, text);
+    shadowText(c, 14, clock_x, 22, clock, text);
 
     // A button for each window, in the order they opened.
     var order: [32]gui.Listed = undefined;
@@ -158,25 +152,27 @@ fn drawBar() void {
         }
     }.less);
     task_count = 0;
-    const start: i32 = star_button.right() + 10;
+    const start: i32 = star_button.right() + 8;
     const room = @as(i32, @intFromFloat(clock_x)) - 16 - start;
     if (windows.len > 0 and room > 40) {
         const each = @min(200, @divTrunc(room, @as(i32, @intCast(windows.len))));
         for (windows, 0..) |win, i| {
-            const r = Rect{ .x = start + @as(i32, @intCast(i)) * each, .y = 4, .w = each - 6, .h = bar_h - 8 };
+            const r = Rect{ .x = start + @as(i32, @intCast(i)) * each, .y = 4, .w = each - 4, .h = bar_h - 8 };
             task_rects[task_count] = .{ .id = win.id, .rect = r };
             task_count += 1;
             const hovered = bar_hover != null and bar_hover.? == .task and bar_hover.?.task == win.id;
             const active = win.focused() and !win.minimized();
+            // Glassy buttons: the one in front lit up and edged in light, others only on hover.
             if (active) {
-                c.roundRect(r, 7, 0x2f3644);
-                c.rect(.{ .x = r.x + 10, .y = r.bottom() - 2, .w = r.w - 20, .h = 2 }, accent);
+                glass.tint(c, r, 4, 0x9cc8ff, if (hovered) 70 else 50);
+                glass.outline(c, r, 4, 0xffffff, 90);
             } else if (hovered) {
-                c.roundRect(r, 7, hover_bg);
+                glass.tint(c, r, 4, 0xffffff, 28);
+                glass.outline(c, r, 4, 0xffffff, 55);
             }
             var buf: [96]u8 = undefined;
             const title = shell.fit(&buf, if (win.name().len > 0) win.name() else "Window", 13, @floatFromInt(r.w - 20));
-            _ = c.text(shell.font, 13, @floatFromInt(r.x + 10), 21, title, if (win.minimized()) dim else text);
+            shadowText(c, 13, @floatFromInt(r.x + 10), 21, title, if (win.minimized()) dim else text);
         }
     }
     bar.present();
@@ -247,6 +243,9 @@ const dock_gap = 10;
 const dock_h = dock_pad + dock_icon + 13;
 
 var dock: gui.Window = undefined;
+/// Where the dock is on the screen (its glass shows the wallpaper there).
+var dock_x: i32 = 0;
+var dock_y: i32 = 0;
 var dock_apps: [16]*const apps.App = undefined;
 var dock_count: usize = 0;
 var dock_hover: ?usize = null;
@@ -261,14 +260,18 @@ fn dockSlot(i: usize) Rect {
 
 fn drawDock() void {
     const c = &dock.canvas;
-    c.fill(0x1c2029);
-    c.roundRectOutline(c.bounds(), 18, 1, 0x343a47);
+    glass.frost(c, sky, desktop.canvas.w, dock_x, dock_y, panel_glass);
+    glass.outline(c, c.bounds(), 18, 0xffffff, 70);
     for (dock_apps[0..dock_count], 0..) |app, i| {
         const r = dockSlot(i);
-        if (dock_hover == i) c.roundRect(.{ .x = r.x - 5, .y = r.y - 5, .w = r.w + 10, .h = r.h + 10 }, 14, 0x2e3440);
-        icons.draw(c, shell.font, app.icon, r.x, r.y, dock_icon);
+        if (dock_hover == i) {
+            const lit = Rect{ .x = r.x - 5, .y = r.y - 5, .w = r.w + 10, .h = r.h + 10 };
+            glass.tint(c, lit, 10, 0xffffff, 34);
+            glass.outline(c, lit, 10, 0xffffff, 60);
+        }
+        icons.draw(c, app.icon, r.x, r.y, dock_icon);
         if (shell.findWindow(app.title) != null) {
-            c.circle(@floatFromInt(r.x + dock_icon / 2), @floatFromInt(r.bottom() + 7), 2.5, text);
+            c.circle(@floatFromInt(r.x + dock_icon / 2), @floatFromInt(r.bottom() + 7), 2.5, 0xd9ecff);
         }
     }
     dock.present();
@@ -310,6 +313,8 @@ const menu_row = 42;
 
 var menu: ?gui.Window = null;
 var menu_hover: ?usize = null;
+const menu_x = 6;
+const menu_y = bar_h + 6;
 
 /// Rows: each app, then "Desktop Background..." and "Leave Vela".
 fn menuRows() usize {
@@ -324,7 +329,7 @@ fn menuRow(i: usize) Rect {
 fn openMenu() void {
     const h: u32 = @intCast(menuRow(menuRows() - 1).bottom() + 10);
     var m = gui.Window.open("Vela", menu_w, h) orelse return;
-    if (!m.setRole(.popup, 6, bar_h + 6, menu_w, h, 14)) {
+    if (!m.setRole(.popup, menu_x, menu_y, menu_w, h, 14)) {
         m.close();
         return;
     }
@@ -343,23 +348,25 @@ fn closeMenu() void {
 fn drawMenu() void {
     const m = &(menu orelse return);
     const c = &m.canvas;
-    c.fill(0x1c2029);
-    c.roundRectOutline(c.bounds(), 14, 1, 0x343a47);
-    icons.star(c, 34, 35, 14, gold);
-    _ = c.text(shell.font, 19, 58, 33, "Vela", text);
-    _ = c.text(shell.font, 12, 58, 51, "KernelProject2", dim);
+    glass.frost(c, sky, desktop.canvas.w, menu_x, menu_y, popup_glass);
+    glass.outline(c, c.bounds(), 14, 0xffffff, 60);
+    glass.orb(c, 33, 35, 15, false, icons.star);
+    shadowText(c, 19, 58, 33, "Vela", text);
+    shadowText(c, 12, 58, 51, "KernelProject2", dim);
     for (0..menuRows()) |i| {
         const r = menuRow(i);
-        if (menu_hover == i) c.roundRect(r, 8, hover_bg);
+        if (menu_hover == i) {
+            glass.tint(c, r, 5, 0x9cc8ff, 55);
+            glass.outline(c, r, 5, 0xcfe4ff, 110);
+        }
         if (i < apps.count) {
             const app = apps.list()[i];
-            icons.draw(c, shell.font, app.icon, r.x + 8, r.y + 5, 28);
-            _ = c.text(shell.font, 14, @floatFromInt(r.x + 48), r.y + 24, app.name, text);
-        } else if (i == apps.count) {
-            c.rect(.{ .x = 16, .y = r.y - 8, .w = menu_w - 32, .h = 1 }, 0x2e3440);
-            _ = c.text(shell.font, 14, @floatFromInt(r.x + 12), r.y + 24, "Desktop Background…", text);
+            icons.draw(c, app.icon, r.x + 6, r.y + 3, 32);
+            shadowText(c, 14, @floatFromInt(r.x + 48), r.y + 24, app.name, text);
         } else {
-            _ = c.text(shell.font, 14, @floatFromInt(r.x + 12), r.y + 24, "Leave Vela", dim);
+            if (i == apps.count) glass.tint(c, .{ .x = 16, .y = r.y - 8, .w = menu_w - 32, .h = 1 }, 0, 0xffffff, 40);
+            icons.drawExtra(c, if (i == apps.count) .wallpaper else .leave, r.x + 6, r.y + 3, 32);
+            shadowText(c, 14, @floatFromInt(r.x + 48), r.y + 24, if (i == apps.count) "Desktop Background…" else "Leave Vela", text);
         }
     }
     m.present();
@@ -423,6 +430,8 @@ const picker_head = 58;
 const picker_row = thumb_h + 30;
 
 var picker: ?gui.Window = null;
+var picker_x: i32 = 0;
+var picker_y: i32 = 0;
 var picker_hover: ?usize = null;
 var thumbs: [48]?jpeg.Image = @splat(null);
 var thumbs_loaded = false;
@@ -451,6 +460,8 @@ fn openPicker() void {
         return;
     }
     picker = p;
+    picker_x = x;
+    picker_y = y;
     picker_hover = null;
     drawPicker();
 }
@@ -463,24 +474,26 @@ fn closePicker() void {
 fn drawPicker() void {
     const p = &(picker orelse return);
     const c = &p.canvas;
-    c.fill(0x1c2029);
-    c.roundRectOutline(c.bounds(), 14, 1, 0x343a47);
-    _ = c.text(shell.font, 18, picker_pad, 36, "Desktop Background", text);
+    glass.frost(c, sky, desktop.canvas.w, picker_x, picker_y, popup_glass);
+    glass.outline(c, c.bounds(), 14, 0xffffff, 60);
+    shadowText(c, 18, picker_pad, 36, "Desktop Background", text);
     const hint = "Click a picture to use it. Esc closes.";
-    _ = c.text(shell.font, 13, @as(f32, @floatFromInt(c.w)) - picker_pad - gui.measure(shell.font, 13, hint), 35, hint, dim);
+    shadowText(c, 13, @as(f32, @floatFromInt(c.w)) - picker_pad - gui.measure(shell.font, 13, hint), 35, hint, dim);
     for (wallpaper.choices, 0..) |ch, i| {
         const r = pickerSlot(i);
         const current = std.mem.eql(u8, ch.slug, wallpaper.chosen);
+        const ring = Rect{ .x = r.x - 4, .y = r.y - 4, .w = r.w + 8, .h = r.h + 8 };
         if (current) {
-            c.roundRect(.{ .x = r.x - 4, .y = r.y - 4, .w = r.w + 8, .h = r.h + 8 }, 8, accent);
+            glass.tint(c, ring, 6, 0x9cc8ff, 150);
+            glass.outline(c, ring, 6, 0xffffff, 160);
         } else if (picker_hover == i) {
-            c.roundRect(.{ .x = r.x - 3, .y = r.y - 3, .w = r.w + 6, .h = r.h + 6 }, 7, 0x5a6273);
+            glass.tint(c, ring, 6, 0xffffff, 60);
         }
         if (thumbs[i]) |img| wallpaper.drawCover(c, img, r, 255) else c.rect(r, 0x2a2f39);
         var buf: [64]u8 = undefined;
         const label = shell.fit(&buf, ch.title, 13, thumb_w);
         const lw = gui.measure(shell.font, 13, label);
-        _ = c.text(shell.font, 13, @as(f32, @floatFromInt(r.x)) + (thumb_w - lw) / 2, r.bottom() + 19, label, if (current) text else 0xc3c9d4);
+        shadowText(c, 13, @as(f32, @floatFromInt(r.x)) + (thumb_w - lw) / 2, r.bottom() + 19, label, if (current) text else 0xd5dbe4);
     }
     p.present();
 }
@@ -524,6 +537,9 @@ fn applyWallpaper() void {
     wallpaper.paint(&desktop.canvas);
     @memcpy(sky, desktop.canvas.pixels);
     drawDesktop();
+    drawBar();
+    drawDock();
+    drawPicker();
 }
 
 // ---- together ----
@@ -565,7 +581,9 @@ pub fn main(_: rt.Args) u8 {
     _ = bar.setRole(.panel, 0, 0, screen.w, bar_h, 0);
     const dw = dockWidth();
     dock = gui.Window.open("Dock", dw, dock_h) orelse return 1;
-    _ = dock.setRole(.panel, @intCast((screen.w - dw) / 2), @as(i32, @intCast(screen.h)) - dock_h - 10, dw, dock_h, 18);
+    dock_x = @intCast((screen.w - dw) / 2);
+    dock_y = @as(i32, @intCast(screen.h)) - dock_h - 10;
+    _ = dock.setRole(.panel, dock_x, dock_y, dw, dock_h, 18);
 
     shell.refreshWindows(&bar);
     drawDesktop();

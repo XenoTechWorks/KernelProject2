@@ -21,8 +21,11 @@ W, H = 1280, 800
 BAR_H = 34                       # vela.zig
 DOCK_W = 2 * 11 + 5 * 58 - 10    # five pinned apps
 DOCK_X, DOCK_Y = (W - DOCK_W) // 2, H - (11 + 48 + 13) - 10
-PANEL_BG = (0x15, 0x18, 0x1e)
-MENU_BG = (0x1c, 0x20, 0x29)
+ORB = (23, BAR_H // 2)            # the star menu's button
+
+
+def brightness(p):
+    return sum(p) / 3
 
 results = []
 
@@ -66,7 +69,9 @@ with Machine() as m:
     time.sleep(10)  # the wallpaper takes a while under emulation
     rows = screen(m)
     save(m, "vela-1.png")
-    check("the bar is drawn along the top", rows[BAR_H // 2][W // 2] == PANEL_BG, rows[BAR_H // 2][W // 2])
+    # The bar is dark glass: darker than the wallpaper just below it.
+    bar_px, below = rows[BAR_H // 2][W // 2], rows[BAR_H + 12][W // 2]
+    check("the bar is drawn along the top", brightness(bar_px) < brightness(below), (bar_px, below))
     sky = rows[300][700]
     check("the wallpaper covers the console", sky != (0x1d, 0x21, 0x29), sky)
 
@@ -109,26 +114,32 @@ with Machine() as m:
           (rows[BAR_H + 34 + 20][20], rows[DOCK_Y - 20][W - 20]))
 
     # The star menu.
-    click(m, 47, BAR_H // 2)
-    time.sleep(2)
+    spot = (6 + 140, BAR_H + 6 + 120)
+    closed = screen(m)[spot[1]][spot[0]]
+    click(m, *ORB)
+    time.sleep(3)
     save(m, "vela-4.png")
-    check("the star menu opens", screen(m)[BAR_H + 6 + 120][6 + 140] == MENU_BG)
+    opened = screen(m)[spot[1]][spot[0]]
+    check("the star menu opens", opened != closed, (closed, opened))
     m.monitor("sendkey esc")
     time.sleep(2)
-    check("Escape closes it", screen(m)[BAR_H + 6 + 120][6 + 140] != MENU_BG)
+    check("Escape closes it", screen(m)[spot[1]][spot[0]] == closed)
 
     # The wallpaper picker: the star menu's row after the apps (eight of them: Doom is in the
     # image), then the second picture (alphabetically Budapest; Lake Tahoe is the default).
     corner = (W - 30, H - 10)  # below the maximized terminal, beside the dock: wallpaper
     before = screen(m)[corner[1]][corner[0]]
-    click(m, 47, BAR_H // 2)
-    time.sleep(2)
-    click(m, 6 + 8 + 100, BAR_H + 6 + 70 + 13 + 8 * 42 + 19)
-    time.sleep(3)
     picker_w, picker_h = 2 * 22 + 4 * 192 + 3 * 16, 58 + 4 * 150 + 8
     px, py = (W - picker_w) // 2, max(BAR_H + 8, (H - picker_h) // 2 - 20)
+    first = (px + 22 + 40, py + 58 + 40)  # inside the first thumbnail
+    under = screen(m)[first[1]][first[0]]
+    click(m, *ORB)
+    time.sleep(3)
+    click(m, 6 + 8 + 100, BAR_H + 6 + 70 + 13 + 8 * 42 + 19)
+    time.sleep(4)
     save(m, "vela-5.png")
-    check("Desktop Background opens the picker", screen(m)[py + 30][px + 300] == MENU_BG)
+    shown = screen(m)[first[1]][first[0]]
+    check("Desktop Background opens the picker", shown != under, (under, shown))
     click(m, px + 22 + 208 + 96, py + 58 + 60)
     time.sleep(8)  # decoding a 1280x800 JPEG under emulation
     save(m, "vela-6.png")

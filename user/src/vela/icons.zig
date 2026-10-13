@@ -1,95 +1,124 @@
-//! App icons, drawn from shapes so they're sharp at any size: a rounded tile in the app's color
-//! with a simple picture on it. Also Vela's star.
+//! Icons: the apps' pictures from the Oxygen icon theme (KDE's, in /usr/share/icons/oxygen at 32,
+//! 48 and 64 pixels), loaded once and drawn with their transparency. Also Vela's star.
 
 const std = @import("std");
 const gui = @import("../lib/gui.zig");
+const file = @import("../lib/file.zig");
+const png = @import("../lib/png.zig");
 const Icon = @import("apps.zig").Icon;
 const Canvas = gui.Canvas;
 
-/// Draws `icon` in the s x s square at (x, y).
-pub fn draw(c: *Canvas, font: *gui.Font, icon: Icon, x: i32, y: i32, s: i32) void {
-    const f: f32 = @floatFromInt(s);
-    const ox: f32 = @floatFromInt(x);
-    const oy: f32 = @floatFromInt(y);
-    // A point in the square, from fractions of its size.
-    const P = struct {
-        fn x_(o: f32, size: f32, u: f32) f32 {
-            return o + size * u;
-        }
+/// Pictures that aren't apps: the star menu's own rows.
+pub const Extra = enum { wallpaper, leave };
+
+/// The Oxygen icon for each.
+fn fileName(which: Which) []const u8 {
+    return switch (which) {
+        .app => |icon| switch (icon) {
+            .terminal => "utilities-terminal",
+            .files => "system-file-manager",
+            .editor => "accessories-text-editor",
+            .calculator => "accessories-calculator",
+            .clock => "clock",
+            .widgets => "preferences-desktop",
+            .eyes => "applications-toys",
+            .doom => "applications-games",
+        },
+        .extra => |e| switch (e) {
+            .wallpaper => "preferences-desktop-wallpaper",
+            .leave => "system-log-out",
+        },
     };
-    const px = struct {
-        fn r(o: i32, size: f32, u: f32) i32 {
-            return o + @as(i32, @intFromFloat(@round(size * u)));
-        }
-    }.r;
-    const tile = gui.Rect{ .x = x, .y = y, .w = s, .h = s };
-    const radius = f * 0.24;
-    switch (icon) {
-        .terminal => {
-            c.roundRect(tile, radius, 0x2b303b);
-            c.roundRectOutline(tile, radius, 1, 0x464d5c);
-            const w = f * 0.075;
-            c.line(P.x_(ox, f, 0.28), P.x_(oy, f, 0.36), P.x_(ox, f, 0.44), P.x_(oy, f, 0.5), w, 0x98c379);
-            c.line(P.x_(ox, f, 0.44), P.x_(oy, f, 0.5), P.x_(ox, f, 0.28), P.x_(oy, f, 0.64), w, 0x98c379);
-            c.line(P.x_(ox, f, 0.52), P.x_(oy, f, 0.66), P.x_(ox, f, 0.72), P.x_(oy, f, 0.66), w, 0xdcdfe4);
-        },
-        .files => {
-            c.roundRect(tile, radius, 0x3584e4);
-            c.roundRect(.{ .x = px(x, f, 0.2), .y = px(y, f, 0.27), .w = px(0, f, 0.26), .h = px(0, f, 0.16) }, f * 0.04, 0xa9cbf7);
-            c.roundRect(.{ .x = px(x, f, 0.2), .y = px(y, f, 0.34), .w = px(0, f, 0.6), .h = px(0, f, 0.4) }, f * 0.05, 0xeaf3ff);
-        },
-        .editor => {
-            c.roundRect(tile, radius, 0xe5c07b);
-            c.roundRect(.{ .x = px(x, f, 0.27), .y = px(y, f, 0.18), .w = px(0, f, 0.46), .h = px(0, f, 0.64) }, f * 0.05, 0xfdfdfb);
-            var i: u32 = 0;
-            while (i < 4) : (i += 1) {
-                const ly = P.x_(oy, f, 0.33 + 0.11 * @as(f32, @floatFromInt(i)));
-                const end: f32 = if (i == 3) 0.52 else 0.64;
-                c.line(P.x_(ox, f, 0.36), ly, P.x_(ox, f, end), ly, f * 0.04, 0x9aa3b1);
-            }
-        },
-        .calculator => {
-            c.roundRect(tile, radius, 0xf08a4b);
-            c.roundRect(.{ .x = px(x, f, 0.22), .y = px(y, f, 0.2), .w = px(0, f, 0.56), .h = px(0, f, 0.16) }, f * 0.04, 0xfff3ea);
-            var row: u32 = 0;
-            while (row < 2) : (row += 1) {
-                var col: u32 = 0;
-                while (col < 3) : (col += 1) {
-                    const kx = 0.22 + 0.2 * @as(f32, @floatFromInt(col));
-                    const ky = 0.44 + 0.19 * @as(f32, @floatFromInt(row));
-                    c.roundRect(.{ .x = px(x, f, kx), .y = px(y, f, ky), .w = px(0, f, 0.16), .h = px(0, f, 0.14) }, f * 0.03, 0xffd9c2);
-                }
-            }
-        },
-        .clock => {
-            c.roundRect(tile, radius, 0x56b6c2);
-            const cx = P.x_(ox, f, 0.5);
-            const cy = P.x_(oy, f, 0.5);
-            c.circle(cx, cy, f * 0.3, 0xfdfdfb);
-            c.line(cx, cy, cx, cy - f * 0.19, f * 0.06, 0x2b303b);
-            c.line(cx, cy, cx + f * 0.14, cy + f * 0.06, f * 0.06, 0x2b303b);
-            c.circle(cx, cy, f * 0.04, 0xe06c75);
-        },
-        .widgets => {
-            c.roundRect(tile, radius, 0xa66cd1);
-            const pill = gui.Rect{ .x = px(x, f, 0.2), .y = px(y, f, 0.38), .w = px(0, f, 0.6), .h = px(0, f, 0.26) };
-            c.roundRect(pill, f * 0.13, 0xf4eafb);
-            c.circle(P.x_(ox, f, 0.67), P.x_(oy, f, 0.51), f * 0.1, 0xa66cd1);
-        },
-        .eyes => {
-            c.roundRect(tile, radius, 0x4b5365);
-            for ([_]f32{ 0.34, 0.66 }) |u| {
-                c.ellipse(P.x_(ox, f, u), P.x_(oy, f, 0.5), f * 0.13, f * 0.2, 0xfdfdfb);
-                c.circle(P.x_(ox, f, u + 0.03), P.x_(oy, f, 0.56), f * 0.06, 0x1d2129);
-            }
-        },
-        .doom => {
-            c.roundRect(tile, radius, 0x7a1d1d);
-            const size = f * 0.27;
-            const w = gui.measure(font, size, "DOOM");
-            _ = c.text(font, size, ox + (f - w) / 2, y + @as(i32, @intFromFloat(f * 0.6)), "DOOM", 0xffc84a);
-        },
+}
+
+pub const Which = union(enum) { app: Icon, extra: Extra };
+
+const sizes = [_]u32{ 32, 48, 64 };
+const app_count = @typeInfo(Icon).@"enum".field_names.len;
+const extra_count = @typeInfo(Extra).@"enum".field_names.len;
+/// Loaded pictures, by icon and size (null: not tried yet; an empty image: missing).
+var cache: [app_count + extra_count][sizes.len]?png.Image = @splat(@splat(null));
+
+fn slot(which: Which) usize {
+    return switch (which) {
+        .app => |i| @intFromEnum(i),
+        .extra => |e| app_count + @intFromEnum(e),
+    };
+}
+
+/// The picture for `which` at the smallest stored size of at least `size` (or the largest).
+fn load(which: Which, size: u32) ?png.Image {
+    var k: usize = 0;
+    while (k + 1 < sizes.len and sizes[k] < size) k += 1;
+    const entry = &cache[slot(which)][k];
+    if (entry.* == null) {
+        var path: [128]u8 = undefined;
+        const p = std.fmt.bufPrint(&path, "/usr/share/icons/oxygen/{d}x{d}/{s}.png\x00", .{ sizes[k], sizes[k], fileName(which) }) catch return null;
+        const data = file.read(@ptrCast(p.ptr)) catch {
+            entry.* = .{ .w = 0, .h = 0, .pixels = &.{} };
+            return null;
+        };
+        defer std.heap.page_allocator.free(data);
+        entry.* = png.decode(data) catch png.Image{ .w = 0, .h = 0, .pixels = &.{} };
     }
+    const img = entry.*.?;
+    return if (img.w == 0) null else img;
+}
+
+/// Draws an app's icon in the s x s square at (x, y).
+pub fn draw(c: *Canvas, icon: Icon, x: i32, y: i32, s: u32) void {
+    drawWhich(c, .{ .app = icon }, x, y, s);
+}
+
+pub fn drawExtra(c: *Canvas, e: Extra, x: i32, y: i32, s: u32) void {
+    drawWhich(c, .{ .extra = e }, x, y, s);
+}
+
+fn drawWhich(c: *Canvas, which: Which, x: i32, y: i32, s: u32) void {
+    const img = load(which, s) orelse {
+        c.roundRect(.{ .x = x, .y = y, .w = @intCast(s), .h = @intCast(s) }, 8, 0x4b5365);
+        return;
+    };
+    image(c, img, x, y, s);
+}
+
+/// Draws a picture with alpha into the s x s square at (x, y), scaled (box filter) if its size
+/// differs.
+pub fn image(c: *Canvas, img: png.Image, x: i32, y: i32, s: u32) void {
+    var dy: u32 = 0;
+    while (dy < s) : (dy += 1) {
+        var dx: u32 = 0;
+        while (dx < s) : (dx += 1) {
+            const p = if (img.w == s and img.h == s) img.pixels[dy * img.w + dx] else average(img, dx, dy, s);
+            const a = p >> 24;
+            if (a != 0) c.blend(x + @as(i32, @intCast(dx)), y + @as(i32, @intCast(dy)), p & 0xffffff, a);
+        }
+    }
+}
+
+/// The picture's pixels that fall in target pixel (dx, dy) of an s x s square, averaged (colors
+/// weighted by alpha, so transparent pixels' colors don't bleed in).
+fn average(img: png.Image, dx: u32, dy: u32, s: u32) u32 {
+    const x0 = dx * img.w / s;
+    const x1 = @max(x0 + 1, (dx + 1) * img.w / s);
+    const y0 = dy * img.h / s;
+    const y1 = @max(y0 + 1, (dy + 1) * img.h / s);
+    var sum: [4]u32 = @splat(0);
+    var y = y0;
+    while (y < y1) : (y += 1) {
+        var x = x0;
+        while (x < x1) : (x += 1) {
+            const p = img.pixels[y * img.w + x];
+            const a = p >> 24;
+            sum[0] += (p >> 16 & 0xff) * a;
+            sum[1] += (p >> 8 & 0xff) * a;
+            sum[2] += (p & 0xff) * a;
+            sum[3] += a;
+        }
+    }
+    const n = (x1 - x0) * (y1 - y0);
+    if (sum[3] == 0) return 0;
+    return (sum[3] / n) << 24 | (sum[0] / sum[3]) << 16 | (sum[1] / sum[3]) << 8 | (sum[2] / sum[3]);
 }
 
 /// Vela's five-pointed star, `r` from its center to its points.
