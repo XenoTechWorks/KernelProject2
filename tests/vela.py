@@ -68,7 +68,7 @@ with Machine() as m:
     save(m, "vela-1.png")
     check("the bar is drawn along the top", rows[BAR_H // 2][W // 2] == PANEL_BG, rows[BAR_H // 2][W // 2])
     sky = rows[300][700]
-    check("the wallpaper covers the console", sky != (0x1d, 0x21, 0x29) and sky[2] > sky[0], sky)
+    check("the wallpaper covers the console", sky != (0x1d, 0x21, 0x29), sky)
 
     # The dock's first app is Terminal.
     click(m, DOCK_X + 11 + 24, DOCK_Y + 11 + 24)

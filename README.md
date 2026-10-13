@@ -367,8 +367,8 @@ The graphical toolkit (`user/src/lib/gui.zig`, Zig, a working name) is our own, 
 
 Vela is KernelProject2's desktop. Type `vela` (or `vela &` to keep the shell) and you get:
 
-- a night-sky wallpaper, with the stars of Vela (the constellation it's named after), and the
-  apps as icons on it (double-click one);
+- a photo of the Vela supernova remnant (what's left of a star that exploded in the
+  constellation Vela, by ESO) as the wallpaper, and the apps as icons on it (double-click one);
 - a bar along the top: the star menu (every app, and "Leave Vela" to go back to the command line),
   a button for each open window (click to bring it forward, again to minimize it), and the clock
   (UTC);
@@ -497,3 +497,7 @@ Roughly in order; each step is checked by running a real program.
 - [SDL 2](https://libsdl.org/) (zlib license) is downloaded at build time. Chocolate Doom
   (GPL-2.0) and Freedoom (BSD-3-Clause, its copyright file is copied next to the WAD) come from
   the build machine's packages.
+- Vela's wallpaper is ESO's [Giant cosmic networks](https://www.eso.org/public/images/potw2322a/)
+  (the Vela supernova remnant), credit ESO/VPHAS+ team, acknowledgement Cambridge Astronomical
+  Survey Unit, under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); cropped and scaled
+  (`rootfs/usr/share/backgrounds/vela.txt`).
