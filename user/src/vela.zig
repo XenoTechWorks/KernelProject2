@@ -15,6 +15,7 @@ const shell = @import("vela/shell.zig");
 const wallpaper = @import("vela/wallpaper.zig");
 const glass = @import("vela/glass.zig");
 const settings = @import("vela/settings.zig");
+const welcome = @import("vela/welcome.zig");
 const jpeg = @import("lib/jpeg.zig");
 const sys = rt.sys;
 pub const _start = rt._start;
@@ -455,6 +456,52 @@ fn choose(i: usize) void {
     }
 }
 
+// ---- the Welcome window ----
+
+var welcome_win: ?gui.Window = null;
+
+fn openWelcome() void {
+    if (welcome_win != null) return;
+    welcome.init();
+    welcome_win = gui.Window.open("Welcome", welcome.width, welcome.height) orelse return;
+    drawWelcome();
+}
+
+fn closeWelcome() void {
+    if (welcome_win) |*w| w.close();
+    welcome_win = null;
+}
+
+fn drawWelcome() void {
+    const w = &(welcome_win orelse return);
+    welcome.draw(&w.canvas);
+    w.present();
+}
+
+fn welcomeEvent(e: gui.Event) void {
+    switch (e) {
+        .motion => |m| if (welcome.motion(m.x, m.y)) drawWelcome(),
+        .leave => if (welcome.leave()) drawWelcome(),
+        .press => |m| if (m.button == 1) {
+            const action = welcome.press(m.x, m.y) orelse return;
+            switch (action) {
+                .personalize => openPersonalize(),
+                .all_apps => openMenu(),
+                .launch => |app| shell.launch(app.path),
+                .show_at_start => {
+                    settings.welcome = !settings.welcome;
+                    settings.save();
+                    drawWelcome();
+                },
+                .close => closeWelcome(),
+            }
+        },
+        .resize => drawWelcome(),
+        .windows => windowsChanged(),
+        else => {},
+    }
+}
+
 // ---- Personalize: the wallpaper, the window color, the glass, starting at boot ----
 
 const pz_w = 470;
@@ -783,14 +830,15 @@ pub fn main(_: rt.Args) u8 {
     drawDesktop();
     drawBar();
     drawDock();
+    if (settings.welcome) openWelcome();
 
     while (!leaving) {
-        var fds: [7]extern struct { fd: i32, events: i16 = 1, revents: i16 = 0 } = undefined;
+        var fds: [8]extern struct { fd: i32, events: i16 = 1, revents: i16 = 0 } = undefined;
         fds[0] = .{ .fd = desktop.fd };
         fds[1] = .{ .fd = bar.fd };
         fds[2] = .{ .fd = dock.fd };
         var n: usize = 3;
-        for ([_]?gui.Window{ menu, picker, personalize, tooltip }) |w| {
+        for ([_]?gui.Window{ menu, picker, personalize, tooltip, welcome_win }) |w| {
             if (w) |m| {
                 fds[n] = .{ .fd = m.fd };
                 n += 1;
@@ -806,6 +854,14 @@ pub fn main(_: rt.Args) u8 {
         while (picker != null and picker.?.pending()) pickerEvent(picker.?.next(0) orelse break);
         while (personalize != null and personalize.?.pending()) personalizeEvent(personalize.?.next(0) orelse break);
         while (tooltip != null and tooltip.?.pending()) _ = tooltip.?.next(0); // nothing to do
+        while (welcome_win != null and welcome_win.?.pending()) {
+            // Null: the user closed it with its × button.
+            const e = welcome_win.?.next(0) orelse {
+                closeWelcome();
+                break;
+            };
+            welcomeEvent(e);
+        }
 
         if (windows_dirty) {
             windows_dirty = false;
@@ -823,6 +879,7 @@ pub fn main(_: rt.Args) u8 {
     if (menu) |*m| m.close();
     closePicker();
     closePersonalize();
+    closeWelcome();
     showTooltip(null);
     dock.close();
     bar.close();

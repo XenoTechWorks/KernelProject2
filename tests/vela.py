@@ -75,6 +75,20 @@ with Machine() as m:
     sky = rows[300][700]
     check("the wallpaper covers the console", sky != (0x1d, 0x21, 0x29), sky)
 
+    # The Welcome window opens with Vela. New windows open centered on a 40x10 text window, a
+    # little further down and right for each window already there (the desktop, the bar and the
+    # dock: 3), then keep that center when the app sets its size (console.rs open_window).
+    default_fw = 40 * 8 + 2 * 6 + 2
+    wx = (W - default_fw) // 2 + 32 * 3 + (default_fw - (640 + 2)) // 2
+    wy = BAR_H + 64 + 32 * 3
+    content = (wx + 1, wy + 34)
+    head = rows[content[1] + 50][content[0] + 320]
+    check("the Welcome window opens with Vela", head[2] > head[0] + 20, head)
+    click(m, content[0] + 640 - 24 - 50, content[1] + 470 - 32)  # its Close button
+    time.sleep(2)
+    gone = screen(m)[content[1] + 50][content[0] + 320]
+    check("its Close button closes it", gone != head, (head, gone))
+
     # The dock's first app is Terminal.
     click(m, DOCK_X + 11 + 24, DOCK_Y + 11 + 24)
     time.sleep(4)

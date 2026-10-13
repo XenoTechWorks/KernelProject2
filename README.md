@@ -397,6 +397,9 @@ shell), and you get:
   (UTC);
 - a dock of favorite apps at the bottom, with a dot under the ones that are running and each
   one's name above it under the pointer;
+- a Welcome window when Vela starts, after Vista's Welcome Center: the processor, memory and
+  machine, and tiles to start from (Personalize, a terminal, files, the editor, Doom, all apps);
+  untick "Show this when Vela starts" to stop it;
 - Personalize: the desktop background (any of the pictures), the window color (eight, after
   Vista's: the frame of the window in front and the glass take it), how clear the glass is, and
   whether Vela starts at boot. It's all kept in `/root/.config/vela.conf`.

@@ -5,6 +5,7 @@
 //!     color=sky                the window color (see colors)
 //!     glass=medium             clear, medium or dark
 //!     autostart=yes            whether init starts Vela at boot (init reads this line itself)
+//!     welcome=yes              whether the Welcome window opens when Vela starts
 
 const std = @import("std");
 const file = @import("../lib/file.zig");
@@ -40,6 +41,7 @@ var wallpaper_len: usize = 0;
 pub var color: usize = 0;
 pub var glass: usize = 1;
 pub var autostart = true;
+pub var welcome = true;
 
 pub fn wallpaper() []const u8 {
     return if (wallpaper_len == 0) "lake-tahoe" else wallpaper_buf[0..wallpaper_len];
@@ -72,17 +74,20 @@ pub fn load() void {
             }
         } else if (std.mem.eql(u8, key, "autostart")) {
             autostart = !std.mem.eql(u8, value, "no");
+        } else if (std.mem.eql(u8, key, "welcome")) {
+            welcome = !std.mem.eql(u8, value, "no");
         }
     }
 }
 
 pub fn save() void {
     var buf: [256]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, "wallpaper={s}\ncolor={s}\nglass={s}\nautostart={s}\n", .{
+    const text = std.fmt.bufPrint(&buf, "wallpaper={s}\ncolor={s}\nglass={s}\nautostart={s}\nwelcome={s}\n", .{
         wallpaper(),
         colors[color].name,
         glasses[glass].name,
         if (autostart) "yes" else "no",
+        if (welcome) "yes" else "no",
     }) catch return;
     file.makeParents(path);
     file.write(path, text, 0o644) catch {};
