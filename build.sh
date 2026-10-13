@@ -64,6 +64,7 @@ gcc -O2 -Wno-unused-result -o "$stage/bin/events-test" "$root/tests/events.c"
 gcc -O2 -Wno-unused-result -o "$stage/bin/pty-test" "$root/tests/ptys.c"
 gcc -O2 -Wno-unused-result -o "$stage/bin/jail-test" "$root/tests/jail.c"
 gcc -O2 -Wno-unused-result -o "$stage/bin/trace-test" "$root/tests/trace.c"
+gcc -O2 -static -o "$stage/bin/spin" "$root/tests/spin.c"
 
 step "Windows layer (winload) and Windows test programs"
 g++ -std=c++20 -O2 -static -fno-exceptions -fno-rtti -Wall -Wextra -o "$stage/bin/winload" "$root"/windows/src/*.cpp

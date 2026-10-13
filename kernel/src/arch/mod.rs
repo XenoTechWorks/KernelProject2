@@ -6,4 +6,6 @@ pub mod fwcfg;
 pub mod gdt;
 pub mod idt;
 pub mod irq;
+pub mod percpu;
 pub mod serial;
+pub mod smp;

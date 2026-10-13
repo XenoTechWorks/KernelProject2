@@ -366,6 +366,18 @@ The graphical toolkit (`user/src/lib/gui.zig`, Zig, a working name) is our own, 
   [JetBrains Mono](https://www.jetbrains.com/lp/mono/) (SIL Open Font License).
 - `user/src/lib/ui.zig` is the smaller helper for text windows (`textclock`).
 
+## More than one CPU
+
+The kernel starts every CPU the bootloader finds (Limine's MP request), and programs run on all of
+them at once: `tests/smp.py` runs four CPU-bound programs on 4 CPUs in about the time one takes
+alone. The kernel itself runs on one CPU at a time, under one "big kernel lock" (as Linux had at
+first): a CPU takes it coming into the kernel and lets go going back to a program or when it has
+nothing to do, so the kernel's code, written for one CPU, stays right. Each CPU has its own GDT,
+TSS and scheduler state (`arch/percpu.rs`, reached through GS with `swapgs`), and its local
+APIC's timer to take turns; device interrupts go to the first CPU. The threads of one program
+take turns on one CPU at a time for now, so no CPU ever has to tell another to forget a stale
+address translation. (`arch/smp.rs` has the details.)
+
 ## Booting
 
 Each step of the boot says how it went, the way Linux distributions show it: `[  OK  ]` when it
@@ -487,7 +499,7 @@ disk/            what a new disk starts with (out/disk.img is made from it once)
 tests/           test programs (C, and Windows ones in windows/) and the test scripts:
                  smoke.py, persist.py, windows.py, edit.py, textedit.py, archive.py,
                  pkg.py, accounts.py, net.py, tcp.py, ssh.py, terminals.py, gdb.py, doom.py,
-                 vela.py, boot.py, install.py, session.sh; events.c is events-test, ptys.c pty-test, jail.c jail-test,
+                 vela.py, boot.py, install.py, smp.py, session.sh; events.c is events-test, ptys.c pty-test, jail.c jail-test,
                  trace.c trace-test
 ```
 
@@ -505,7 +517,8 @@ make -C ~/tools/limine
 
 ./build.sh            # out/kernelproject2.iso
 ./run.sh              # boot it in a QEMU window (serial log in this terminal)
-./run.sh --text       # no window: use the shell right here, over the serial port
+./run.sh --text       # no window, no desktop: use the shell right here, over the serial port
+./run.sh --installed disk.img   # boot a disk `install` set up (UEFI); CPUS=n picks how many CPUs (4)
 python3 tests/smoke.py    # boot, run commands one after another, check the answers
 python3 tests/persist.py  # save files and a git repo, reboot, find them again
 python3 tests/windows.py  # open text and graphical windows, use them with the mouse
@@ -523,20 +536,23 @@ python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
 python3 tests/vela.py     # the desktop: dock, terminal, taskbar, maximize, star menu, Personalize
 python3 tests/boot.py     # the boot messages, the splash, starting Vela at boot, and turning that off
 python3 tests/install.py  # install onto a blank disk, check it from outside, boot it with UEFI
+python3 tests/smp.py      # 4 CPUs: started, counted, and four programs at once in the time of one
 ```
 
 ## Roadmap
 
 Roughly in order; each step is checked by running a real program.
 
-1. **More of Linux for real tools**: hardware watchpoints (debug registers), `/proc/<pid>/maps`,
-   and more CPUs.
+1. **More of Linux for real tools**: hardware watchpoints (debug registers), `/proc/<pid>/maps`.
+   More CPUs work under one kernel lock; next, finer locks so the kernel itself runs in parallel,
+   threads of one program on several CPUs (TLB shootdowns), and device interrupts through the
+   I/O APIC.
 2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
    archive), interrupt-driven I/O, and AHCI for real PCs.
 3. **Run the targets**: fastfetch and git run; next then coreutils as a compatibility test.
 4. **More Windows**: BusyBox for Windows runs. Next: more real console programs (7-Zip), then
    windows and graphics.
-5. Later: more CPUs (APIC/IOAPIC), networking, a real login, and running make/gcc/cmake on the system itself.
+5. Later: a real login, and running make/gcc/cmake on the system itself.
 
 ## Licenses of what's used
 

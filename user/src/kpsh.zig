@@ -609,6 +609,21 @@ fn fgJob(cmd: *const Command) u8 {
     return status;
 }
 
+/// `wait [%n]`: waits for a background job to finish (with no argument: every one that's
+/// running). Its status is the job's (the last one's).
+fn waitJobs(cmd: *const Command) u8 {
+    if (cmd.arg(1) != null) {
+        const job = pickJob(cmd) orelse return 127;
+        return waitJob(job.*);
+    }
+    var status: u8 = 0;
+    for (&jobs) |*slot| {
+        const j = slot.* orelse continue;
+        if (!j.stopped) status = waitJob(j);
+    }
+    return status;
+}
+
 /// `bg`: a stopped job goes on, in the background.
 fn bgJob(cmd: *const Command) u8 {
     const job = pickJob(cmd) orelse return 1;
@@ -683,6 +698,7 @@ const help_text =
     \\  jobs              list jobs (Ctrl+Z stops the one running; & starts one in the background)
     \\  fg [%n]           bring a job back to the foreground
     \\  bg [%n]           let a stopped job go on in the background
+    \\  wait [%n]         wait for background jobs to finish
     \\  exec PROG [ARGS]  become PROG (the shell is replaced by it)
     \\  exit [code]       leave the shell
     \\  help              this text
@@ -712,6 +728,7 @@ fn builtin(cmd: *const Command) ?u8 {
     if (eql(u8, name, "jobs")) return listJobs();
     if (eql(u8, name, "fg")) return fgJob(cmd);
     if (eql(u8, name, "bg")) return bgJob(cmd);
+    if (eql(u8, name, "wait")) return waitJobs(cmd);
     if (eql(u8, name, "cd")) {
         var target = cmd.arg(1) orelse (getVar("HOME") orelse "/");
         var old_buf: [512]u8 = undefined;

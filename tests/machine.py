@@ -18,14 +18,15 @@ PROMPT = re.compile(rb"[A-Za-z0-9_.-]+:[^\r\n]*[#$] $")
 
 
 class Machine:
-    def __init__(self, disk=None, scratch_disk=True, forward=(), desktop=False, extra_disks=(), uefi_disk=None):
+    def __init__(self, disk=None, scratch_disk=True, forward=(), desktop=False, extra_disks=(), uefi_disk=None, smp=None):
         """disk: a disk image to attach (default: out/disk.img when it exists). With scratch_disk,
         a copy is used, so tests don't change the real one. forward: (host port, guest port) pairs,
         so something on this machine can connect to a server inside the guest. desktop: boot
         into Vela as a user would; otherwise the kernel command line gets `text` (through QEMU's
         fw_cfg) and the screen stays the console. extra_disks: more disk images (vdb, vdc...),
         used as they are. uefi_disk: boot this disk (an installed system) with UEFI firmware
-        instead of the ISO; it's the only disk."""
+        instead of the ISO; it's the only disk. smp: how many CPUs (default: KP2_SMP from the
+        environment, else 2)."""
         self.output = b""
         self._scratch = None
         if disk is None and uefi_disk is None and os.path.exists(os.path.join(ROOT, "out/disk.img")):
@@ -41,7 +42,8 @@ class Machine:
         if uefi_disk:
             boot = ["-bios", "/usr/share/ovmf/OVMF.fd"]
             disk = uefi_disk
-        args = ["qemu-system-x86_64", "-M", "q35", "-m", "1G", *boot,
+        cpus = smp or int(os.environ.get("KP2_SMP", "2"))
+        args = ["qemu-system-x86_64", "-M", "q35", "-m", "1G", "-smp", str(cpus), *boot,
                 "-serial", "stdio", "-display", "none", "-no-reboot",
                 "-monitor", f"unix:{self._monitor},server,nowait",
                 "-qmp", f"unix:{self._monitor}-qmp,server,nowait"]

@@ -17,8 +17,24 @@ pub const USER_END: u64 = 0x0000_8000_0000_0000;
 
 static KERNEL_PML4: AtomicU64 = AtomicU64::new(0);
 
+/// Lets this CPU use the no-execute bit (each CPU, once).
+pub fn init_cpu() {
+    unsafe { cpu::wrmsr(cpu::MSR_EFER, cpu::rdmsr(cpu::MSR_EFER) | 1 << 11) };
+}
+
+/// The kernel's own top-level table (what the bootloader set up; every process shares its upper half).
+pub fn kernel_pml4() -> u64 {
+    KERNEL_PML4.load(Ordering::Relaxed)
+}
+
+/// Switches this CPU to the kernel's own tables (when it isn't running a task, so the tables of
+/// one that ends can be freed).
+pub fn activate_kernel() {
+    unsafe { cpu::write_cr3(kernel_pml4()) }
+}
+
 pub fn init() {
-    unsafe { cpu::wrmsr(cpu::MSR_EFER, cpu::rdmsr(cpu::MSR_EFER) | 1 << 11) }; // NX bit usable
+    init_cpu(); // NX bit usable
     let pml4 = cpu::read_cr3() & ADDRESS_MASK;
     KERNEL_PML4.store(pml4, Ordering::Relaxed);
     // Make sure every upper-half slot has a table, so mappings the kernel adds later are seen by all

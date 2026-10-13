@@ -182,6 +182,8 @@ pub struct Process {
     pub mem: Arc<Shared<Memory>>,
     pub files: Arc<Shared<Files>>,
     pub handlers: Arc<Shared<Handlers>>,
+    /// The CPU running it right now, if any (a task runs on one CPU at a time).
+    pub on_cpu: Option<u8>,
     pub fs_base: u64,
     /// The gs segment base. Linux programs rarely set it; Windows programs keep their TEB there.
     pub gs_base: u64,
@@ -249,25 +251,23 @@ impl Process {
     }
 }
 
+/// The tasks, shared by every CPU (each CPU's current task and scheduler stack are in its percpu
+/// record).
 struct Scheduler {
     procs: BTreeMap<u32, Box<Process>>,
-    current: Option<u32>,
-    sched_rsp: u64,
     next_pid: u32,
-    last: u32,
 }
 
 struct Global(UnsafeCell<Scheduler>);
-// Single CPU, and kernel code runs with interrupts off: see the module comment.
+// Kernel code runs on one CPU at a time (the big kernel lock, arch/smp.rs), with interrupts off.
 unsafe impl Sync for Global {}
 
-static SCHED: Global = Global(UnsafeCell::new(Scheduler {
-    procs: BTreeMap::new(),
-    current: None,
-    sched_rsp: 0,
-    next_pid: 1,
-    last: 0,
-}));
+static SCHED: Global = Global(UnsafeCell::new(Scheduler { procs: BTreeMap::new(), next_pid: 1 }));
+
+/// The task this CPU is running.
+fn running() -> Option<u32> {
+    crate::arch::percpu::this().current
+}
 
 fn sched() -> &'static mut Scheduler {
     unsafe { &mut *SCHED.0.get() }
@@ -287,21 +287,20 @@ fn cmdline_of(args: &[String]) -> Vec<u8> {
 /// The running task's process id, if a task is running.
 /// The running process's root directory, or "/" outside any process (at boot).
 pub fn current_root() -> String {
-    match sched().current.and_then(get) {
+    match running().and_then(get) {
         Some(p) => p.files().root.clone(),
         None => String::from("/"),
     }
 }
 
 pub fn current_pid() -> Option<u32> {
-    sched().current.and_then(get).map(|p| p.tgid)
+    running().and_then(get).map(|p| p.tgid)
 }
 
 /// The running task. Only valid while running on its behalf (in a system call or interrupt).
 pub fn current() -> &'static mut Process {
-    let s = sched();
-    let pid = s.current.expect("no current process");
-    s.procs.get_mut(&pid).expect("current process missing")
+    let pid = running().expect("no current process");
+    sched().procs.get_mut(&pid).expect("current process missing")
 }
 
 /// A task by thread id.
@@ -379,6 +378,7 @@ fn new_task(pid: u32, mem: Arc<Shared<Memory>>, files: Arc<Shared<Files>>, handl
         mem,
         files,
         handlers,
+        on_cpu: None,
         fs_base: 0,
         gs_base: 0,
         clear_child_tid: 0,
@@ -433,35 +433,49 @@ pub fn spawn_init(path: &str) -> Result<(), Errno> {
     Ok(())
 }
 
-/// The scheduler loop. Runs on the boot stack forever.
+/// The next task for this CPU: runnable, not running on another CPU, and not sharing memory with
+/// a task that is (threads of one program take turns on one CPU at a time, so nothing has to tell
+/// other CPUs to forget stale address translations), round robin after `last`.
+fn pick(last: u32) -> Option<u32> {
+    let s = sched();
+    let busy: alloc::vec::Vec<*const Shared<Memory>> = s.procs.values().filter(|p| p.on_cpu.is_some()).map(|p| Arc::as_ptr(&p.mem)).collect();
+    let ok = |p: &Process| p.state == State::Runnable && p.on_cpu.is_none() && !busy.contains(&Arc::as_ptr(&p.mem));
+    let after = s.procs.range(last + 1..).find(|(_, p)| ok(p)).map(|(&pid, _)| pid);
+    after.or_else(|| s.procs.iter().find(|(_, p)| ok(p)).map(|(&pid, _)| pid))
+}
+
+/// The scheduler loop: each CPU runs one, on its boot stack, forever.
 pub fn run() -> ! {
     let s = sched();
     loop {
-        let next = {
-            let after = s.procs.range(s.last + 1..).find(|(_, p)| p.state == State::Runnable).map(|(&pid, _)| pid);
-            after.or_else(|| s.procs.iter().find(|(_, p)| p.state == State::Runnable).map(|(&pid, _)| pid))
-        };
-        let Some(pid) = next else {
-            cpu::wait_for_interrupt();
+        let me = crate::arch::percpu::this();
+        let Some(pid) = pick(me.last) else {
+            crate::arch::smp::idle();
             continue;
         };
-        s.last = pid;
-        s.current = Some(pid);
+        me.last = pid;
+        me.current = Some(pid);
         let p = s.procs.get_mut(&pid).unwrap();
+        p.on_cpu = Some(me.id as u8);
         if let Some(space) = &p.mem.get().space {
             space.activate();
         }
-        let top = p.kstack_top();
-        gdt::set_kernel_stack(top);
+        gdt::set_kernel_stack(p.kstack_top());
         unsafe {
-            idt::KERNEL_STACK_TOP = top;
             cpu::wrmsr(cpu::MSR_FS_BASE, p.fs_base);
-            cpu::wrmsr(cpu::MSR_GS_BASE, p.gs_base);
+            // The program's GS base goes where `swapgs` on the way out picks it up.
+            cpu::wrmsr(cpu::MSR_KERNEL_GS_BASE, p.gs_base);
             asm!("fxrstor [{}]", in(reg) &*p.fpu);
         }
         let ctx = p.ctx_rsp;
-        unsafe { switch_context(&mut s.sched_rsp, ctx) };
-        s.current = None;
+        unsafe { switch_context(&mut me.sched_rsp, ctx) };
+        // (exec in a thread other than the first renumbers it: what ran is what's current now.)
+        let pid = me.current.take().unwrap_or(pid);
+        if let Some(p) = s.procs.get_mut(&pid) {
+            p.on_cpu = None;
+        }
+        // Off the task's page tables, which may be freed now (the process ended).
+        crate::mm::paging::activate_kernel();
         // A finished thread can only be freed once we're off its kernel stack, which is now.
         if s.procs.get(&pid).is_some_and(|p| p.state == State::Dead) {
             s.procs.remove(&pid);
@@ -469,13 +483,21 @@ pub fn run() -> ! {
     }
 }
 
-/// Gives the CPU back to the scheduler; returns when this task is picked again.
+/// Gives the CPU back to the scheduler; returns when this task is picked again (maybe on
+/// another CPU).
 pub fn yield_now() {
-    let s = sched();
     let p = current();
+    let me = crate::arch::percpu::this();
     unsafe {
         asm!("fxsave [{}]", in(reg) &mut *p.fpu);
-        switch_context(&mut p.ctx_rsp, s.sched_rsp);
+        switch_context(&mut p.ctx_rsp, me.sched_rsp);
+    }
+}
+
+/// The other CPUs' timer: a program that has had its turn lets another run.
+pub fn preempt(frame: &TrapFrame) {
+    if frame.from_user() && running().is_some() {
+        yield_now();
     }
 }
 
@@ -517,7 +539,7 @@ fn wake_sleepers() {
 pub fn timer_tick(frame: &TrapFrame) {
     // Time passing wakes sleepers (for timeouts) but isn't a change in anything they watch.
     wake_sleepers();
-    if frame.from_user() && sched().current.is_some() {
+    if frame.from_user() && running().is_some() {
         yield_now();
     }
 }
@@ -732,7 +754,7 @@ pub fn exec(frame: &mut TrapFrame, path: &str, args: &[String], env: &[String]) 
         let mut task = s.procs.remove(&me).unwrap();
         task.pid = tgid;
         s.procs.insert(tgid, task);
-        s.current = Some(tgid);
+        crate::arch::percpu::this().current = Some(tgid);
         current()
     } else {
         p
@@ -764,7 +786,7 @@ pub fn exec(frame: &mut TrapFrame, path: &str, args: &[String], env: &[String]) 
     p.cmdline = cmdline_of(args);
     p.fs_base = 0;
     p.gs_base = 0;
-    unsafe { cpu::wrmsr(cpu::MSR_GS_BASE, 0) };
+    unsafe { cpu::wrmsr(cpu::MSR_KERNEL_GS_BASE, 0) }; // the program's (see run)
     p.clear_child_tid = 0;
     unsafe { cpu::wrmsr(cpu::MSR_FS_BASE, 0) };
     *p.fpu = unsafe { (*(&raw const INITIAL_FPU)).clone() };

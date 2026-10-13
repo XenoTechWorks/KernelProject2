@@ -203,6 +203,9 @@ pub fn sched_getaffinity(size: usize, mask: u64) -> SysResult {
     if size < 8 {
         return Err(EINVAL);
     }
-    user::write_struct(proc::current().space(), mask, &1u64)?;
+    // Every CPU: a task may run on any of them.
+    let n = crate::arch::smp::count().min(64);
+    let all: u64 = if n == 64 { u64::MAX } else { (1 << n) - 1 };
+    user::write_struct(proc::current().space(), mask, &all)?;
     Ok(8)
 }

@@ -58,18 +58,23 @@ fn meminfo() -> String {
 fn cpuinfo() -> String {
     let cpu = crate::arch::cpuid::info();
     let mhz = crate::arch::cpuid::tsc_mhz();
-    format!(
-        "processor\t: 0\nvendor_id\t: {}\ncpu family\t: {}\nmodel\t\t: {}\nmodel name\t: {}\nstepping\t: {}\n\
-         cpu MHz\t\t: {mhz}.000\nphysical id\t: 0\nsiblings\t: 1\ncore id\t\t: 0\ncpu cores\t: 1\n\
-         flags\t\t: {}\nbogomips\t: {}.00\naddress sizes\t: 48 bits physical, 48 bits virtual\n\n",
-        cpu.vendor,
-        cpu.family,
-        cpu.model,
-        cpu.brand,
-        cpu.stepping,
-        cpu.flags.join(" "),
-        mhz * 2,
-    )
+    let n = crate::arch::smp::count();
+    let mut s = String::new();
+    for i in 0..n {
+        s += &format!(
+            "processor\t: {i}\nvendor_id\t: {}\ncpu family\t: {}\nmodel\t\t: {}\nmodel name\t: {}\nstepping\t: {}\n\
+             cpu MHz\t\t: {mhz}.000\nphysical id\t: 0\nsiblings\t: {n}\ncore id\t\t: {i}\ncpu cores\t: {n}\n\
+             apicid\t\t: {i}\nflags\t\t: {}\nbogomips\t: {}.00\naddress sizes\t: 48 bits physical, 48 bits virtual\n\n",
+            cpu.vendor,
+            cpu.family,
+            cpu.model,
+            cpu.brand,
+            cpu.stepping,
+            cpu.flags.join(" "),
+            mhz * 2,
+        );
+    }
+    s
 }
 
 fn uptime() -> String {
@@ -81,10 +86,12 @@ fn stat() -> String {
     let ticks = crate::arch::irq::ticks();
     let boot = crate::time::realtime().0 - crate::time::monotonic().0;
     let count = proc::all().count();
-    format!(
-        "cpu  0 0 0 {ticks} 0 0 0 0 0 0\ncpu0 0 0 0 {ticks} 0 0 0 0 0 0\nintr 0\nctxt 0\nbtime {boot}\n\
-         processes {count}\nprocs_running 1\nprocs_blocked 0\n"
-    )
+    let n = crate::arch::smp::count() as u64;
+    let mut cpus = format!("cpu  0 0 0 {} 0 0 0 0 0 0\n", ticks * n);
+    for i in 0..n {
+        cpus += &format!("cpu{i} 0 0 0 {ticks} 0 0 0 0 0 0\n");
+    }
+    format!("{cpus}intr 0\nctxt 0\nbtime {boot}\nprocesses {count}\nprocs_running 1\nprocs_blocked 0\n")
 }
 
 const MOUNTS: &str = "rootfs / tmpfs rw 0 0\nproc /proc proc rw,nosuid,nodev,noexec 0 0\n\

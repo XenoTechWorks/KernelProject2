@@ -29,7 +29,7 @@ mod tty;
 use arch::{gdt, idt, irq, serial};
 use core::fmt::Write;
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
-use limine::request::{ExecutableCmdlineRequest, ExecutableFileRequest, FramebufferRequest, HhdmRequest, MemmapRequest, ModulesRequest, SmbiosRequest};
+use limine::request::{ExecutableCmdlineRequest, ExecutableFileRequest, FramebufferRequest, HhdmRequest, MemmapRequest, ModulesRequest, MpRequest, SmbiosRequest};
 
 // What we ask Limine for. It fills in the responses before jumping to kmain.
 #[used]
@@ -59,6 +59,9 @@ static CMDLINE: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
 #[used]
 #[unsafe(link_section = ".limine_requests")]
 static KERNEL_FILE: ExecutableFileRequest = ExecutableFileRequest::new();
+#[used]
+#[unsafe(link_section = ".limine_requests")]
+static MP: MpRequest = MpRequest::new(0);
 #[used]
 #[unsafe(link_section = ".limine_requests_end")]
 static REQUESTS_END: RequestsEndMarker = RequestsEndMarker::new();
@@ -107,8 +110,11 @@ extern "C" fn kmain() -> ! {
         arch::cpu::halt_forever();
     }
 
-    gdt::init();
+    gdt::init(0);
+    arch::percpu::init(0);
     idt::init();
+    // The first CPU is in the kernel from here on (the big kernel lock, arch/smp.rs).
+    arch::smp::kernel_enter();
 
     let hhdm = HHDM.response().expect("no HHDM response").offset;
     let memmap = MEMMAP.response().expect("no memory map").entries();
@@ -196,6 +202,13 @@ extern "C" fn kmain() -> ! {
     }
     irq::init();
     boot::ok("Interrupts on: 8259 PIC through the local APIC, timer at 100 Hz");
+    let cpus = arch::smp::start(MP.response());
+    fs::sysfs::cpus(cpus);
+    boot::ok(&if cpus == 1 {
+        alloc::string::String::from("CPUs: 1")
+    } else {
+        alloc::format!("CPUs: {cpus}, the others started (local APIC timers, one big kernel lock)")
+    });
 
     // The same order Linux tries.
     let started = ["/sbin/init", "/etc/init", "/bin/init", "/bin/sh"].iter().find(|path| match proc::spawn_init(path) {

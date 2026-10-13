@@ -307,7 +307,8 @@ pub fn arch_prctl(code: u32, addr: u64) -> SysResult {
                 return Err(EPERM);
             }
             p.gs_base = addr;
-            unsafe { crate::arch::cpu::wrmsr(crate::arch::cpu::MSR_GS_BASE, addr) };
+            // In the kernel the program's GS base waits in KERNEL_GS_BASE (swapped back on return).
+            unsafe { crate::arch::cpu::wrmsr(crate::arch::cpu::MSR_KERNEL_GS_BASE, addr) };
             Ok(0)
         }
         ARCH_GET_GS => {

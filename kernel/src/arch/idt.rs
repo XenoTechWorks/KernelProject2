@@ -4,6 +4,9 @@
 //! instruction) saves the program's registers as the same [`TrapFrame`] on the process's kernel stack,
 //! and every way back out goes through `trap_return` (`iretq`). That one shape is what lets the
 //! scheduler switch processes, `fork` copy a process, and `execve` start a new program.
+//!
+//! Coming from a program, `swapgs` makes GS point at this CPU's percpu record (and back on the
+//! way out); every way in takes the big kernel lock and every way out lets it go (smp.rs).
 
 use super::cpu;
 use super::gdt::{self, KERNEL_CODE};
@@ -58,11 +61,6 @@ impl TrapFrame {
 
 pub const SYSCALL_VECTOR: u64 = 0x100;
 
-/// Top of the current process's kernel stack. syscall_entry switches to it (the CPU doesn't).
-#[unsafe(no_mangle)]
-pub static mut KERNEL_STACK_TOP: u64 = 0;
-#[unsafe(no_mangle)]
-static mut USER_RSP_SCRATCH: u64 = 0;
 
 // One small entry stub per vector. Exceptions without an error code push a 0 so every frame has the
 // same shape; `isr_table` lists the stubs' addresses for the IDT.
@@ -90,36 +88,54 @@ stubs! {
     24 plain, 25 plain, 26 plain, 27 plain, 28 plain, 29 code, 30 code, 31 plain,
     32 plain, 33 plain, 34 plain, 35 plain, 36 plain, 37 plain, 38 plain, 39 plain,
     40 plain, 41 plain, 42 plain, 43 plain, 44 plain, 45 plain, 46 plain, 47 plain,
+    48 plain,
 }
 
 global_asm!(
     ".global trap_common",
     "trap_common:",
+    // From a program (its CS, at rsp+24, has RPL 3): GS to this CPU's record.
+    "test qword ptr [rsp + 24], 3",
+    "jz 1f",
+    "swapgs",
+    "1:",
+    "trap_saved:",
     "push rax", "push rbx", "push rcx", "push rdx", "push rsi", "push rdi", "push rbp",
     "push r8", "push r9", "push r10", "push r11", "push r12", "push r13", "push r14", "push r15",
-    "mov rdi, rsp",
     "cld",
+    "call {enter}",
+    "mov rdi, rsp",
     "call {dispatch}",
     ".global trap_return",
     "trap_return:",
+    "call {exit}",
     "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10", "pop r9", "pop r8",
     "pop rbp", "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rbx", "pop rax",
     "add rsp, 16",
+    // Back to a program: GS back to its own.
+    "test qword ptr [rsp + 8], 3",
+    "jz 2f",
+    "swapgs",
+    "2:",
     "iretq",
     "",
-    // syscall: rcx = user rip, r11 = user rflags; interrupts are off (FMASK).
+    // syscall: rcx = user rip, r11 = user rflags; interrupts are off (FMASK). This CPU's record
+    // holds the kernel stack to switch to (gs:[8]) and a place for the program's (gs:[16]).
     ".global syscall_entry",
     "syscall_entry:",
-    "mov [rip + USER_RSP_SCRATCH], rsp",
-    "mov rsp, [rip + KERNEL_STACK_TOP]",
+    "swapgs",
+    "mov gs:[16], rsp",
+    "mov rsp, gs:[8]",
     "push {user_ss}",
-    "push [rip + USER_RSP_SCRATCH]",
+    "push qword ptr gs:[16]",
     "push r11",
     "push {user_cs}",
     "push rcx",
     "push 0",
     "push {syscall_vector}",
-    "jmp trap_common",
+    "jmp trap_saved",
+    enter = sym crate::arch::smp::kernel_enter,
+    exit = sym crate::arch::smp::kernel_exit,
     dispatch = sym trap_dispatch,
     user_ss = const gdt::USER_DATA as u64,
     user_cs = const gdt::USER_CODE as u64,
@@ -135,7 +151,7 @@ unsafe extern "C" {
     fn syscall_entry();
     pub fn trap_return();
     fn isr_spurious();
-    static isr_table: [u64; 48];
+    static isr_table: [u64; 49];
 }
 
 #[repr(C, packed)]
@@ -182,6 +198,13 @@ pub fn init() {
             IDT[vector] = Gate::new(address, flags, if vector == 8 { 1 } else { 0 });
         }
         IDT[SPURIOUS_VECTOR] = Gate::new(isr_spurious as *const () as u64, 0x8E, 0);
+    }
+    load();
+}
+
+/// Loads the IDT and sets up `syscall` on this CPU (every CPU does it once).
+pub fn load() {
+    unsafe {
         let pointer = Pointer { limit: (size_of::<[Gate; 256]>() - 1) as u16, base: &raw const IDT as u64 };
         asm!("lidt [{}]", in(reg) &pointer);
 
@@ -208,6 +231,14 @@ extern "C" fn trap_dispatch(frame: &mut TrapFrame) {
         SYSCALL_VECTOR => crate::sys::dispatch(frame),
         32..=47 => {
             crate::arch::irq::handle(frame);
+            if frame.from_user() {
+                crate::proc::signal::deliver(frame);
+            }
+        }
+        // The local APIC timer of the other CPUs: time to take turns.
+        crate::arch::smp::TIMER_VECTOR => {
+            crate::arch::smp::eoi();
+            crate::proc::preempt(frame);
             if frame.from_user() {
                 crate::proc::signal::deliver(frame);
             }
