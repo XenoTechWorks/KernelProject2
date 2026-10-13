@@ -18,15 +18,17 @@ PROMPT = re.compile(rb"[A-Za-z0-9_.-]+:[^\r\n]*[#$] $")
 
 
 class Machine:
-    def __init__(self, disk=None, scratch_disk=True, forward=(), desktop=False):
+    def __init__(self, disk=None, scratch_disk=True, forward=(), desktop=False, extra_disks=(), uefi_disk=None):
         """disk: a disk image to attach (default: out/disk.img when it exists). With scratch_disk,
         a copy is used, so tests don't change the real one. forward: (host port, guest port) pairs,
         so something on this machine can connect to a server inside the guest. desktop: boot
         into Vela as a user would; otherwise the kernel command line gets `text` (through QEMU's
-        fw_cfg) and the screen stays the console."""
+        fw_cfg) and the screen stays the console. extra_disks: more disk images (vdb, vdc...),
+        used as they are. uefi_disk: boot this disk (an installed system) with UEFI firmware
+        instead of the ISO; it's the only disk."""
         self.output = b""
         self._scratch = None
-        if disk is None and os.path.exists(os.path.join(ROOT, "out/disk.img")):
+        if disk is None and uefi_disk is None and os.path.exists(os.path.join(ROOT, "out/disk.img")):
             disk = os.path.join(ROOT, "out/disk.img")
         if disk and scratch_disk:
             fd, self._scratch = tempfile.mkstemp(suffix=".img")
@@ -35,7 +37,11 @@ class Machine:
             disk = self._scratch
         # QEMU's monitor on a socket, for screenshots.
         self._monitor = os.path.join(tempfile.gettempdir(), f"kp2-monitor-{os.getpid()}-{id(self)}")
-        args = ["qemu-system-x86_64", "-M", "q35", "-m", "1G", "-cdrom", os.path.join(ROOT, "out/kernelproject2.iso"),
+        boot = ["-cdrom", os.path.join(ROOT, "out/kernelproject2.iso")]
+        if uefi_disk:
+            boot = ["-bios", "/usr/share/ovmf/OVMF.fd"]
+            disk = uefi_disk
+        args = ["qemu-system-x86_64", "-M", "q35", "-m", "1G", *boot,
                 "-serial", "stdio", "-display", "none", "-no-reboot",
                 "-monitor", f"unix:{self._monitor},server,nowait",
                 "-qmp", f"unix:{self._monitor}-qmp,server,nowait"]
@@ -44,11 +50,14 @@ class Machine:
         if disk:
             args += ["-drive", f"file={disk},if=none,id=home,format=raw",
                      "-device", "virtio-blk-pci,drive=home,disable-legacy=on"]
+        for i, extra in enumerate(extra_disks):
+            args += ["-drive", f"file={extra},if=none,id=extra{i},format=raw",
+                     "-device", f"virtio-blk-pci,drive=extra{i},disable-legacy=on"]
         args += ["-device", "virtio-tablet-pci,disable-legacy=on",
                  "-netdev", "user,id=n0" + "".join(f",hostfwd=tcp:127.0.0.1:{h}-:{g}" for h, g in forward),
                  "-device", "virtio-net-pci,netdev=n0,disable-legacy=on"]
         self.qemu = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        self._wait_for_prompt(60)
+        self._wait_for_prompt(120 if uefi_disk else 60)
 
     def _read(self, timeout):
         ready, _, _ = select.select([self.qemu.stdout], [], [], timeout)

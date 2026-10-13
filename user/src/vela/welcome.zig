@@ -54,7 +54,12 @@ pub fn init() void {
         n += 1;
     }
     if (n < tiles_buf.len) {
-        tiles_buf[n] = .{ .title = "All apps", .line = "Everything in the star menu", .icon = .{ .app = .widgets }, .action = .all_apps };
+        // Running from the ISO, the last tile offers to install; once installed, all the apps.
+        if (live() and find(.installer) != null) {
+            tiles_buf[n] = .{ .title = "Install on a disk", .line = "Start without the ISO, keep your files", .icon = .{ .app = .installer }, .action = .{ .launch = find(.installer).? } };
+        } else {
+            tiles_buf[n] = .{ .title = "All apps", .line = "Everything in the star menu", .icon = .{ .app = .widgets }, .action = .all_apps };
+        }
         n += 1;
     }
     tiles = tiles_buf[0..n];
@@ -62,6 +67,21 @@ pub fn init() void {
     facts[0] = .{ "Processor", cpuName(&facts_buf[0]) };
     facts[1] = .{ "Memory", memory(&facts_buf[1]) };
     facts[2] = .{ "Machine", machine(&facts_buf[2]) };
+}
+
+/// Whether this is the system running from the ISO: /root isn't on an installed home partition
+/// (/proc/mounts shows a whole disk, /dev/vda, or no disk at all).
+fn live() bool {
+    const data = file.read("/proc/mounts") catch return true;
+    defer std.heap.page_allocator.free(data);
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |line| {
+        var words = std.mem.tokenizeScalar(u8, line, ' ');
+        const dev = words.next() orelse continue;
+        const at = words.next() orelse continue;
+        if (std.mem.eql(u8, at, "/root")) return !std.ascii.isDigit(dev[dev.len - 1]);
+    }
+    return true;
 }
 
 /// The value of a "name : value" line of a /proc file.

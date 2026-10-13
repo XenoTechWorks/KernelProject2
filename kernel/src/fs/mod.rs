@@ -17,6 +17,7 @@ pub mod cpio;
 pub mod eventfd;
 pub mod ext2;
 pub mod lock;
+pub mod gpt;
 pub mod notify;
 pub mod pipe;
 pub mod procfs;
@@ -49,6 +50,8 @@ pub enum Device {
     /// /dev/clipboard: what was copied, shared by every program. Writing replaces it (from the
     /// start of the file), reading returns it.
     Clipboard,
+    /// /dev/vda, /dev/vdb...: a whole disk, read and written in whole sectors (the installer).
+    Disk(u32),
 }
 
 pub static CLIPBOARD: Mutex<Vec<u8>> = Mutex::new(Vec::new());
@@ -64,6 +67,9 @@ pub enum Kind {
     ProcMem(u32),
     /// An inode on an ext2 disk (a file, directory, symlink or socket).
     Ext2(Arc<Ext2>, u32),
+    /// A read-only file whose contents are in memory for good: /boot/kernel and
+    /// /boot/initramfs.cpio, what the bootloader loaded (the installer copies them).
+    Static(&'static [u8]),
 }
 
 /// What kind of thing a node is, whatever file system it's on.
@@ -147,7 +153,7 @@ impl Node {
             Kind::Symlink(_) => Type::Symlink,
             Kind::Device(d) => Type::Device(*d),
             Kind::Socket => Type::Socket,
-            Kind::ProcMem(_) => Type::File,
+            Kind::ProcMem(_) | Kind::Static(_) => Type::File,
             Kind::Ext2(..) => match self.ext2_info().map_or(0, |i| i.mode as u32 & S_IFMT_MASK) {
                 S_IFDIR => Type::Dir,
                 S_IFLNK => Type::Symlink,
@@ -226,6 +232,7 @@ impl Node {
             Kind::Symlink(target) => target.len() as u64,
             Kind::Dir(entries) => entries.lock().len() as u64 * 32,
             Kind::Device(_) | Kind::Socket | Kind::ProcMem(_) => 0,
+            Kind::Static(data) => data.len() as u64,
             Kind::Ext2(..) => self.ext2_info().map_or(0, |i| i.size),
         }
     }
@@ -261,6 +268,12 @@ impl Node {
             }
             Kind::Ext2(fs, ino) if self.kind_of() == Type::File => fs.read_at(*ino, offset, buf),
             Kind::ProcMem(pid) => crate::proc::ptrace::mem_read(*pid, offset, buf),
+            Kind::Static(data) => {
+                let pos = (offset as usize).min(data.len());
+                let n = (data.len() - pos).min(buf.len());
+                buf[..n].copy_from_slice(&data[pos..pos + n]);
+                Ok(n)
+            }
             _ if self.is_dir() => Err(EISDIR),
             _ => Err(EINVAL),
         }
@@ -603,27 +616,56 @@ pub fn uninstall(path: &str) {
     }
 }
 
-/// Where the disk is mounted, if one is (for /proc/mounts and statfs).
-pub static DISK_MOUNT: Once<(String, Arc<Ext2>)> = Once::new();
+/// Where the disk is mounted, if one is (for /proc/mounts and statfs): the path, the file
+/// system, and the device it's on (vda, vda2...).
+pub static DISK_MOUNT: Once<(String, Arc<Ext2>, String)> = Once::new();
 
-/// Mounts an ext2 disk, if there is one (None when there isn't), at `path`. Programs' files there
-/// survive a reboot.
-pub fn mount_disk(path: &str) -> Option<Result<(), String>> {
-    if crate::drivers::virtio_blk::DISK.lock().is_none() {
+/// Mounts an ext2 file system at `path`, if there's one (None when there are no disks):
+/// the partition named "KernelProject2 home" on a GPT disk (what the installer makes), or else a
+/// disk that's ext2 as a whole (what build.sh makes). Programs' files there survive a reboot.
+/// Says where it found it.
+pub fn mount_disk(path: &str) -> Option<Result<String, String>> {
+    let disks = crate::drivers::virtio_blk::count();
+    if disks == 0 {
         return None;
     }
-    Some(match Ext2::mount() {
-        Ok(fs) => {
-            install(path, Node::ext2(fs.clone(), ext2::ROOT_INO));
-            DISK_MOUNT.call_once(|| (path.to_string(), fs));
-            crate::log!("ext2 disk mounted at {path}");
-            Ok(())
+    let mut places: Vec<(ext2::Place, String)> = Vec::new();
+    for disk in 0..disks {
+        if let Some((number, first)) = gpt::find(disk, "KernelProject2 home") {
+            let name = alloc::format!("{}{}", crate::drivers::virtio_blk::name(disk), number);
+            places.push((ext2::Place { disk, base: first * 512 }, name));
         }
-        Err(why) => {
-            crate::log!("disk not mounted: {why}");
-            Err(alloc::format!("{why}"))
+    }
+    for disk in 0..disks {
+        places.push((ext2::Place { disk, base: 0 }, crate::drivers::virtio_blk::name(disk)));
+    }
+    let mut why = "not an ext2 file system";
+    for (at, name) in places {
+        match Ext2::mount(at) {
+            Ok(fs) => {
+                install(path, Node::ext2(fs.clone(), ext2::ROOT_INO));
+                DISK_MOUNT.call_once(|| (path.to_string(), fs, name.clone()));
+                crate::log!("ext2 on {name} mounted at {path}");
+                return Some(Ok(name));
+            }
+            Err(e) => why = e,
         }
-    })
+    }
+    crate::log!("disk not mounted: {why}");
+    Some(Err(why.to_string()))
+}
+
+/// Makes /dev/vda, /dev/vdb... for the disks found (root's to read and write).
+pub fn install_disk_devices() {
+    for disk in 0..crate::drivers::virtio_blk::count() {
+        let node = Node::new(Kind::Device(Device::Disk(disk as u32)), 0o660);
+        install(&alloc::format!("/dev/{}", crate::drivers::virtio_blk::name(disk)), node);
+    }
+}
+
+/// Puts a read-only file whose contents stay in memory (what the bootloader loaded) at `path`.
+pub fn install_static(path: &str, data: &'static [u8]) {
+    install(path, Node::new(Kind::Static(data), 0o444));
 }
 
 pub fn init_devices() {

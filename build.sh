@@ -31,7 +31,7 @@ find "$stage" -type f -exec chmod 644 {} +
 mkdir -p "$stage/usr"
 ln -s ../bin "$stage/usr/bin"
 ln -s ../sbin "$stage/usr/sbin"
-for program in init kpsh ls cat echo uname fileops kpfetch clock textclock widgets calc files edit textedit eyes gzip tar zip pkg users ping ifconfig host nc doom terminal vela; do
+for program in init kpsh ls cat echo uname fileops kpfetch clock textclock widgets calc files edit textedit eyes gzip tar zip pkg users ping ifconfig host nc doom terminal vela install; do
     dest="$stage/bin/$program"
     [[ $program == init ]] && dest="$stage/sbin/init"
     "$zig" build-exe "$root/user/src/$program.zig" -target x86_64-linux-none -O ${ZIG_MODE:-ReleaseSmall} -fstrip \
@@ -288,6 +288,10 @@ if [[ ! -s "$fonts/JetBrainsMono.ttf" ]]; then
     curl -sSLf -o "$fonts/JetBrainsMono-OFL.txt" "https://github.com/google/fonts/raw/main/ofl/jetbrainsmono/OFL.txt"
 fi
 cp "$fonts"/Inter.ttf "$fonts"/Inter-OFL.txt "$fonts"/JetBrainsMono.ttf "$fonts"/JetBrainsMono-OFL.txt "$stage/usr/share/fonts/"
+# Limine's UEFI program, for the installer to put on the disks it sets up (BSD-2-Clause).
+mkdir -p "$stage/usr/share/limine"
+cp "$limine/BOOTX64.EFI" "$stage/usr/share/limine/"
+cp "$limine/LICENSE" "$stage/usr/share/limine/LICENSE"
 
 step "boot archive"
 rm -f "$out/initramfs.cpio"

@@ -92,9 +92,8 @@ const MOUNTS: &str = "rootfs / tmpfs rw 0 0\nproc /proc proc rw,nosuid,nodev,noe
 
 fn mounts() -> String {
     let mut s = String::from(MOUNTS);
-    if let Some((path, _)) = super::DISK_MOUNT.get() {
-        s += &format!("/dev/vda {path} ext2 rw,relatime 0 0
-");
+    if let Some((path, _, device)) = super::DISK_MOUNT.get() {
+        s += &format!("/dev/{device} {path} ext2 rw,relatime 0 0\n");
     }
     s
 }

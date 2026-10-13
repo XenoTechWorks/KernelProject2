@@ -6,7 +6,7 @@
 //! variable-length entries. Every change is written to the disk straight away, so nothing is lost
 //! if the machine stops.
 
-use crate::drivers::virtio_blk::{DISK, SECTOR};
+use crate::drivers::virtio_blk::{self, SECTOR};
 use crate::sys::errno::*;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -41,6 +41,8 @@ struct Group {
 }
 
 struct Inner {
+    /// Where the file system is.
+    at: Place,
     sb: Vec<u8>,
     block_size: usize,
     inode_size: usize,
@@ -83,12 +85,19 @@ fn put32(b: &mut [u8], at: usize, v: u32) {
     b[at..at + 4].copy_from_slice(&v.to_le_bytes());
 }
 
-fn disk_read(byte: u64, buf: &mut [u8]) -> Result<(), Errno> {
-    DISK.lock().as_mut().ok_or(EIO)?.read(byte / SECTOR as u64, buf).map_err(|_| EIO)
+/// Where a file system is: a disk, and the byte its partition starts at (0: the whole disk).
+#[derive(Clone, Copy)]
+pub struct Place {
+    pub disk: usize,
+    pub base: u64,
 }
 
-fn disk_write(byte: u64, buf: &[u8]) -> Result<(), Errno> {
-    DISK.lock().as_mut().ok_or(EIO)?.write(byte / SECTOR as u64, buf).map_err(|_| EIO)
+fn disk_read(at: Place, byte: u64, buf: &mut [u8]) -> Result<(), Errno> {
+    virtio_blk::read(at.disk, (at.base + byte) / SECTOR as u64, buf).map_err(|_| EIO)
+}
+
+fn disk_write(at: Place, byte: u64, buf: &[u8]) -> Result<(), Errno> {
+    virtio_blk::write(at.disk, (at.base + byte) / SECTOR as u64, buf).map_err(|_| EIO)
 }
 
 fn now() -> u32 {
@@ -96,10 +105,10 @@ fn now() -> u32 {
 }
 
 impl Ext2 {
-    /// Reads the superblock and group descriptors. Fails if the disk isn't an ext2 we can handle.
-    pub fn mount() -> Result<Arc<Ext2>, &'static str> {
+    /// Reads the superblock and group descriptors. Fails if it isn't an ext2 we can handle.
+    pub fn mount(at: Place) -> Result<Arc<Ext2>, &'static str> {
         let mut sb = vec![0u8; 1024];
-        disk_read(1024, &mut sb).map_err(|_| "can't read the disk")?;
+        disk_read(at, 1024, &mut sb).map_err(|_| "can't read the disk")?;
         if get16(&sb, 56) != 0xEF53 {
             return Err("not an ext2 file system");
         }
@@ -115,6 +124,7 @@ impl Ext2 {
         let blocks_per_group = get32(&sb, 32);
         let group_count = (blocks_count - first_data_block).div_ceil(blocks_per_group) as usize;
         let mut inner = Inner {
+            at,
             block_size,
             inode_size,
             inodes_per_group: get32(&sb, 40),
@@ -129,7 +139,7 @@ impl Ext2 {
         let table_bytes = group_count * 32;
         let mut table = vec![0u8; table_bytes.next_multiple_of(block_size)];
         let table_block = first_data_block + 1;
-        disk_read(table_block as u64 * block_size as u64, &mut table).map_err(|_| "can't read the group table")?;
+        disk_read(at, table_block as u64 * block_size as u64, &mut table).map_err(|_| "can't read the group table")?;
         for g in 0..group_count {
             let d = &table[g * 32..g * 32 + 32];
             inner.groups.push(Group {
@@ -467,7 +477,7 @@ impl Inner {
             return Ok(data.clone());
         }
         let mut data = vec![0u8; self.block_size];
-        disk_read(block as u64 * self.block_size as u64, &mut data)?;
+        disk_read(self.at, block as u64 * self.block_size as u64, &mut data)?;
         if self.cache.len() > 4096 {
             self.cache.clear();
         }
@@ -476,7 +486,7 @@ impl Inner {
     }
 
     fn write_block(&mut self, block: u32, data: &[u8]) -> Result<(), Errno> {
-        disk_write(block as u64 * self.block_size as u64, data)?;
+        disk_write(self.at, block as u64 * self.block_size as u64, data)?;
         self.cache.insert(block, data.to_vec());
         Ok(())
     }
@@ -614,7 +624,7 @@ impl Inner {
     fn save_metadata(&mut self, group: usize) -> Result<(), Errno> {
         // Superblock (always at byte 1024) and this group's descriptor.
         let sb = self.sb.clone();
-        disk_write(1024, &sb)?;
+        disk_write(self.at, 1024, &sb)?;
         let g = &self.groups[group];
         let table_block = self.first_data_block + 1 + (group * 32 / self.block_size) as u32;
         let at = group * 32 % self.block_size;

@@ -381,6 +381,23 @@ turning off "Start Vela when the computer starts" in Personalize. The tests boot
 `tests/machine.py` adds it through QEMU's fw_cfg (`opt/kernelproject2/cmdline`), which the kernel
 reads on top of the bootloader's command line.
 
+## Installing on a disk
+
+`install` puts KernelProject2 on a disk so it starts without the ISO (with UEFI firmware): in a
+window from Vela ("Install" in the star menu, or "Install on a disk" in the Welcome window when
+running from the ISO), or `install --list` and `install /dev/vdb` on the command line. The disk
+gets a GPT partition table with an EFI system partition (FAT32: Limine's UEFI program, its
+configuration, the kernel and the boot archive, copied from the running system's /boot) and an
+ext2 partition named "KernelProject2 home", which becomes /root. It won't touch the disk /root is
+on. The GPT, FAT32 and ext2 are written by our own code (`user/src/installer/`), and
+`tests/install.py` checks them with sgdisk, e2fsck and mtools, then boots the disk alone with
+OVMF.
+
+For that the kernel finds every virtio disk (`/dev/vda`, `/dev/vdb`..., read and written in whole
+sectors), mounts /root from a "KernelProject2 home" GPT partition when there is one (else a disk
+that's ext2 as a whole), and shows what the bootloader loaded as `/boot/kernel` and
+`/boot/initramfs.cpio`.
+
 ## Vela
 
 Vela is KernelProject2's desktop. It starts at boot (or type `vela`, or `vela &` to keep the
@@ -470,7 +487,7 @@ disk/            what a new disk starts with (out/disk.img is made from it once)
 tests/           test programs (C, and Windows ones in windows/) and the test scripts:
                  smoke.py, persist.py, windows.py, edit.py, textedit.py, archive.py,
                  pkg.py, accounts.py, net.py, tcp.py, ssh.py, terminals.py, gdb.py, doom.py,
-                 vela.py, boot.py, session.sh; events.c is events-test, ptys.c pty-test, jail.c jail-test,
+                 vela.py, boot.py, install.py, session.sh; events.c is events-test, ptys.c pty-test, jail.c jail-test,
                  trace.c trace-test
 ```
 
@@ -504,7 +521,8 @@ python3 tests/terminals.py # script and tmux, in pseudo-terminals, and job contr
 python3 tests/gdb.py      # gdb: breakpoints, a step, attaching (in an image built WITH_GDB=1)
 python3 tests/doom.py     # Doom's demo, timed, then quitting it from its menu
 python3 tests/vela.py     # the desktop: dock, terminal, taskbar, maximize, star menu, Personalize
-python3 tests/boot.py     # the boot messages, starting Vela at boot, and turning that off
+python3 tests/boot.py     # the boot messages, the splash, starting Vela at boot, and turning that off
+python3 tests/install.py  # install onto a blank disk, check it from outside, boot it with UEFI
 ```
 
 ## Roadmap

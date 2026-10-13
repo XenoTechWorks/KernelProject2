@@ -86,6 +86,16 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
             // Terminals are opened as Handle::Tty; only an O_PATH descriptor gets here.
             Type::Device(Device::Console | Device::Tty | Device::Ptmx | Device::Pts(_)) => Err(EBADF),
             Type::Device(Device::Null) => Ok(0),
+            Type::Device(Device::Disk(disk)) => {
+                let mut offset = file.offset.lock();
+                let n = disk_io(disk as usize, at.unwrap_or(*offset), buf.len(), |sector, len| {
+                    crate::drivers::virtio_blk::read(disk as usize, sector, &mut buf[..len])
+                })?;
+                if at.is_none() {
+                    *offset += n;
+                }
+                Ok(n)
+            }
             Type::Device(Device::Zero) => {
                 buf.fill(0);
                 Ok(buf.len() as u64)
@@ -164,6 +174,21 @@ fn read_file(file: &OpenFile, buf: &mut [u8], at: Option<u64>) -> SysResult {
     }
 }
 
+/// Reading or writing a disk device: whole sectors only (the position and the length both
+/// multiples of 512), cut short at the end of the disk. `io(first sector, bytes)` does it.
+fn disk_io(disk: usize, pos: u64, len: usize, io: impl FnOnce(u64, usize) -> Result<(), ()>) -> Result<u64, Errno> {
+    let size = crate::drivers::virtio_blk::size(disk).ok_or(ENXIO)?;
+    if pos % 512 != 0 || len % 512 != 0 {
+        return Err(EINVAL);
+    }
+    let len = (len as u64).min(size.saturating_sub(pos)) as usize;
+    if len == 0 {
+        return Ok(0);
+    }
+    io(pos / 512, len).map_err(|_| EIO)?;
+    Ok(len as u64)
+}
+
 fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
     if !writable(file) {
         return Err(EBADF);
@@ -201,6 +226,16 @@ fn write_file(file: &OpenFile, data: &[u8], at: Option<u64>) -> SysResult {
                     *offset = (pos + data.len()) as u64;
                 }
                 Ok(data.len() as u64)
+            }
+            Type::Device(Device::Disk(disk)) => {
+                let mut offset = file.offset.lock();
+                let n = disk_io(disk as usize, at.unwrap_or(*offset), data.len(), |sector, len| {
+                    crate::drivers::virtio_blk::write(disk as usize, sector, &data[..len])
+                })?;
+                if at.is_none() {
+                    *offset += n;
+                }
+                Ok(n)
             }
             Type::Device(_) => Ok(data.len() as u64),
         },
@@ -253,9 +288,14 @@ pub fn write(fd: i32, buf: u64, len: usize) -> SysResult {
     write_file(&file, &data, None)
 }
 
+/// Files and disks have positions to read and write at; pipes, sockets and terminals don't.
+fn seekable(file: &OpenFile) -> bool {
+    matches!(&file.handle, Handle::Node(n) if matches!(n.kind_of(), Type::File | Type::Device(Device::Disk(_))))
+}
+
 pub fn pread(fd: i32, buf: u64, len: usize, offset: u64) -> SysResult {
     let file = proc::current().files().fds.get(fd)?;
-    if !matches!(&file.handle, Handle::Node(n) if n.kind_of() == Type::File) {
+    if !seekable(&file) {
         return Err(ESPIPE);
     }
     let mut tmp = vec![0u8; len.min(1 << 20)];
@@ -267,7 +307,7 @@ pub fn pread(fd: i32, buf: u64, len: usize, offset: u64) -> SysResult {
 pub fn pwrite(fd: i32, buf: u64, len: usize, offset: u64) -> SysResult {
     let p = proc::current();
     let file = p.files().fds.get(fd)?;
-    if !matches!(&file.handle, Handle::Node(n) if n.kind_of() == Type::File) {
+    if !seekable(&file) {
         return Err(ESPIPE);
     }
     let data = user::read_vec(p.space(), buf, len.min(1 << 24))?;
@@ -444,14 +484,16 @@ pub fn dup3(old: i32, new: i32, flags: u32, is_dup2: bool) -> SysResult {
 pub fn lseek(fd: i32, offset: i64, whence: u32) -> SysResult {
     let file = proc::current().files().fds.get(fd)?;
     let Handle::Node(node) = &file.handle else { return Err(ESPIPE) };
-    if matches!(node.kind_of(), Type::Device(_)) {
-        return Ok(0);
-    }
+    let disk = match node.kind_of() {
+        Type::Device(Device::Disk(d)) => Some(d as usize),
+        Type::Device(_) => return Ok(0),
+        _ => None,
+    };
     let mut pos = file.offset.lock();
     let base = match whence {
         0 => 0,
         1 => *pos as i64,
-        2 => node.size() as i64,
+        2 => disk.map_or(node.size(), |d| crate::drivers::virtio_blk::size(d).unwrap_or(0)) as i64,
         _ => return Err(EINVAL),
     };
     let new = base.checked_add(offset).filter(|&v| v >= 0).ok_or(EINVAL)?;
@@ -641,6 +683,23 @@ pub fn ioctl(fd: i32, request: u32, arg: u64) -> SysResult {
     }
     if let Handle::Socket(_) | Handle::Tcp(_) | Handle::UnixStream(_) | Handle::UnixDatagram(_) = &file.handle {
         return super::net::net_ioctl(&file.handle, request, arg);
+    }
+    if let Handle::Node(node) = &file.handle {
+        if let fs::Type::Device(Device::Disk(disk)) = node.kind_of() {
+            const BLKGETSIZE64: u32 = 0x80081272;
+            const BLKSSZGET: u32 = 0x1268;
+            return match request {
+                BLKGETSIZE64 => {
+                    user::write_struct(p.space(), arg, &crate::drivers::virtio_blk::size(disk as usize).unwrap_or(0))?;
+                    Ok(0)
+                }
+                BLKSSZGET => {
+                    user::write_struct(p.space(), arg, &512u32)?;
+                    Ok(0)
+                }
+                _ => Err(ENOTTY),
+            };
+        }
     }
     if let (Handle::Inotify(n), FIONREAD) = (&file.handle, request) {
         user::write_struct(p.space(), arg, &(notify::pending(n) as u32))?;

@@ -124,7 +124,12 @@ impl Queue {
 /// and agrees on features: VIRTIO_F_VERSION_1, plus any of `wanted` (the device's own feature
 /// bits 0..31) that it offers. `name` is for the log. The features agreed on are in `features`.
 pub fn start(ids: &[u16], name: &str, wanted: u32) -> Option<Device> {
-    let dev = pci::devices().into_iter().find(|d| d.vendor == 0x1AF4 && ids.contains(&d.device))?;
+    start_nth(ids, name, wanted, 0)
+}
+
+/// Like start, for the `nth` such device (0 is the first), for when there are several (disks).
+pub fn start_nth(ids: &[u16], name: &str, wanted: u32, nth: usize) -> Option<Device> {
+    let dev = pci::devices().into_iter().filter(|d| d.vendor == 0x1AF4 && ids.contains(&d.device)).nth(nth)?;
     dev.enable();
 
     // virtio's PCI capabilities say where each configuration structure lives.

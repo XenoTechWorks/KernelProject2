@@ -29,7 +29,7 @@ mod tty;
 use arch::{gdt, idt, irq, serial};
 use core::fmt::Write;
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
-use limine::request::{ExecutableCmdlineRequest, FramebufferRequest, HhdmRequest, MemmapRequest, ModulesRequest, SmbiosRequest};
+use limine::request::{ExecutableCmdlineRequest, ExecutableFileRequest, FramebufferRequest, HhdmRequest, MemmapRequest, ModulesRequest, SmbiosRequest};
 
 // What we ask Limine for. It fills in the responses before jumping to kmain.
 #[used]
@@ -56,6 +56,9 @@ static SMBIOS: SmbiosRequest = SmbiosRequest::new();
 #[used]
 #[unsafe(link_section = ".limine_requests")]
 static CMDLINE: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
+#[used]
+#[unsafe(link_section = ".limine_requests")]
+static KERNEL_FILE: ExecutableFileRequest = ExecutableFileRequest::new();
 #[used]
 #[unsafe(link_section = ".limine_requests_end")]
 static REQUESTS_END: RequestsEndMarker = RequestsEndMarker::new();
@@ -152,14 +155,23 @@ extern "C" fn kmain() -> ! {
         Some(module) => {
             let count = fs::cpio::unpack(module.data());
             boot::ok(&alloc::format!("Unpacked the root file system: {count} files (cpio initramfs)"));
+            // What the bootloader loaded, for the installer to copy onto a disk.
+            fs::install_static("/boot/initramfs.cpio", module.data());
+            if let Some(kernel) = KERNEL_FILE.response() {
+                fs::install_static("/boot/kernel", kernel.executable_file().data());
+            }
         }
         None => boot::report(boot::Status::Failed, "No root file system (the initramfs module is missing)"),
     }
     // Home lives on the disk when there is one, so what you make there survives a reboot.
-    match drivers::virtio_blk::init() {
-        Some(mib) => boot::ok(&alloc::format!("Disk: virtio-blk, {mib} MiB")),
-        None => boot::warn("No disk: files in /root last only until a reboot"),
+    let disks = drivers::virtio_blk::init();
+    for (i, mib) in disks.iter().enumerate() {
+        boot::ok(&alloc::format!("Disk: /dev/{}, virtio-blk, {mib} MiB", drivers::virtio_blk::name(i)));
     }
+    if disks.is_empty() {
+        boot::warn("No disk: files in /root last only until a reboot");
+    }
+    fs::install_disk_devices();
     let tablet = drivers::virtio_input::init();
     match drivers::virtio_net::init() {
         Some(mac) => {
@@ -173,7 +185,7 @@ extern "C" fn kmain() -> ! {
         None => boot::warn("No network card: networking is off"),
     }
     match fs::mount_disk("/root") {
-        Some(Ok(())) => boot::ok("Mounted /root (ext2 on the virtio disk)"),
+        Some(Ok(device)) => boot::ok(&alloc::format!("Mounted /root (ext2 on /dev/{device})")),
         Some(Err(why)) => boot::warn(&alloc::format!("Couldn't mount the disk at /root: {why}")),
         None => {}
     }
