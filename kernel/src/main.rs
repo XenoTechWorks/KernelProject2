@@ -21,6 +21,7 @@ mod smbios;
 mod sys;
 mod term;
 mod time;
+mod title_font;
 mod tty;
 
 use arch::{gdt, idt, irq, serial};

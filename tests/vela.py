@@ -97,7 +97,8 @@ with Machine() as m:
     back = screen(m)[middle[1]][middle[0]]
     check("and brings it back", back == terminal_bg, (terminal_bg, back))
 
-    # Maximize: the frame's middle button (46 pixels in from its right edge, in the header).
+    # Maximize: the middle of the frame's three buttons (console.rs: close is 44 wide, 8 in from the
+    # right edge; maximize 28 wide, 2 to its left), in the header.
     rows = screen(m)
     y = 0
     for yy in range(BAR_H + 2, H // 2):  # the frame's top edge: the first row that isn't sky
@@ -106,7 +107,7 @@ with Machine() as m:
             break
     header_y = y - 34 + 17  # the contents start below the 34-pixel header
     right = max(x for x in range(W // 2, W) if rows[y + 5][x] == terminal_bg) + 1
-    click(m, right - 46, header_y)
+    click(m, right - 8 - 44 - 2 - 14, header_y)
     time.sleep(3)
     save(m, "vela-3.png")
     rows = screen(m)

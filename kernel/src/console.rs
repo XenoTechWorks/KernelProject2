@@ -45,20 +45,25 @@ const SHADOW: i32 = 14;
 const SHADOW_DROP: i32 = 3;
 const SHADOW_ALPHA: i32 = 100;
 const PAD: i32 = 6; // around a text window's cells
-const CLOSE_RADIUS: i32 = 9;
-/// The header's buttons, from the right edge of the frame to their centers.
-const CLOSE_AT: i32 = 20;
-const MAXIMIZE_AT: i32 = 46;
-const MINIMIZE_AT: i32 = 72;
+/// The header's buttons (minimize, maximize, close) sit side by side at its right end, after
+/// Windows Vista's: close is wider, and red on the window in front.
+const BUTTON_H: i32 = 20;
+const CLOSE_W: i32 = 44;
+const SMALL_W: i32 = 28;
+const BUTTONS_RIGHT: i32 = 8; // from the frame's right edge
+const BUTTON_GAP: i32 = 2;
 /// How far outside a window's edges the pointer can grab them to resize.
 const GRIP: i32 = 6;
 const MIN_SIZE: (i32, i32) = (120, 60);
 
-const HEADER_COLOR: [u32; 2] = [0x23272f, 0x2c313c]; // [unfocused, focused]
-const BORDER_COLOR: [u32; 2] = [0x353b47, 0x4b5365];
-const TITLE_COLOR: [u32; 2] = [0x8b93a1, 0xe6e9ef];
-const CLOSE_COLOR: u32 = 0x3a404d;
-const CLOSE_HOVER: u32 = 0xe06c75;
+// Frames after Windows Vista's Aero, a darker modern take: a glassy header (a gradient with a
+// shine over its top half), a light rim inside a dark edge, titles with a soft shadow.
+// [unfocused, focused]
+const HEADER_TOP: [u32; 2] = [0x41464f, 0x4d6488];
+const HEADER_BOTTOM: [u32; 2] = [0x2c3037, 0x253247];
+const RIM: [u32; 2] = [0x5d636e, 0x8ea7cf];
+const EDGE: u32 = 0x07090d;
+const TITLE_COLOR: [u32; 2] = [0xb4bbc6, 0xffffff];
 
 /// Events a graphical window's program reads, 16 bytes each: kind, x, y, data (all 32-bit).
 pub mod event {
@@ -244,14 +249,16 @@ impl View {
     fn content_rect(&self) -> Rect {
         Rect { x: self.x + self.border(), y: self.y + self.header(), w: self.cw, h: self.ch }
     }
-    /// Center of a header button, in frame coordinates.
-    fn button_center(&self, button: Button) -> (i32, i32) {
-        let from_right = match button {
-            Button::Close => CLOSE_AT,
-            Button::Maximize => MAXIMIZE_AT,
-            Button::Minimize => MINIMIZE_AT,
+    /// Where a header button is, in frame coordinates.
+    fn button_rect(&self, button: Button) -> Rect {
+        let close_x = self.fw() - BUTTONS_RIGHT - CLOSE_W;
+        let x = match button {
+            Button::Close => close_x,
+            Button::Maximize => close_x - BUTTON_GAP - SMALL_W,
+            Button::Minimize => close_x - 2 * (BUTTON_GAP + SMALL_W),
         };
-        (self.fw() - from_right, HEADER / 2)
+        let w = if button == Button::Close { CLOSE_W } else { SMALL_W };
+        Rect { x, y: (HEADER - BUTTON_H) / 2, w, h: BUTTON_H }
     }
 }
 
@@ -713,8 +720,7 @@ impl Screen {
             return Part::Content(fx, fy);
         }
         for button in [Button::Close, Button::Maximize, Button::Minimize] {
-            let (cx, cy) = view.button_center(button);
-            if (fx - cx).pow(2) + (fy - cy).pow(2) <= (CLOSE_RADIUS + 2).pow(2) {
+            if view.button_rect(button).contains(fx, fy) {
                 return Part::Button(button);
             }
         }
@@ -1200,7 +1206,6 @@ impl Screen {
         let focused = (self.focus == Some(self.views[i].window.id)) as usize;
         let view = &mut self.views[i];
         let (iw, ih, fw, fh, s, r) = (view.iw(), view.ih(), view.fw(), view.fh(), view.shadow(), view.corner());
-        let (header, border) = (HEADER_COLOR[focused], BORDER_COLOR[focused]);
         for iy in 0..ih {
             for ix in 0..iw {
                 let (fx, fy) = (ix - s, iy - s);
@@ -1210,26 +1215,16 @@ impl Screen {
                     let d = rounded_distance(fx, fy, fw, fh, r);
                     let cover = (8 - d).clamp(0, 16) as u32;
                     if cover > 0 {
-                        let color = if d > -24 || fy == HEADER - 1 { border } else { header };
-                        pixel = over(premultiply(color, cover * 255 / 16), pixel);
+                        pixel = over(premultiply(frame_color(fy, d, focused), cover * 255 / 16), pixel);
                     }
                 }
                 view.image[(iy * iw + ix) as usize] = pixel;
             }
         }
         if view.framed() {
-            // The title, centered (and cut short before the buttons).
-            let room = ((fw - 2 * (MINIMIZE_AT + 16)) / CELL_W as i32).max(0) as usize;
-            let title: Vec<char> = view.title.chars().take(room).collect();
-            let tx = (fw - (title.len() * CELL_W) as i32) / 2;
-            let ty = (HEADER - CELL_H as i32) / 2;
-            for (n, &c) in title.iter().enumerate() {
-                let at = ((s + ty) * iw + s + tx + (n * CELL_W) as i32) as usize;
-                let cell = Cell { ch: c as u32, fg: 0, bg: 0 };
-                draw_glyph_colors(&mut view.image[at..], iw as usize, cell, TITLE_COLOR[focused], header);
-            }
+            draw_title(view, focused);
             for button in [Button::Close, Button::Maximize, Button::Minimize] {
-                draw_button(view, button, focused, header);
+                draw_button(view, button, focused);
             }
         }
         copy_content(view, Rect { x: 0, y: 0, w: view.cw, h: view.ch });
@@ -1328,33 +1323,129 @@ fn shadow_at(fx: i32, fy: i32, fw: i32, fh: i32, radius: i32) -> u32 {
     ((SHADOW_ALPHA * k / reach * k / reach) as u32) << 24
 }
 
-/// A header button: a circle with its mark (× close, a square maximize, a bar minimize). Close
-/// turns red under the pointer, the others lighter.
-fn draw_button(view: &mut View, button: Button, focused: usize, header: u32) {
+/// The frame's color at row `fy`, `d` (1/16 pixels, negative inside) from its edge: a dark edge, a
+/// light rim inside it, and the header's glassy gradient with a shine over its top half.
+fn frame_color(fy: i32, d: i32, focused: usize) -> u32 {
+    if d > -16 {
+        return EDGE;
+    }
+    let below = if fy < HEADER { HEADER_TOP[focused] } else { HEADER_BOTTOM[focused] };
+    if d > -32 {
+        // The rim: bright along the header, fading down the sides.
+        let k = if fy < HEADER { 150 } else { 70 };
+        return mix(RIM[focused], below, k);
+    }
+    if fy >= HEADER - 1 {
+        return if fy == HEADER - 1 { EDGE } else { HEADER_BOTTOM[focused] };
+    }
+    let base = mix(HEADER_BOTTOM[focused], HEADER_TOP[focused], (fy * 255 / HEADER) as u32);
+    let half = HEADER / 2;
+    if fy < half { mix(0xffffff, base, (34 * (half - fy) / half) as u32) } else { base }
+}
+
+/// Sets a frame pixel (frame coordinates) to `color` laid over what's there, `alpha` strong.
+fn blend_frame(view: &mut View, fx: i32, fy: i32, color: u32, alpha: u32) {
     let (iw, s) = (view.iw(), view.shadow());
-    let (cx, cy) = view.button_center(button);
+    if fx < 0 || fy < 0 || fx >= view.fw() || fy >= view.fh() || alpha == 0 {
+        return;
+    }
+    let at = ((s + fy) * iw + s + fx) as usize;
+    let under = view.image[at];
+    view.image[at] = mix(color, under, alpha.min(255)) | (under & 0xff00_0000);
+}
+
+/// The title: left-aligned in the smooth title font, with a soft shadow, cut short with "…" before
+/// the buttons.
+fn draw_title(view: &mut View, focused: usize) {
+    let room = view.button_rect(Button::Minimize).x - 14 - 12;
+    let mut title = view.title.clone();
+    if crate::title_font::width(&title) > room {
+        while !title.is_empty() && crate::title_font::width(&title) + crate::title_font::width("…") > room {
+            title.pop();
+        }
+        title.push('…');
+    }
+    let baseline = HEADER / 2 + 5;
+    for (dx, dy, color, strength) in [(0, 1, 0x000000u32, 150u32), (0, 0, TITLE_COLOR[focused], 255)] {
+        let mut pen = 14 * 64;
+        for c in title.chars() {
+            let Some(g) = crate::title_font::glyph_or_box(c) else { continue };
+            let gx = pen / 64 + g.left + dx;
+            let gy = baseline - g.top + dy;
+            for y in 0..g.h {
+                for x in 0..g.w {
+                    let a = g.alpha[y * g.w + x] as u32 * strength / 255;
+                    blend_frame(view, gx + x as i32, gy + y as i32, color, a);
+                }
+            }
+            pen += g.advance;
+        }
+    }
+}
+
+/// A header button: a small glassy pill (close is red on the window in front, and every button
+/// brightens under the pointer) with its mark in white: a bar, a box, or an ×.
+fn draw_button(view: &mut View, button: Button, focused: usize) {
+    let r = view.button_rect(button);
     let hover = view.hover_button == Some(button);
-    let circle = match (button, hover) {
-        (Button::Close, true) => CLOSE_HOVER,
-        (_, true) => 0x4f5666,
-        _ => CLOSE_COLOR,
+    let (top, bottom) = match (button, focused == 1, hover) {
+        (Button::Close, _, true) => (0xf0705a, 0xc4321c),
+        (Button::Close, true, false) => (0xd65a45, 0xa22b18),
+        (_, _, true) => (0x6f86ad, 0x3a4c6c),
+        (_, true, false) => (0x55657f, 0x2d394d),
+        _ => (0x4e535c, 0x30343b),
     };
-    let mark = if hover { 0xffffff } else { TITLE_COLOR[focused] };
-    for dy in -CLOSE_RADIUS - 1..=CLOSE_RADIUS + 1 {
-        for dx in -CLOSE_RADIUS - 1..=CLOSE_RADIUS + 1 {
-            let d = isqrt(((dx * 16).pow(2) + (dy * 16).pow(2)) as u64) as i32 - CLOSE_RADIUS * 16;
-            let cover = (8 - d).clamp(0, 16) as u32;
+    for y in 0..r.h {
+        for x in 0..r.w {
+            // Rounded corners, 4 pixels, smoothed.
+            let d = rounded_distance(x, y, r.w, r.h, 4);
+            let cover = (8 - d).clamp(0, 16) as u32 * 255 / 16;
             if cover == 0 {
                 continue;
             }
-            let on_mark = match button {
-                Button::Close => dx.abs() <= 3 && dy.abs() <= 3 && (dx == dy || dx == -dy),
-                Button::Maximize => dx.abs() <= 3 && dy.abs() <= 3 && (dx.abs() == 3 || dy.abs() == 3),
-                Button::Minimize => dx.abs() <= 3 && dy == 2,
+            let mut color = if d > -16 { EDGE } else { mix(bottom, top, (y * 255 / r.h) as u32) };
+            if d <= -16 && y < r.h / 2 {
+                color = mix(0xffffff, color, (60 * (r.h / 2 - y) / (r.h / 2)) as u32);
+            }
+            blend_frame(view, r.x + x, r.y + y, color, cover);
+        }
+    }
+    let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
+    let white = if focused == 1 || hover { 0xffffff } else { 0xd0d4da };
+    match button {
+        Button::Minimize => {
+            for x in -4..4 {
+                for y in 2..4 {
+                    blend_frame(view, cx + x, cy + y, white, 255);
+                }
+            }
+        }
+        Button::Maximize => {
+            for x in -5..5 {
+                for y in -4..4 {
+                    let on = y <= -3 || y == 3 || x == -5 || x == 4;
+                    if on {
+                        blend_frame(view, cx + x, cy + y, white, 255);
+                    }
+                }
+            }
+        }
+        Button::Close => {
+            // Two smooth diagonal strokes, about 1.6 pixels wide and 8 across. In 1/16 pixels:
+            // the distance from a pixel's center to each stroke (a segment through the middle).
+            let stroke = |across: i32, along: i32| {
+                let off = across.abs() * 181 / 256; // / sqrt(2)
+                let past = (along.abs() * 181 / 256 - 90).max(0); // beyond the stroke's end
+                isqrt((off * off + past * past) as u64) as i32
             };
-            let color = if on_mark { mark } else { circle };
-            let at = ((s + cy + dy) * iw + s + cx + dx) as usize;
-            view.image[at] = mix(color, header, cover * 255 / 16) | 0xff00_0000;
+            for y in -7..=7 {
+                for x in -7..=7 {
+                    let (px, py) = (x * 16 + 8, y * 16 + 8);
+                    let d = stroke(px - py, px + py).min(stroke(px + py, px - py)) - 13;
+                    let cover = (8 - d).clamp(0, 16) as u32 * 255 / 16;
+                    blend_frame(view, cx + x, cy + y, white, cover);
+                }
+            }
         }
     }
 }
@@ -1368,16 +1459,6 @@ fn draw_glyph(to: &mut [u32], stride: usize, cell: Cell, cursor: bool) {
         for gx in 0..CELL_W {
             let on = bits >> gx & 1 == 1 || underline;
             to[gy * stride + gx] = if on { if underline { PALETTE[7] } else { fg } } else { bg };
-        }
-    }
-}
-
-/// Draws a character's lit pixels in `fg` on `bg`, opaque (for window titles).
-fn draw_glyph_colors(to: &mut [u32], stride: usize, cell: Cell, fg: u32, bg: u32) {
-    let glyph = crate::font::glyph(cell.ch).or_else(|| crate::font::glyph('?' as u32)).unwrap();
-    for (gy, &bits) in glyph.iter().enumerate() {
-        for gx in 0..CELL_W {
-            to[gy * stride + gx] = 0xff00_0000 | if bits >> gx & 1 == 1 { fg } else { bg };
         }
     }
 }

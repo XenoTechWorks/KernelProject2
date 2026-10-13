@@ -316,8 +316,11 @@ tmux attach                     # ...and this comes back to it
 
 ## Apps in windows
 
-Programs can open windows that float over the console, with a header, buttons to minimize,
-maximize and close, and a soft shadow. Without a desktop the command line stays the whole screen,
+Programs can open windows that float over the console, in frames after Windows Vista's Aero (a
+glassy header with smooth titles, and minimize, maximize and a red close button), with a soft
+shadow. Titles use Inter, rendered ahead of time into `kernel/src/title-font.bin` by
+`user/src/mkatlas.zig` (with the toolkit's TrueType renderer), so the kernel draws them without a
+font renderer of its own. Without a desktop the command line stays the whole screen,
 and windows sit on top of it; `vela` starts the desktop (see Vela, below).
 
 ```sh
@@ -370,7 +373,10 @@ Vela is KernelProject2's desktop. Type `vela` (or `vela &` to keep the shell) an
 - a photo as the wallpaper (15 landscapes and night cities from Wikimedia Commons; pick one with
   "Desktop Background…" in the star menu, and it's remembered in `/root/.config/vela.conf`), and
   the apps as icons on it (double-click one);
-- a bar along the top: the star menu (every app, and "Leave Vela" to go back to the command line),
+- glass, after Windows Vista: the bar, the dock and the menus show the wallpaper behind them,
+  blurred and tinted, with a shine; the apps' icons are KDE's Oxygen icons;
+- a bar along the top: the orb with the star menu (every app, "Desktop Background…", and "Leave
+  Vela" to go back to the command line),
   a button for each open window (click to bring it forward, again to minimize it), and the clock
   (UTC);
 - a dock of favorite apps at the bottom, with a dot under the ones that are running.
@@ -503,6 +509,10 @@ Roughly in order; each step is checked by running a real program.
 - [SDL 2](https://libsdl.org/) (zlib license) is downloaded at build time. Chocolate Doom
   (GPL-2.0) and Freedoom (BSD-3-Clause, its copyright file is copied next to the WAD) come from
   the build machine's packages.
+- Window titles are drawn in [Inter](https://rsms.me/inter/) (SIL Open Font License,
+  `kernel/src/title-font-LICENSE`), pre-rendered into `kernel/src/title-font.bin`.
+- Vela's icons are from KDE's [Oxygen](https://invent.kde.org/frameworks/oxygen-icons) icon theme
+  (LGPL-3.0-or-later; `rootfs/usr/share/icons/oxygen/README` and the license texts beside it).
 - Vela's wallpapers are photos from [Wikimedia Commons](https://commons.wikimedia.org/) under
   CC BY, CC BY-SA and CC0, cropped and scaled; each one's author, license and source page are in
   `rootfs/usr/share/backgrounds/CREDITS.txt`.
