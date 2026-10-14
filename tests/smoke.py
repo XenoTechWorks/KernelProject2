@@ -22,6 +22,9 @@ CHECKS = [
     ("rm -r /tmp/a; ls /tmp", "x"),
     ("nosuchcommand; echo status $?", "status 127"),
     ("false || echo fallback", "fallback"),
+    ("kpsh -c 'echo $# $1 $0' name one two", "2 one name"),
+    # "$@": each argument one word, even with a space in it.
+    ("kpsh -c 'hello-static \"$@\"' name 'a b' c", "argument 2: c"),
     ("cat /proc/meminfo", "MemTotal:"),
     ("ls /proc/self/", "cmdline"),
     ("fastfetch", "Kernel: Linux 6.12.0-kp2"),

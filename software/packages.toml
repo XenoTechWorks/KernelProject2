@@ -1,0 +1,144 @@
+# What Software offers. Each entry is built by software/build.py from Ubuntu 24.04's own packages
+# (downloaded, never installed on the build machine) into a package of its own: the files, the
+# libraries they need that KernelProject2 doesn't already have, and a little information.
+#
+#   debs      the Ubuntu packages whose files go in (the first one names the version)
+#   only      if given, just these files from them (paths relative to /)
+#   run       the command that starts it
+#   terminal  runs inside a Terminal window (a text-mode program)
+#   about     one line for the catalog
+#   category  Games or Apps
+#   files     extra files to add (path = contents), e.g. a launcher
+#   icon      a picture for it: a file from the packages, or an Oxygen icon (rootfs/usr/share/icons)
+#
+# Everything here is free software (see each package's usr/share/doc/NAME/copyright).
+
+[bastet]
+title = "Bastet"
+category = "Games"
+debs = ["bastet"]
+run = "/usr/games/bastet"
+terminal = true
+about = "Falling blocks, except the game picks the worst piece it can."
+icon = "usr/share/icons/hicolor/96x96/apps/bastet.png"
+
+[moon-buggy]
+title = "Moon Buggy"
+category = "Games"
+debs = ["moon-buggy"]
+run = "/usr/games/moon-buggy"
+terminal = true
+about = "Drive a buggy across the moon and jump the craters."
+icon = "oxygen:applications-games"
+
+[ninvaders]
+title = "nInvaders"
+category = "Games"
+debs = ["ninvaders"]
+run = "/usr/games/ninvaders"
+terminal = true
+about = "Space Invaders, drawn with letters."
+icon = "oxygen:applications-games"
+
+[nsnake]
+title = "nSnake"
+category = "Games"
+debs = ["nsnake"]
+run = "/usr/games/nsnake"
+terminal = true
+about = "The classic snake game: eat, grow, don't bite yourself."
+icon = "usr/share/icons/hicolor/32x32/apps/nsnake.png"
+
+[greed]
+title = "Greed"
+category = "Games"
+debs = ["greed"]
+run = "/usr/games/greed"
+terminal = true
+about = "Eat your way across a grid of numbers before you get stuck."
+icon = "usr/share/icons/hicolor/64x64/apps/greed.png"
+
+[nethack]
+title = "NetHack"
+category = "Games"
+debs = ["nethack-console", "nethack-common"]
+run = "/usr/games/nethack"
+terminal = true
+about = "Go down the Dungeons of Doom and bring back the Amulet of Yendor."
+icon = "usr/share/icons/hicolor/48x48/apps/nethack.png"
+
+[nethack.files]
+# Debian's /usr/games/nethack is a /bin/sh script picked by update-alternatives; this is it for kpsh.
+"usr/games/nethack" = """#!/bin/kpsh
+export HACKDIR=/usr/lib/games/nethack
+export NETHACKOPTIONS=/etc/nethack/nethackrc.console
+cd /usr/lib/games/nethack
+exec /usr/lib/games/nethack/nethack-console "$@"
+"""
+# The score and log files Debian's install script makes.
+"var/games/nethack/record" = ""
+"var/games/nethack/logfile" = ""
+"var/games/nethack/xlogfile" = ""
+"var/games/nethack/livelog" = ""
+"var/games/nethack/perm" = ""
+"var/games/nethack/save/.keep" = ""
+
+[bsdgames]
+title = "BSD Games"
+category = "Games"
+debs = ["bsdgames"]
+run = "/usr/games/tetris-bsd"
+terminal = true
+about = "Tetris, Robots, Worm, Snake, Backgammon, Trek and twenty more from BSD Unix."
+icon = "oxygen:applications-games"
+
+[crispy-doom]
+title = "Crispy Doom"
+category = "Games"
+debs = ["crispy-doom"]
+run = "/usr/games/crispy-doom -window -iwad /usr/share/games/doom/freedoom1.wad"
+about = "Doom in 3D, with higher resolution and other improvements, playing Freedoom."
+icon = "usr/share/icons/hicolor/128x128/apps/crispy-doom.png"
+
+[freedoom2]
+title = "Freedoom: Phase 2"
+category = "Games"
+debs = ["freedoom"]
+only = ["usr/share/games/doom/freedoom2.wad"]
+run = "/bin/doom -iwad /usr/share/games/doom/freedoom2.wad"
+about = "Thirty-two more levels of 3D shooting: free data for Doom II's engine."
+icon = "oxygen:applications-games"
+
+[lbreakouthd]
+title = "LBreakoutHD"
+category = "Games"
+debs = ["lbreakouthd", "lbreakouthd-data"]
+run = "/usr/games/lbreakouthd"
+about = "Knock out the bricks with a paddle and ball, with bonuses and a hundred levels."
+icon = "usr/share/icons/hicolor/48x48/apps/lbreakouthd.png"
+
+[kobodeluxe]
+title = "Kobo Deluxe"
+category = "Games"
+debs = ["kobodeluxe", "kobodeluxe-data"]
+run = "/usr/games/kobodl"
+about = "Fly around maze-like space stations and blow them up from the inside."
+icon = "oxygen:applications-games"
+
+[nano]
+title = "nano"
+category = "Apps"
+debs = ["nano"]
+run = "/bin/nano"
+terminal = true
+about = "A small, friendly text editor for the terminal."
+icon = "oxygen:accessories-text-editor"
+
+[cmatrix]
+title = "CMatrix"
+category = "Apps"
+debs = ["cmatrix"]
+run = "/usr/bin/cmatrix"
+terminal = true
+about = "The falling green characters from The Matrix, in your terminal."
+icon = "usr/share/icons/hicolor/128x128/apps/cmatrix.png"

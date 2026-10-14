@@ -29,7 +29,7 @@ pub fn findWindow(part: []const u8) ?gui.Listed {
 }
 
 const env = [_:null]?[*:0]const u8{
-    "PATH=/bin:/sbin:/usr/bin:/usr/sbin",
+    "PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/games",
     "HOME=/root",
     "USER=root",
     "LOGNAME=root",

@@ -3,9 +3,11 @@
 //! processes so they don't linger as zombies. It also starts Vela, the desktop, unless the kernel
 //! command line says `text` or Vela's settings say not to (`autostart=no` in
 //! /root/.config/vela.conf). Each step it reports like the kernel does: "[  OK  ] Started ...".
+//! Before all that, it links in what Software installed (lib/software.zig).
 
 const std = @import("std");
 const rt = @import("lib/rt.zig");
+const software = @import("lib/software.zig");
 const sys = rt.sys;
 pub const _start = rt._start;
 comptime {
@@ -17,7 +19,7 @@ const shell = "/bin/kpsh";
 const desktop = "/bin/vela";
 
 const env = [_:null]?[*:0]const u8{
-    "PATH=/bin:/sbin:/usr/bin:/usr/sbin",
+    "PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/games",
     "HOME=/root",
     "USER=root",
     "LOGNAME=root",
@@ -112,7 +114,15 @@ fn startShell() usize {
     return pid;
 }
 
+/// What Software installed is kept on the disk, but the links that put it in place are on the
+/// root filesystem, which starts afresh every boot.
+fn linkSoftware() void {
+    const n = software.activateAll();
+    if (n > 0) report(true, "Linked {d} app{s} installed with Software", .{ n, if (n == 1) "" else "s" });
+}
+
 pub fn main(_: rt.Args) u8 {
+    linkSoftware();
     var first = true;
     while (true) {
         if (first) showFile("/etc/motd");

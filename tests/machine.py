@@ -18,7 +18,8 @@ PROMPT = re.compile(rb"[A-Za-z0-9_.-]+:[^\r\n]*[#$] $")
 
 
 class Machine:
-    def __init__(self, disk=None, scratch_disk=True, forward=(), desktop=False, extra_disks=(), uefi_disk=None, smp=None):
+    def __init__(self, disk=None, scratch_disk=True, forward=(), desktop=False, extra_disks=(), uefi_disk=None, smp=None,
+                 software=False):
         """disk: a disk image to attach (default: out/disk.img when it exists). With scratch_disk,
         a copy is used, so tests don't change the real one. forward: (host port, guest port) pairs,
         so something on this machine can connect to a server inside the guest. desktop: boot
@@ -26,9 +27,11 @@ class Machine:
         fw_cfg) and the screen stays the console. extra_disks: more disk images (vdb, vdc...),
         used as they are. uefi_disk: boot this disk (an installed system) with UEFI firmware
         instead of the ISO; it's the only disk. smp: how many CPUs (default: KP2_SMP from the
-        environment, else 2)."""
+        environment, else 2). software: serve out/software (software/build.py's packages) where
+        the guest's Software looks for them, as run.sh does."""
         self.output = b""
         self._scratch = None
+        self._server = serve_software() if software else None
         if disk is None and uefi_disk is None and os.path.exists(os.path.join(ROOT, "out/disk.img")):
             disk = os.path.join(ROOT, "out/disk.img")
         if disk and scratch_disk:
@@ -151,6 +154,9 @@ class Machine:
         if self.qemu.poll() is None:
             self.qemu.kill()
             self.qemu.wait()
+        if self._server:
+            self._server.shutdown()
+            self._server.server_close()
         if self._scratch:
             os.unlink(self._scratch)
         for path in (self._monitor, self._monitor + "-qmp"):
@@ -162,6 +168,27 @@ class Machine:
 
     def __exit__(self, *exc):
         self.close()
+
+
+SOFTWARE_PORT = 8086  # lib/software.zig: the guest reaches it at 10.0.2.2 (QEMU's user network)
+
+
+def serve_software():
+    """Serves out/software over HTTP on this machine's loopback, in a background thread."""
+    import functools
+    import http.server
+    import threading
+    folder = os.path.join(ROOT, "out", "software")
+    if not os.path.exists(os.path.join(folder, "index")):
+        raise RuntimeError("no out/software/index: run software/build.py first")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", SOFTWARE_PORT), functools.partial(Quiet, directory=folder))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 def read_png(path):

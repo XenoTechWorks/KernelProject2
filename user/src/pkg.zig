@@ -13,6 +13,13 @@
 //!   .exe          one Windows program, copied into /bin
 //!
 //! What a package installed is written down in /var/lib/pkg, so `pkg remove` can undo it.
+//!
+//! And the packages Software offers, from its server (see lib/software.zig), which are kept on
+//! the disk and so stay installed after a restart:
+//!
+//!     pkg available            what the server has
+//!     pkg get bastet           download and install it
+//!     pkg activate             link the installed ones into place (init does this at boot)
 
 const std = @import("std");
 const rt = @import("lib/rt.zig");
@@ -20,6 +27,8 @@ const file = @import("lib/file.zig");
 const gzip = @import("lib/gzip.zig");
 const tar = @import("lib/tar.zig");
 const deflate = @import("lib/deflate.zig");
+const http = @import("lib/http.zig");
+const software = @import("lib/software.zig");
 const sys = rt.sys;
 pub const _start = rt._start;
 comptime {
@@ -32,7 +41,8 @@ const db = "/var/lib/pkg";
 
 const usage =
     \\usage: pkg install FILE | remove NAME | list | files NAME | info FILE
-    \\  FILE is a .deb (Linux), or a .zip or .exe (Windows).
+    \\       pkg available | get NAME... | activate
+    \\  FILE is a .deb (Linux), or a .zip or .exe (Windows); `get` downloads from Software's server.
     \\
 ;
 
@@ -47,8 +57,90 @@ pub fn main(args: rt.Args) u8 {
     if (std.mem.eql(u8, command, "remove")) return remove(arg orelse return missing());
     if (std.mem.eql(u8, command, "files")) return showFiles(arg orelse return missing());
     if (std.mem.eql(u8, command, "info")) return info(arg orelse return missing());
+    if (std.mem.eql(u8, command, "available")) return available();
+    if (std.mem.eql(u8, command, "activate")) {
+        rt.out.print("Linked {d} installed packages.\n", .{software.activateAll()});
+        return 0;
+    }
+    if (std.mem.eql(u8, command, "get")) {
+        // --progress: report the download as "progress GOT TOTAL" lines (for Software's window).
+        var status: u8 = 0;
+        var report = false;
+        var any = false;
+        for (args.argv[2..]) |a| {
+            const name = std.mem.span(a);
+            if (std.mem.eql(u8, name, "--progress")) {
+                report = true;
+                continue;
+            }
+            any = true;
+            if (get(name, report) != 0) status = 1;
+        }
+        return if (any) status else missing();
+    }
     rt.err.write(usage);
     return 2;
+}
+
+// ---- Software's packages ----
+
+fn available() u8 {
+    const index = software.fetch("index", null) catch |e| {
+        rt.err.print("pkg: can't get the list of packages: {s}\n", .{http.errorText(e)});
+        return 1;
+    };
+    defer gpa.free(index);
+    var packages: [256]software.Package = undefined;
+    const n = software.parseIndex(index, &packages);
+    for (packages[0..n]) |p| {
+        const mark: []const u8 = if (software.isInstalled(p.name)) "installed" else "";
+        rt.out.print("{s: <14} {s: <7} {d: >6} KiB  {s: <9}  {s}\n", .{ p.name, p.category, p.size / 1024, mark, p.about });
+    }
+    return 0;
+}
+
+const Reporter = struct {
+    last: usize = 0,
+
+    fn report(context: *anyopaque, got: usize, total: ?usize) void {
+        const self: *Reporter = @ptrCast(@alignCast(context));
+        // Every 64 KiB is plenty for a progress bar.
+        if (got - self.last < 64 * 1024 and got != (total orelse 0)) return;
+        self.last = got;
+        rt.out.print("progress {d} {d}\n", .{ got, total orelse 0 });
+        rt.out.flush();
+    }
+};
+
+fn get(name: []const u8, report: bool) u8 {
+    if (!software.validName(name)) {
+        rt.err.print("pkg: {s}: not a package name\n", .{name});
+        return 1;
+    }
+    var file_buf: [80]u8 = undefined;
+    const what = std.fmt.bufPrint(&file_buf, "{s}.tar.gz", .{name}) catch return 1;
+    var reporter = Reporter{};
+    const progress: ?http.Progress = if (report) .{ .context = &reporter, .report = Reporter.report } else null;
+    rt.out.print("Downloading {s}...\n", .{name});
+    rt.out.flush();
+    const gz = software.fetch(what, progress) catch |e| {
+        rt.err.print("pkg: can't download {s}: {s}\n", .{ name, if (e == error.NotFound) "the server has no package by that name" else http.errorText(e) });
+        return 1;
+    };
+    defer gpa.free(gz);
+    rt.out.print("Installing {s}...\n", .{name});
+    rt.out.flush();
+    const linked = software.install(name, gz) catch |e| {
+        rt.err.print("pkg: can't install {s}: {s}\n", .{ name, switch (e) {
+            error.NotAPackage => "the download isn't a package",
+            error.CantWrite => "it couldn't be written (is the disk full?)",
+            error.OutOfMemory => "out of memory",
+        } });
+        return 1;
+    };
+    if (linked.taken > 0) rt.out.print("({d} of its files were already there, from something else)\n", .{linked.taken});
+    rt.out.print("Installed {s}.\n", .{name});
+    return 0;
 }
 
 fn missing() u8 {
@@ -150,18 +242,29 @@ fn save(name: []const u8, files: []const u8, description: []const u8) void {
 }
 
 fn list() u8 {
+    // Software's first: they're the ones kept on the disk.
+    var names_buf: [8192]u8 = undefined;
+    var names: [256][]const u8 = undefined;
+    const kept = software.installedNames(&names_buf, &names);
+    for (names[0..kept]) |name| {
+        const text = software.installedInfo(name) orelse continue;
+        defer gpa.free(text);
+        const meta = software.parseOne(text);
+        rt.out.print("{s: <20} {s} {s} (Software)\n", .{ name, meta.title, meta.version });
+    }
+    var found = kept > 0;
+
     var buf: [1100]u8 = undefined;
     const p = rt.cstr(&buf, db) orelse return 1;
     const fd: i32 = switch (sys.open(p, sys.O_RDONLY | sys.O_DIRECTORY, 0)) {
         .ok => |fd| @intCast(fd),
         .err => {
-            rt.out.write("No packages installed.\n");
+            if (!found) rt.out.write("No packages installed.\n");
             return 0;
         },
     };
     defer sys.close(fd);
     var dents: [8192]u8 align(8) = undefined;
-    var found = false;
     while (true) {
         const n = switch (sys.check(sys.syscall3(217, @bitCast(@as(isize, fd)), @intFromPtr(&dents), dents.len))) {
             .ok => |n| n,
@@ -202,6 +305,14 @@ fn showFiles(name: []const u8) u8 {
 }
 
 fn remove(name: []const u8) u8 {
+    if (software.isInstalled(name)) {
+        if (!software.remove(name)) {
+            rt.err.print("pkg: some of {s}'s files couldn't be deleted\n", .{name});
+            return 1;
+        }
+        rt.out.print("Removed {s}.\n", .{name});
+        return 0;
+    }
     var buf: [1100]u8 = undefined;
     const p = listPath(&buf, name) orelse return 1;
     const text = file.read(p) catch {

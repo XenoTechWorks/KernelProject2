@@ -2,8 +2,9 @@
 //!
 //! A shell in the Linux/POSIX shape: read a line, split it into words, run builtins itself, and run
 //! everything else as a separate program with fork + execve + wait4. Supports pipes (|), redirection
-//! (> >> < 2> 2>&1), lists (; && ||), background jobs (&), quotes, backslash escapes, $VAR / $? / ~ expansion and scripts
-//! (`kpsh file`, `kpsh -c "command"`, or a file starting with #!/bin/kpsh).
+//! (> >> < 2> 2>&1), lists (; && ||), background jobs (&), quotes, backslash escapes, $VAR / $? / ~
+//! expansion and scripts with arguments, $1 $# $* "$@" (`kpsh file`, `kpsh -c "command"`, or a
+//! file starting with #!/bin/kpsh).
 
 const std = @import("std");
 const rt = @import("lib/rt.zig");
@@ -104,11 +105,32 @@ fn isNameChar(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_';
 }
 
-/// Expands $NAME, ${NAME} or $? starting at line[i] (just after the $). Returns the new index.
+/// A script's name and arguments ($0, $1...): `kpsh script a b`, or `kpsh -c command name a b`.
+var positional: []const [*:0]const u8 = &.{};
+
+/// Expands $NAME, ${NAME}, $?, $0-$9, $# or $* starting at line[i] (just after the $). Returns the
+/// new index. ($@ is the tokenizer's, since it can make more than one word.)
 fn expandVar(line: []const u8, i: usize) ParseError!usize {
     if (i < line.len and line[i] == '?') {
         var tmp: [4]u8 = undefined;
         try pushStr(std.fmt.bufPrint(&tmp, "{d}", .{last_status}) catch "");
+        return i + 1;
+    }
+    if (i < line.len and std.ascii.isDigit(line[i])) {
+        const n = line[i] - '0';
+        if (n < positional.len) try pushStr(std.mem.span(positional[n]));
+        return i + 1;
+    }
+    if (i < line.len and line[i] == '#') {
+        var tmp: [8]u8 = undefined;
+        try pushStr(std.fmt.bufPrint(&tmp, "{d}", .{positional.len -| 1}) catch "");
+        return i + 1;
+    }
+    if (i < line.len and line[i] == '*') {
+        if (positional.len > 1) for (positional[1..], 1..) |a, k| {
+            if (k > 1) try pushChar(' ');
+            try pushStr(std.mem.span(a));
+        };
         return i + 1;
     }
     if (i < line.len and line[i] == '{') {
@@ -195,7 +217,9 @@ fn tokenize(line: []const u8) ParseError!void {
         }
 
         // A word: everything up to an unquoted space or operator.
-        const start = pool_len;
+        var start = pool_len;
+        // "$@" with no arguments makes no word at all (rather than an empty one).
+        var only_args = false;
         if (c == '~' and (i + 1 == line.len or std.mem.indexOfScalar(u8, "/ \t\r\n;|&<>", line[i + 1]) != null)) {
             try pushStr(getVar("HOME") orelse "/");
             i += 1;
@@ -205,15 +229,33 @@ fn tokenize(line: []const u8) ParseError!void {
             switch (ch) {
                 ' ', '\t', '\r', '\n', ';', '|', '&', '>', '<' => break,
                 '\\' => {
+                    only_args = false;
                     if (i + 1 < line.len) try pushChar(line[i + 1]);
                     i += 2;
                 },
                 '\'' => {
+                    only_args = false;
                     const end = std.mem.indexOfScalarPos(u8, line, i + 1, '\'') orelse return error.Unclosed;
                     try pushStr(line[i + 1 .. end]);
                     i = end + 1;
                 },
                 '"' => {
+                    // "$@": each argument a word of its own (the first and last joined to what's
+                    // around them, as in other shells).
+                    if (std.mem.startsWith(u8, line[i..], "\"$@\"")) {
+                        only_args = pool_len == start and positional.len <= 1;
+                        if (positional.len > 1) for (positional[1..], 1..) |a, k| {
+                            if (k > 1) {
+                                try pushChar(0);
+                                try pushToken(.{ .kind = .word, .text = pool[start .. pool_len - 1 :0] });
+                                start = pool_len;
+                            }
+                            try pushStr(std.mem.span(a));
+                        };
+                        i += 4;
+                        continue;
+                    }
+                    only_args = false;
                     i += 1;
                     while (true) {
                         if (i >= line.len) return error.Unclosed;
@@ -232,13 +274,18 @@ fn tokenize(line: []const u8) ParseError!void {
                         }
                     }
                 },
-                '$' => i = try expandVar(line, i + 1),
+                '$' => {
+                    only_args = false;
+                    i = try expandVar(line, i + 1);
+                },
                 else => {
+                    only_args = false;
                     try pushChar(ch);
                     i += 1;
                 },
             }
         }
+        if (only_args and pool_len == start) continue;
         try pushChar(0);
         try pushToken(.{ .kind = .word, .text = pool[start .. pool_len - 1 :0] });
     }
@@ -914,6 +961,7 @@ pub fn main(args: rt.Args) u8 {
                 rt.err.write("kpsh: -c needs a command\n");
                 return 2;
             };
+            if (args.argv.len > 3) positional = args.argv[3..];
             runLine(command);
             return last_status;
         }
@@ -922,6 +970,7 @@ pub fn main(args: rt.Args) u8 {
         const path = rt.cstr(&buf, a) orelse return 2;
         switch (sys.open(path, sys.O_RDONLY, 0)) {
             .ok => |fd| {
+                positional = args.argv[1..];
                 runFile(@intCast(fd));
                 return last_status;
             },

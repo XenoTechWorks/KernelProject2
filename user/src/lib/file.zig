@@ -71,3 +71,38 @@ pub fn makeParents(path: []const u8) void {
         if (cut > 0) makePath(path[0..cut]);
     }
 }
+
+/// Deletes a file, or a folder and everything in it (symlinks themselves, never what they point
+/// at). False if something couldn't be deleted.
+pub fn removeTree(path: [*:0]const u8) bool {
+    var st: sys.Stat = undefined;
+    if (sys.lstat(path, &st) != .ok) return false;
+    if (st.mode & sys.S_IFMT != sys.S_IFDIR) return sys.check(sys.syscall1(sys.nr.unlink, @intFromPtr(path))) == .ok;
+    // A batch of names at a time, starting over after each (deleting while reading a folder can
+    // make the reading skip some), until the folder is empty or nothing more can go.
+    while (true) {
+        const fd: i32 = switch (sys.open(path, sys.O_RDONLY | sys.O_DIRECTORY, 0)) {
+            .ok => |fd| @intCast(fd),
+            .err => return false,
+        };
+        var dents: [8192]u8 align(8) = undefined;
+        const n = switch (sys.check(sys.syscall3(sys.nr.getdents64, @bitCast(@as(isize, fd)), @intFromPtr(&dents), dents.len))) {
+            .ok => |n| n,
+            .err => 0,
+        };
+        sys.close(fd);
+        var removed: usize = 0;
+        var at: usize = 0;
+        while (at < n) {
+            const reclen = std.mem.readInt(u16, dents[at + 16 ..][0..2], .little);
+            const name = std.mem.sliceTo(dents[at + 19 .. at + reclen], 0);
+            at += reclen;
+            if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+            var buf: [1300]u8 = undefined;
+            const child = std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ std.mem.span(path), name }, 0) catch continue;
+            if (removeTree(child)) removed += 1;
+        }
+        if (removed == 0) break;
+    }
+    return sys.check(sys.syscall1(sys.nr.rmdir, @intFromPtr(path))) == .ok;
+}

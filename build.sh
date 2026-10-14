@@ -325,4 +325,15 @@ xorriso -as mkisofs -quiet -R -r -J -b boot/limine/limine-bios-cd.bin -no-emul-b
     -efi-boot-part --efi-boot-image --protective-msdos-label "$iso" -o "$out/kernelproject2.iso" 2>/dev/null
 "$limine/limine" bios-install "$out/kernelproject2.iso" 2>/dev/null
 
+step "Software's packages (out/software)"
+# Games and apps for Software to install, made from Ubuntu's packages (see software/packages.toml).
+# Not part of the ISO: run.sh serves them. SKIP_SOFTWARE=1 leaves them as they are.
+if [[ -z "${SKIP_SOFTWARE:-}" ]] && command -v apt-get >/dev/null; then
+    if KP2_STAGE="$stage" python3 "$root/software/build.py" > "$out/software.log" 2>&1; then
+        grep -v '^    [a-z0-9-]*$' "$out/software.log" || true
+    else
+        echo "    couldn't build them (see out/software.log); Software will have nothing to offer"
+    fi
+fi
+
 step "done: $out/kernelproject2.iso ($(du -h "$out/kernelproject2.iso" | cut -f1))"

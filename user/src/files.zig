@@ -14,6 +14,7 @@ const std = @import("std");
 const rt = @import("lib/rt.zig");
 const gui = @import("lib/gui.zig");
 const icon = @import("lib/gui/icon.zig");
+const file = @import("lib/file.zig");
 const sys = rt.sys;
 pub const _start = rt._start;
 comptime {
@@ -263,7 +264,7 @@ fn goUp() void {
 // ---- opening things ----
 
 const env = [_:null]?[*:0]const u8{
-    "PATH=/bin:/sbin:/usr/bin:/usr/sbin",
+    "PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/games",
     "HOME=/root",
     "USER=root",
     "TERM=linux",
@@ -356,7 +357,7 @@ fn paste() void {
         var src_buf: [1300]u8 = undefined;
         const src_z = std.fmt.bufPrintSentinel(&src_buf, "{s}", .{src}, 0) catch continue;
         const ok = if (clip_cut)
-            (sys.check(sys.syscall2(sys.nr.rename, @intFromPtr(src_z.ptr), @intFromPtr(dst.ptr))) == .ok or (copyTree(src_z, dst) and removeTree(src_z)))
+            (sys.check(sys.syscall2(sys.nr.rename, @intFromPtr(src_z.ptr), @intFromPtr(dst.ptr))) == .ok or (copyTree(src_z, dst) and file.removeTree(src_z)))
         else
             copyTree(src_z, dst);
         if (ok) done += 1 else failed += 1;
@@ -423,33 +424,6 @@ fn copyTree(src: [*:0]const u8, dst: [*:0]const u8) bool {
         if (n == 0) return true;
         rt.writeAll(out, buf[0..n]);
     }
-}
-
-/// Deletes a file, or a folder and everything in it.
-fn removeTree(p: [*:0]const u8) bool {
-    var st: sys.Stat = undefined;
-    if (sys.lstat(p, &st) != .ok) return false;
-    if (st.mode & sys.S_IFMT == sys.S_IFDIR) {
-        var kids = Children.open(p) orelse return false;
-        var names_buf: [16 * 1024]u8 = undefined;
-        var used: usize = 0;
-        while (kids.next()) |name| {
-            if (used + name.len + 1 > names_buf.len) break;
-            @memcpy(names_buf[used..][0..name.len], name);
-            names_buf[used + name.len] = 0;
-            used += name.len + 1;
-        }
-        kids.close();
-        var it = std.mem.splitScalar(u8, names_buf[0..used], 0);
-        while (it.next()) |name| {
-            if (name.len == 0) continue;
-            var a: [1300]u8 = undefined;
-            const s = std.fmt.bufPrintSentinel(&a, "{s}/{s}", .{ std.mem.span(p), name }, 0) catch continue;
-            _ = removeTree(s);
-        }
-        return sys.check(sys.syscall1(sys.nr.rmdir, @intFromPtr(p))) == .ok;
-    }
-    return sys.check(sys.syscall1(sys.nr.unlink, @intFromPtr(p))) == .ok;
 }
 
 /// A folder's entries, one at a time.
@@ -629,7 +603,7 @@ fn deleteSelection() void {
     for (0..count) |i| {
         if (!selected[i]) continue;
         var full: [1300]u8 = undefined;
-        if (removeTree(join(&full, entries[i].name))) done += 1 else failed += 1;
+        if (file.removeTree(join(&full, entries[i].name))) done += 1 else failed += 1;
     }
     load();
     var b: [96]u8 = undefined;
