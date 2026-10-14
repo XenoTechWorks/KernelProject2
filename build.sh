@@ -60,6 +60,7 @@ add_host_program() {
 add_host_program "$stage/bin/hello-dynamic"
 gcc -O2 -o "$stage/bin/signal-test" "$root/tests/signals.c"
 gcc -O2 -pthread -o "$stage/bin/thread-test" "$root/tests/threads.c"
+gcc -O2 -o "$stage/bin/anonmem-test" "$root/tests/anonmem.c"
 gcc -O2 -Wno-unused-result -o "$stage/bin/events-test" "$root/tests/events.c"
 gcc -O2 -Wno-unused-result -o "$stage/bin/pty-test" "$root/tests/ptys.c"
 gcc -O2 -Wno-unused-result -o "$stage/bin/jail-test" "$root/tests/jail.c"

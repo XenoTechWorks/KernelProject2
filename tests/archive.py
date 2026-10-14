@@ -49,6 +49,17 @@ with Machine() as m:
     m.run("mkdir -p /tmp/t2 && tar -xzf /tmp/bb.tgz -C /tmp/t2")
     check("we unpack BusyBox's .tar.gz", m.run("cat /tmp/t2/etc/os-release; echo") == original)
 
+    # A symlink without a directory header, as in Software packages (Neverball's ttf/).
+    m.run("cd / && tar -cf /tmp/link.tar usr/bin")
+    m.run("mkdir -p /tmp/link/bin; echo linked > /tmp/link/bin/value")
+    out = m.run("tar -xf /tmp/link.tar -C /tmp/link; echo EXTRACT=$?")
+    check("tar creates a symlink's missing parent", out is not None and "EXTRACT=0" in out
+          and m.run("cat /tmp/link/usr/bin/value") == "linked", out)
+    m.run("mkdir -p /tmp/blocked; echo blocked > /tmp/blocked/usr")
+    out = m.run("tar -xf /tmp/link.tar -C /tmp/blocked; echo EXTRACT=$?")
+    check("tar reports failed symlink creation", out is not None and "can't link usr/bin" in out
+          and "EXTRACT=1" in out, out)
+
     # zip.
     m.run("cd / && zip -r /tmp/e.zip etc")
     listing = m.run("unzip -l /tmp/e.zip")

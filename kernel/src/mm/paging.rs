@@ -13,6 +13,8 @@ pub const NO_EXECUTE: u64 = 1 << 63;
 /// One of the bits the processor leaves to us: the page is held by others too (mm/shared.rs), so
 /// unmapping it lets go of it rather than freeing it.
 pub const SHARED: u64 = 1 << 9;
+/// An anonymous PROT_NONE reservation has an address but no physical page yet.
+pub const RESERVED: u64 = 1 << 10;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 
 /// Programs may use addresses below this; everything above belongs to the kernel.
@@ -68,6 +70,9 @@ pub fn map_mmio(phys: u64) -> *mut u8 {
 
 /// Gives back the page a (present) page-table entry maps: freed, or let go of if it's shared.
 fn drop_page(entry: u64) {
+    if entry & RESERVED != 0 {
+        return;
+    }
     if entry & SHARED != 0 {
         super::shared::release(entry & ADDRESS_MASK);
     } else {
@@ -183,12 +188,35 @@ impl AddressSpace {
         true
     }
 
+    /// Reserve inaccessible anonymous memory without committing RAM. glibc reserves
+    /// large aligned arenas this way, then mprotects only the portion it uses.
+    pub fn reserve(&mut self, start: u64, end: u64) -> bool {
+        let mut va = start;
+        while va < end {
+            let Some(e) = self.entry(va, true) else { return false };
+            if *e & PRESENT != 0 {
+                drop_page(*e);
+            }
+            *e = RESERVED;
+            va += PAGE_SIZE;
+        }
+        true
+    }
+
+    pub fn is_reserved(&self, va: u64) -> bool {
+        self.entry(va, false).is_some_and(|e| *e & RESERVED != 0)
+    }
+
+    pub fn is_mapped(&self, va: u64) -> bool {
+        self.entry(va, false).is_some_and(|e| *e & (PRESENT | RESERVED) != 0)
+    }
+
     /// Removes and frees the pages in [start, end).
     pub fn unmap_range(&mut self, start: u64, end: u64) {
         let mut va = start & !(PAGE_SIZE - 1);
         while va < end {
             if let Some(e) = self.entry(va, false) {
-                if *e & PRESENT != 0 {
+                if *e & (PRESENT | RESERVED) != 0 {
                     drop_page(*e);
                     *e = 0;
                 }
@@ -198,10 +226,17 @@ impl AddressSpace {
         self.flush();
     }
 
-    pub fn protect_range(&mut self, start: u64, end: u64, flags: u64) {
+    pub fn protect_range(&mut self, start: u64, end: u64, flags: u64) -> bool {
         let mut va = start & !(PAGE_SIZE - 1);
         while va < end {
             if let Some(e) = self.entry(va, false) {
+                if *e & RESERVED != 0 && flags & USER != 0 {
+                    let Some(page) = frame::alloc() else {
+                        self.flush();
+                        return false;
+                    };
+                    *e = page | flags | PRESENT;
+                }
                 if *e & PRESENT != 0 {
                     *e = (*e & ADDRESS_MASK) | (*e & SHARED) | flags | PRESENT;
                 }
@@ -209,6 +244,7 @@ impl AddressSpace {
             va += PAGE_SIZE;
         }
         self.flush();
+        true
     }
 
     /// (physical page, flags) for a mapped address.
@@ -245,7 +281,7 @@ impl AddressSpace {
                     }
                     let l1 = table(l2[i2] & ADDRESS_MASK);
                     for i1 in 0..512 {
-                        if l1[i1] & PRESENT != 0 {
+                        if l1[i1] & (PRESENT | RESERVED) != 0 {
                             let va = (i4 as u64) << 39 | (i3 as u64) << 30 | (i2 as u64) << 21 | (i1 as u64) << 12;
                             f(va, l1[i1]);
                         }
@@ -261,6 +297,10 @@ impl AddressSpace {
         let mut ok = true;
         self.walk(|va, e| {
             if !ok {
+                return;
+            }
+            if e & RESERVED != 0 {
+                ok = copy.reserve(va, va + PAGE_SIZE);
                 return;
             }
             // A shared page stays shared: the child maps the same one.

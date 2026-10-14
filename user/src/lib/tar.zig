@@ -108,11 +108,20 @@ pub fn extract(data: []const u8, record: ?*std.ArrayList(u8), verbose: bool) usi
         switch (e.kind) {
             .dir => file.makePath(std.mem.trimEnd(u8, e.name, "/")),
             .symlink => {
+                // Software archives list files and links without directory entries. A
+                // directory containing only a symlink (Neverball's ttf/) still needs making.
+                file.makeParents(e.name);
                 var tbuf: [256]u8 = undefined;
                 var nbuf: [1100]u8 = undefined;
-                if (rt.cstr(&tbuf, e.link)) |t| if (rt.cstr(&nbuf, e.name)) |n| {
-                    _ = sys.syscall3(266, @intFromPtr(t), @bitCast(@as(isize, -100)), @intFromPtr(n)); // symlinkat
-                };
+                const t = rt.cstr(&tbuf, e.link);
+                const n = rt.cstr(&nbuf, e.name);
+                if (t == null or n == null or
+                    sys.check(sys.syscall3(266, @intFromPtr(t.?), @bitCast(@as(isize, -100)), @intFromPtr(n.?))) == .err)
+                {
+                    rt.err.print("can't link {s}\n", .{e.name});
+                    failed += 1;
+                    continue;
+                }
                 note(record, e.name);
             },
             .file => {
