@@ -35,7 +35,11 @@ if [[ -f "$root/out/software/index" ]] && ! (exec 3<>/dev/tcp/127.0.0.1/8086) 2>
     server=$!
     trap 'kill $server 2>/dev/null' EXIT
 fi
-qemu-system-x86_64 -M q35 -m 1G -smp "${CPUS:-4}" "${boot[@]}" \
+# KVM when this machine lets us use it (much faster: OpenGL and Vulkan are drawn by the
+# processor), else QEMU's emulation. On Ubuntu: sudo usermod -aG kvm $USER, then log in again.
+accel=(-accel tcg)
+[[ -r /dev/kvm && -w /dev/kvm ]] && accel=(-accel kvm -accel tcg)
+qemu-system-x86_64 -M q35 "${accel[@]}" -m 1G -smp "${CPUS:-4}" "${boot[@]}" \
     -device virtio-tablet-pci,disable-legacy=on \
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0,disable-legacy=on \
     -serial stdio -no-reboot "${display[@]}" "${disk[@]}" "$@"

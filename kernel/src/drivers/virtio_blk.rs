@@ -12,12 +12,15 @@ use spin::Mutex;
 
 pub const SECTOR: usize = 512;
 const QUEUE_SIZE: u16 = 64;
+/// Bounce pages for a request's data: up to 128 KiB moves in one request.
+const DATA_PAGES: usize = 32;
 
 pub struct Disk {
     queue: Queue,
     last_used: u16,
-    /// One page for the request header + status, one bounce page for data.
+    /// One page for the request header + status, and bounce pages for the data.
     request_page: u64,
+    data_pages: [u64; DATA_PAGES],
     /// How big it is, in sectors.
     pub sectors: u64,
 }
@@ -36,11 +39,21 @@ pub fn init() -> Vec<u64> {
             crate::log!("virtio-blk: out of memory");
             break;
         };
+        let mut data_pages = [0u64; DATA_PAGES];
+        for p in data_pages.iter_mut() {
+            match frame::alloc() {
+                Some(f) => *p = f,
+                None => {
+                    crate::log!("virtio-blk: out of memory");
+                    return sizes;
+                }
+            }
+        }
         dev.ready();
         let sectors = r32(dev.config, 0) as u64 | (r32(dev.config, 4) as u64) << 32;
         let mib = sectors * SECTOR as u64 / (1024 * 1024);
         crate::log!("virtio-blk: {} {mib} MiB disk", name(nth));
-        DISKS.lock().push(Disk { queue, last_used: 0, request_page, sectors });
+        DISKS.lock().push(Disk { queue, last_used: 0, request_page, data_pages, sectors });
         sizes.push(mib);
     }
     sizes
@@ -70,29 +83,36 @@ pub fn write(index: usize, sector: u64, buf: &[u8]) -> Result<(), ()> {
 }
 
 impl Disk {
-    /// Reads or writes up to 7 sectors (one page) through the bounce buffer.
+    /// Reads or writes up to DATA_PAGES pages of sectors in one request: the header and status
+    /// byte in the request page, the data through the bounce pages, one descriptor each.
     fn transfer(&mut self, sector: u64, buf: &mut [u8], write: bool) -> Result<(), ()> {
-        assert!(buf.len() % SECTOR == 0 && buf.len() <= PAGE_SIZE as usize - SECTOR);
+        let page_size = PAGE_SIZE as usize;
+        assert!(buf.len() % SECTOR == 0 && buf.len() <= DATA_PAGES * page_size);
         let page = phys_to_virt(self.request_page);
-        // Layout of the request page: header (16 bytes) at 0, status byte at 16, data from 512.
+        let pages = buf.len().div_ceil(page_size);
         unsafe {
             (page as *mut u32).write(if write { 1 } else { 0 }); // VIRTIO_BLK_T_OUT / _IN
             (page.add(4) as *mut u32).write(0);
             (page.add(8) as *mut u64).write(sector);
             page.add(16).write(0xFF);
             if write {
-                core::ptr::copy_nonoverlapping(buf.as_ptr(), page.add(SECTOR), buf.len());
+                for (k, chunk) in buf.chunks(page_size).enumerate() {
+                    core::ptr::copy_nonoverlapping(chunk.as_ptr(), phys_to_virt(self.data_pages[k]), chunk.len());
+                }
             }
             let base = self.request_page;
             let desc = self.queue.desc;
             desc.write(Descriptor { addr: base, len: 16, flags: NEXT, next: 1 });
-            desc.add(1).write(Descriptor {
-                addr: base + SECTOR as u64,
-                len: buf.len() as u32,
-                flags: NEXT | if write { 0 } else { WRITE },
-                next: 2,
-            });
-            desc.add(2).write(Descriptor { addr: base + 16, len: 1, flags: WRITE, next: 0 });
+            for k in 0..pages {
+                let len = (buf.len() - k * page_size).min(page_size);
+                desc.add(1 + k).write(Descriptor {
+                    addr: self.data_pages[k],
+                    len: len as u32,
+                    flags: NEXT | if write { 0 } else { WRITE },
+                    next: 2 + k as u16,
+                });
+            }
+            desc.add(1 + pages).write(Descriptor { addr: base + 16, len: 1, flags: WRITE, next: 0 });
             self.queue.offer(0);
             self.queue.notify();
 
@@ -106,23 +126,27 @@ impl Disk {
                 return Err(());
             }
             if !write {
-                core::ptr::copy_nonoverlapping(page.add(SECTOR), buf.as_mut_ptr(), buf.len());
+                for (k, chunk) in buf.chunks_mut(page_size).enumerate() {
+                    core::ptr::copy_nonoverlapping(phys_to_virt(self.data_pages[k]), chunk.as_mut_ptr(), chunk.len());
+                }
             }
         }
         Ok(())
     }
 
     pub fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), ()> {
-        for (i, chunk) in buf.chunks_mut(SECTOR * 7).enumerate() {
-            self.transfer(sector + (i * 7) as u64, chunk, false)?;
+        let most = DATA_PAGES * PAGE_SIZE as usize;
+        for (i, chunk) in buf.chunks_mut(most).enumerate() {
+            self.transfer(sector + (i * most / SECTOR) as u64, chunk, false)?;
         }
         Ok(())
     }
 
     pub fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), ()> {
+        let most = DATA_PAGES * PAGE_SIZE as usize;
         let mut tmp = alloc::vec::Vec::from(buf);
-        for (i, chunk) in tmp.chunks_mut(SECTOR * 7).enumerate() {
-            self.transfer(sector + (i * 7) as u64, chunk, true)?;
+        for (i, chunk) in tmp.chunks_mut(most).enumerate() {
+            self.transfer(sector + (i * most / SECTOR) as u64, chunk, true)?;
         }
         Ok(())
     }

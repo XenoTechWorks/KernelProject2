@@ -39,7 +39,9 @@ with Machine() as m:
     check("pkg remove takes it away", out is not None and "Removed hello" in out, out)
     gone = m.run("hello")
     check("the program is gone", gone is not None and "command not found" in gone, gone)
-    check("pkg list is empty again", "No packages installed" in (m.run("pkg list") or ""))
+    # (not "No packages installed": a disk can have Software's own packages too, see software.py)
+    out = m.run("pkg list")
+    check("pkg list doesn't name it any more", out is not None and "hello" not in out.split(), out)
 
     # A Windows program kept in a .zip, the way portable apps come.
     m.run("mkdir -p /tmp/w && cat /bin/winapi.exe > /tmp/w/winapi.exe")

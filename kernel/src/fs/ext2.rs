@@ -53,6 +53,12 @@ struct Inner {
     filetype: bool,
     groups: Vec<Group>,
     cache: BTreeMap<u32, Vec<u8>>,
+    /// Metadata changed in `cache`/`sb` but not the disk yet (block bitmaps, group descriptor
+    /// table blocks): flushed once at the end of each top-level operation (see `with_flush`),
+    /// rather than after every single bit flipped, which an allocation-heavy write (a 100+ MB
+    /// file) would otherwise do thousands of times over.
+    meta_dirty: alloc::collections::BTreeSet<u32>,
+    sb_dirty: bool,
 }
 
 /// What `stat` needs from an inode.
@@ -135,6 +141,8 @@ impl Ext2 {
             sb,
             groups: Vec::new(),
             cache: BTreeMap::new(),
+            meta_dirty: alloc::collections::BTreeSet::new(),
+            sb_dirty: false,
         };
         let table_bytes = group_count * 32;
         let mut table = vec![0u8; table_bytes.next_multiple_of(block_size)];
@@ -152,6 +160,20 @@ impl Ext2 {
             });
         }
         Ok(Arc::new(Ext2 { inner: Mutex::new(inner) }))
+    }
+
+    /// Runs `f` under the lock, then flushes whatever free-space metadata it changed (see
+    /// `flush_meta`) before returning — on every exit path, success or error, so a call that
+    /// changes the disk is exactly as durable when it returns as it was before deferred metadata
+    /// writes existed, just without a disk write for every single block or inode allocated.
+    fn with_flush<T>(&self, f: impl FnOnce(&mut Inner) -> Result<T, Errno>) -> Result<T, Errno> {
+        let mut fs = self.inner.lock();
+        let result = f(&mut fs);
+        match (result, fs.flush_meta()) {
+            (Ok(v), Ok(())) => Ok(v),
+            (Err(e), _) => Err(e),
+            (Ok(_), Err(e)) => Err(e),
+        }
     }
 
     pub fn info(&self, ino: u32) -> Result<Info, Errno> {
@@ -187,20 +209,36 @@ impl Ext2 {
             let index = (pos / bs) as u32;
             let within = pos % bs;
             let n = (bs - within).min(len - done);
-            match fs.block_of(&mut raw, index, false)? {
-                Some(block) => {
-                    let data = fs.read_block(block)?;
-                    buf[done..done + n].copy_from_slice(&data[within..within + n]);
-                }
-                None => buf[done..done + n].fill(0), // a hole
+            let Some(block) = fs.block_of(&mut raw, index, false, true)? else {
+                buf[done..done + n].fill(0); // a hole
+                done += n;
+                continue;
+            };
+            if within != 0 || n < bs {
+                // Part of a block (the ends of the range): through the cache.
+                let data = fs.read_block(block)?;
+                buf[done..done + n].copy_from_slice(&data[within..within + n]);
+                done += n;
+                continue;
             }
-            done += n;
+            // Whole blocks: as many as lie one after another on the disk, read straight into
+            // `buf` in one go (and not cached: big reads are programs and libraries being loaded,
+            // and would only push out the file system's own blocks).
+            let mut run = 1;
+            while done + (run + 1) * bs <= len {
+                match fs.block_of(&mut raw, index + run as u32, false, true)? {
+                    Some(b) if b == block + run as u32 => run += 1,
+                    _ => break,
+                }
+            }
+            disk_read(fs.at, block as u64 * bs as u64, &mut buf[done..done + run * bs])?;
+            done += run * bs;
         }
         Ok(len)
     }
 
     pub fn write_at(&self, ino: u32, offset: u64, data: &[u8]) -> Result<usize, Errno> {
-        let mut fs = self.inner.lock();
+        self.with_flush(|fs| {
         let mut raw = fs.read_inode(ino)?;
         let bs = fs.block_size;
         let mut done = 0;
@@ -209,11 +247,36 @@ impl Ext2 {
             let index = (pos / bs) as u32;
             let within = pos % bs;
             let n = (bs - within).min(data.len() - done);
-            let block = fs.block_of(&mut raw, index, true)?.ok_or(ENOSPC)?;
-            let mut contents = if n == bs { vec![0; bs] } else { fs.read_block(block)? };
-            contents[within..within + n].copy_from_slice(&data[done..done + n]);
-            fs.write_block(block, &contents)?;
-            done += n;
+            let block = fs.block_of(&mut raw, index, true, n < bs)?.ok_or(ENOSPC)?;
+            if n < bs {
+                // Part of a block: what's around it stays.
+                let mut contents = fs.read_block(block)?;
+                contents[within..within + n].copy_from_slice(&data[done..done + n]);
+                fs.write_block(block, &contents)?;
+                done += n;
+                continue;
+            }
+            // Whole blocks: as many as the allocator put one after another (up to 256 KiB),
+            // written in one go, straight from `data`.
+            let mut run = 1;
+            while run * bs < 256 << 10 && done + (run + 1) * bs <= data.len() {
+                match fs.block_of(&mut raw, index + run as u32, true, false)? {
+                    Some(b) if b == block + run as u32 => run += 1,
+                    Some(_) => {
+                        // Not next to the others: the next round of the loop writes it.
+                        break;
+                    }
+                    None => return Err(ENOSPC),
+                }
+            }
+            let bytes = &data[done..done + run * bs];
+            disk_write(fs.at, block as u64 * bs as u64, bytes)?;
+            for k in 0..run {
+                if let Some(cached) = fs.cache.get_mut(&(block + k as u32)) {
+                    cached.copy_from_slice(&bytes[k * bs..(k + 1) * bs]);
+                }
+            }
+            done += run * bs;
         }
         let end = offset + data.len() as u64;
         let size = get32(&raw, 4) as u64 | (get32(&raw, 108) as u64) << 32;
@@ -224,17 +287,18 @@ impl Ext2 {
         put32(&mut raw, 16, now());
         fs.write_inode(ino, &raw)?;
         Ok(data.len())
+        })
     }
 
     pub fn truncate(&self, ino: u32, len: u64) -> Result<(), Errno> {
-        let mut fs = self.inner.lock();
+        self.with_flush(|fs| {
         let mut raw = fs.read_inode(ino)?;
         let bs = fs.block_size as u64;
         let keep = len.div_ceil(bs) as u32;
         fs.free_blocks_from(&mut raw, keep)?;
         // Zero the tail of the last kept block so later growth reads zeros.
         if len % bs != 0 {
-            if let Some(block) = fs.block_of(&mut raw, (len / bs) as u32, false)? {
+            if let Some(block) = fs.block_of(&mut raw, (len / bs) as u32, false, true)? {
                 let mut data = fs.read_block(block)?;
                 data[(len % bs) as usize..].fill(0);
                 fs.write_block(block, &data)?;
@@ -244,6 +308,7 @@ impl Ext2 {
         put32(&mut raw, 108, (len >> 32) as u32);
         put32(&mut raw, 16, now());
         fs.write_inode(ino, &raw)
+        })
     }
 
     /// The owner and group recorded in an inode.
@@ -301,6 +366,26 @@ impl Ext2 {
 
     /// Creates a file, directory, symlink or socket in `dir`. Returns its inode number.
     pub fn create(&self, dir: u32, name: &str, new: New) -> Result<u32, Errno> {
+        let result = self.create_impl(dir, name, new);
+        self.flush_after(result)
+    }
+
+    /// Writes back whatever free-space metadata (bitmaps, group descriptors, the superblock)
+    /// changed in memory during a call, before handing back its result — on every exit path,
+    /// success or error, so the call is exactly as durable once it returns as it would be
+    /// without this deferral, just without a disk write for every single bit flipped along the
+    /// way. For methods whose body drops and re-takes the lock partway (a long symlink's content
+    /// goes through a nested `write_at`, which flushes its own share already); this covers
+    /// whatever is left.
+    fn flush_after<T>(&self, result: Result<T, Errno>) -> Result<T, Errno> {
+        match (result, self.inner.lock().flush_meta()) {
+            (Ok(v), Ok(())) => Ok(v),
+            (Err(e), _) => Err(e),
+            (Ok(_), Err(e)) => Err(e),
+        }
+    }
+
+    fn create_impl(&self, dir: u32, name: &str, new: New) -> Result<u32, Errno> {
         let mut fs = self.inner.lock();
         if fs.entries(dir)?.iter().any(|e| e.name == name) {
             return Err(EEXIST);
@@ -343,7 +428,7 @@ impl Ext2 {
                 write_entry(&mut block, 0, ino, 12, ".", dtype);
                 write_entry(&mut block, 12, dir, (bs - 12) as u16, "..", dtype);
                 let mut raw = fs.read_inode(ino)?;
-                let b = fs.block_of(&mut raw, 0, true)?.ok_or(ENOSPC)?;
+                let b = fs.block_of(&mut raw, 0, true, false)?.ok_or(ENOSPC)?;
                 fs.write_block(b, &block)?;
                 put32(&mut raw, 4, bs as u32);
                 fs.write_inode(ino, &raw)?;
@@ -366,7 +451,7 @@ impl Ext2 {
 
     /// A hard link: another name in `dir` for inode `ino`.
     pub fn link(&self, dir: u32, name: &str, ino: u32) -> Result<(), Errno> {
-        let mut fs = self.inner.lock();
+        self.with_flush(|fs| {
         if fs.entries(dir)?.iter().any(|e| e.name == name) {
             return Err(EEXIST);
         }
@@ -379,11 +464,12 @@ impl Ext2 {
         fs.write_inode(ino, &raw)?;
         let dtype = if get16(&raw, 0) & S_IFMT == S_IFLNK { 7 } else { 1 };
         fs.add_entry(dir, name, ino, dtype)
+        })
     }
 
     /// Removes a name. The inode is freed when no names (links) are left.
     pub fn unlink(&self, dir: u32, name: &str, want_dir: bool) -> Result<(), Errno> {
-        let mut fs = self.inner.lock();
+        self.with_flush(|fs| {
         let entry = fs.entries(dir)?.into_iter().find(|e| e.name == name).ok_or(ENOENT)?;
         if name == "." || name == ".." {
             return Err(EINVAL);
@@ -423,10 +509,16 @@ impl Ext2 {
             fs.write_inode(entry.ino, &raw)?;
         }
         Ok(())
+        })
     }
 
     /// Moves a name, possibly to another directory, replacing a file already there.
     pub fn rename(&self, from_dir: u32, from: &str, to_dir: u32, to: &str) -> Result<(), Errno> {
+        let result = self.rename_impl(from_dir, from, to_dir, to);
+        self.flush_after(result)
+    }
+
+    fn rename_impl(&self, from_dir: u32, from: &str, to_dir: u32, to: &str) -> Result<(), Errno> {
         let ino = self.lookup(from_dir, from)?;
         let is_dir = self.info(ino)?.mode & S_IFMT == S_IFDIR;
         if let Ok(existing) = self.lookup(to_dir, to) {
@@ -479,15 +571,24 @@ impl Inner {
         let mut data = vec![0u8; self.block_size];
         disk_read(self.at, block as u64 * self.block_size as u64, &mut data)?;
         if self.cache.len() > 4096 {
+            // Metadata (bitmaps, group descriptors) only lives in `cache` until `flush_meta`
+            // writes it back (see `write_block_deferred`); clearing the cache out from under it
+            // would silently lose those changes (and, since the bitmap bit would then read back
+            // as "free" from disk, hand out an already-used block a second time). Flush first.
+            self.flush_meta()?;
             self.cache.clear();
         }
         self.cache.insert(block, data.clone());
         Ok(data)
     }
 
+    /// Writes a block, keeping the cache's copy (if it has one) the same. Blocks only go into
+    /// the cache when read: writing a big file would otherwise fill the kernel's heap with it.
     fn write_block(&mut self, block: u32, data: &[u8]) -> Result<(), Errno> {
         disk_write(self.at, block as u64 * self.block_size as u64, data)?;
-        self.cache.insert(block, data.to_vec());
+        if let Some(cached) = self.cache.get_mut(&block) {
+            cached.copy_from_slice(data);
+        }
         Ok(())
     }
 
@@ -518,10 +619,14 @@ impl Inner {
         (self.block_size / 4) as u32
     }
 
-    /// The disk block holding block `index` of a file, allocating it (and any indirect blocks on the
-    /// way) when `allocate` is set. Changes to the inode's own pointers are made in `raw`; the caller
-    /// writes the inode back.
-    fn block_of(&mut self, raw: &mut [u8], index: u32, allocate: bool) -> Result<Option<u32>, Errno> {
+    /// The disk block holding block `index` of a file, allocating it (and any indirect blocks on
+    /// the way) when `allocate` is set. Indirect (pointer-table) blocks are always zeroed when
+    /// allocated, since their unset entries have to read as "no block"; the leaf itself (the
+    /// block that holds the file's own bytes) is zeroed too unless `zero_leaf` is false, which a
+    /// caller about to overwrite the whole block with real data passes, to skip a disk write
+    /// that would just be replaced. Changes to the inode's own pointers are made in `raw`; the
+    /// caller writes the inode back.
+    fn block_of(&mut self, raw: &mut [u8], index: u32, allocate: bool, zero_leaf: bool) -> Result<Option<u32>, Errno> {
         let ppb = self.pointers_per_block();
         // The path through the tree: (slot in i_block, then indexes in indirect blocks).
         let (slot, path): (usize, Vec<u32>) = if index < 12 {
@@ -535,22 +640,25 @@ impl Inner {
             let i = index - 12 - ppb - ppb * ppb;
             (14, vec![i / (ppb * ppb), i / ppb % ppb, i % ppb])
         };
+        // Direct blocks (no indirection) are the leaf themselves; otherwise the leaf is the last
+        // step down the path, and everything before it is a pointer table.
         let mut block = get32(raw, 40 + slot * 4);
         if block == 0 {
             if !allocate {
                 return Ok(None);
             }
-            block = self.alloc_block(raw)?;
+            block = self.alloc_block(raw, if path.is_empty() { zero_leaf } else { true })?;
             put32(raw, 40 + slot * 4, block);
         }
-        for i in path {
+        let last = path.len();
+        for (step, i) in path.into_iter().enumerate() {
             let mut table = self.read_block(block)?;
             let mut next = get32(&table, i as usize * 4);
             if next == 0 {
                 if !allocate {
                     return Ok(None);
                 }
-                next = self.alloc_block(raw)?;
+                next = self.alloc_block(raw, step + 1 < last || zero_leaf)?;
                 put32(&mut table, i as usize * 4, next);
                 self.write_block(block, &table)?;
             }
@@ -621,10 +729,10 @@ impl Inner {
         Ok(all_free)
     }
 
+    /// Updates the cache's copy of the superblock and this group's descriptor, and marks both
+    /// dirty: `flush_meta` writes them to disk, once, at the end of the top-level operation.
     fn save_metadata(&mut self, group: usize) -> Result<(), Errno> {
-        // Superblock (always at byte 1024) and this group's descriptor.
-        let sb = self.sb.clone();
-        disk_write(self.at, 1024, &sb)?;
+        self.sb_dirty = true;
         let g = &self.groups[group];
         let table_block = self.first_data_block + 1 + (group * 32 / self.block_size) as u32;
         let at = group * 32 % self.block_size;
@@ -636,7 +744,8 @@ impl Inner {
         put16(&mut data, at + 12, fb);
         put16(&mut data, at + 14, fi);
         put16(&mut data, at + 16, ud);
-        self.write_block(table_block, &data)
+        self.write_block_deferred(table_block, data);
+        Ok(())
     }
 
     /// Finds a clear bit in a bitmap block, sets it, and returns its index.
@@ -646,7 +755,7 @@ impl Inner {
             let (byte, bit) = ((i / 8) as usize, i % 8);
             if data[byte] & (1 << bit) == 0 {
                 data[byte] |= 1 << bit;
-                self.write_block(bitmap, &data)?;
+                self.write_block_deferred(bitmap, data);
                 return Ok(Some(i));
             }
         }
@@ -656,11 +765,44 @@ impl Inner {
     fn clear_bit(&mut self, bitmap: u32, i: u32) -> Result<(), Errno> {
         let mut data = self.read_block(bitmap)?;
         data[(i / 8) as usize] &= !(1 << (i % 8));
-        self.write_block(bitmap, &data)
+        self.write_block_deferred(bitmap, data);
+        Ok(())
+    }
+
+    /// Like `write_block`, but doesn't touch the disk: only the cache, which `flush_meta` writes
+    /// back later. Only for the free-space bookkeeping (bitmaps, group descriptors, the
+    /// superblock), which changes by one bit or one count at a time and would otherwise mean a
+    /// disk write per block allocated — thousands of them for one big file.
+    fn write_block_deferred(&mut self, block: u32, data: Vec<u8>) {
+        self.cache.insert(block, data);
+        self.meta_dirty.insert(block);
+    }
+
+    /// Writes whatever `save_metadata`/`take_bit`/`clear_bit` have only changed in memory so
+    /// far. Every public, mutating `Ext2` method calls this once, right before it returns (via
+    /// `with_flush`), so changes are as durable as before once the call returns — just not
+    /// after every single bit along the way.
+    fn flush_meta(&mut self) -> Result<(), Errno> {
+        if self.sb_dirty {
+            disk_write(self.at, 1024, &self.sb)?;
+            self.sb_dirty = false;
+        }
+        let (at, bs) = (self.at, self.block_size as u64);
+        for block in core::mem::take(&mut self.meta_dirty) {
+            if let Some(data) = self.cache.get(&block) {
+                disk_write(at, block as u64 * bs, data)?;
+            }
+        }
+        Ok(())
     }
 
     /// A zeroed new block. Counts it in the inode's i_blocks (512-byte units).
-    fn alloc_block(&mut self, raw: &mut [u8]) -> Result<u32, Errno> {
+    /// Allocates a free block. `zero` writes zeros to it now (needed when it's a pointer table,
+    /// or when a caller might read part of it before writing); skipped when the caller is about
+    /// to overwrite the whole thing anyway, which saves a disk write that would just be thrown
+    /// away. Either way the cache remembers it as zeroed, so a read of it (through the cache)
+    /// before it's written is correct regardless.
+    fn alloc_block(&mut self, raw: &mut [u8], zero: bool) -> Result<u32, Errno> {
         for g in 0..self.groups.len() {
             if self.groups[g].free_blocks == 0 {
                 continue;
@@ -672,8 +814,12 @@ impl Inner {
                 let free = get32(&self.sb, 12) - 1;
                 put32(&mut self.sb, 12, free);
                 self.save_metadata(g)?;
-                let zero = vec![0u8; self.block_size];
-                self.write_block(block, &zero)?;
+                let zeros = vec![0u8; self.block_size];
+                if zero {
+                    self.write_block(block, &zeros)?;
+                } else {
+                    self.cache.insert(block, zeros);
+                }
                 put32(raw, 28, get32(raw, 28) + (self.block_size / 512) as u32);
                 return Ok(block);
             }
@@ -753,7 +899,7 @@ impl Inner {
         let (mut raw, count) = self.dir_blocks(dir)?;
         let mut out = Vec::new();
         for index in 0..count {
-            let Some(block) = self.block_of(&mut raw, index, false)? else { continue };
+            let Some(block) = self.block_of(&mut raw, index, false, true)? else { continue };
             let data = self.read_block(block)?;
             let mut at = 0;
             while at + 8 <= data.len() {
@@ -787,7 +933,7 @@ impl Inner {
             put32(&mut raw, 32, flags);
         }
         for index in 0..count {
-            let Some(block) = self.block_of(&mut raw, index, false)? else { continue };
+            let Some(block) = self.block_of(&mut raw, index, false, true)? else { continue };
             let mut data = self.read_block(block)?;
             let mut at = 0;
             while at + 8 <= data.len() {
@@ -813,7 +959,7 @@ impl Inner {
         }
         // No room: a new block for the directory.
         let bs = self.block_size;
-        let block = self.block_of(&mut raw, count, true)?.ok_or(ENOSPC)?;
+        let block = self.block_of(&mut raw, count, true, false)?.ok_or(ENOSPC)?;
         let mut data = vec![0u8; bs];
         write_entry(&mut data, 0, ino, bs as u16, name, dtype);
         self.write_block(block, &data)?;
@@ -825,7 +971,7 @@ impl Inner {
     fn remove_entry(&mut self, dir: u32, name: &str) -> Result<(), Errno> {
         let (mut raw, count) = self.dir_blocks(dir)?;
         for index in 0..count {
-            let Some(block) = self.block_of(&mut raw, index, false)? else { continue };
+            let Some(block) = self.block_of(&mut raw, index, false, true)? else { continue };
             let mut data = self.read_block(block)?;
             let (mut at, mut prev) = (0usize, None::<usize>);
             while at + 8 <= data.len() {
@@ -856,7 +1002,7 @@ impl Inner {
 
     fn set_dotdot(&mut self, dir: u32, parent: u32) -> Result<(), Errno> {
         let (mut raw, _) = self.dir_blocks(dir)?;
-        let block = self.block_of(&mut raw, 0, false)?.ok_or(EIO)?;
+        let block = self.block_of(&mut raw, 0, false, true)?.ok_or(EIO)?;
         let mut data = self.read_block(block)?;
         let first = get16(&data, 4) as usize;
         put32(&mut data, first, parent);

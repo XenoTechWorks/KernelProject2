@@ -112,7 +112,48 @@ const Reporter = struct {
     }
 };
 
+/// The server's index, fetched once for `get`'s dependencies.
+var index_text: ?[]u8 = null;
+var index_failed = false;
+
+fn findInIndex(name: []const u8) ?software.Package {
+    if (index_text == null and !index_failed) {
+        index_text = software.fetch("index", null) catch blk: {
+            index_failed = true;
+            break :blk null;
+        };
+    }
+    const text = index_text orelse return null;
+    var packages: [256]software.Package = undefined;
+    const n = software.parseIndex(text, &packages);
+    for (packages[0..n]) |p| {
+        if (std.mem.eql(u8, p.name, name)) return p;
+    }
+    return null;
+}
+
+/// Installs a package, after whatever it depends on that isn't installed yet.
 fn get(name: []const u8, report: bool) u8 {
+    return getWithDependencies(name, report, 0);
+}
+
+fn getWithDependencies(name: []const u8, report: bool, depth: usize) u8 {
+    if (depth > 8) {
+        rt.err.print("pkg: {s}: its dependencies go round in a circle\n", .{name});
+        return 1;
+    }
+    if (findInIndex(name)) |p| {
+        var deps = software.dependencies(p);
+        while (deps.next()) |dep| {
+            if (software.isInstalled(dep)) continue;
+            rt.out.print("{s} needs {s} first.\n", .{ name, dep });
+            if (getWithDependencies(dep, report, depth + 1) != 0) return 1;
+        }
+    }
+    return getOne(name, report);
+}
+
+fn getOne(name: []const u8, report: bool) u8 {
     if (!software.validName(name)) {
         rt.err.print("pkg: {s}: not a package name\n", .{name});
         return 1;
@@ -306,6 +347,11 @@ fn showFiles(name: []const u8) u8 {
 
 fn remove(name: []const u8) u8 {
     if (software.isInstalled(name)) {
+        var who: [80]u8 = undefined;
+        if (software.neededBy(name, &who)) |other| {
+            rt.err.print("pkg: {s} is needed by {s}: remove that first\n", .{ name, other });
+            return 1;
+        }
         if (!software.remove(name)) {
             rt.err.print("pkg: some of {s}'s files couldn't be deleted\n", .{name});
             return 1;

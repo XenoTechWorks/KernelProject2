@@ -1,0 +1,17 @@
+{
+    "file_format_version": "1.1.2",
+    "layer": {
+        "name": "VK_LAYER_KP2_present",
+        "type": "GLOBAL",
+        "library_path": "libVkLayer_KP2_present.so",
+        "api_version": "1.3.275",
+        "implementation_version": "1",
+        "description": "Shows presented Vulkan pictures in KernelProject2 windows",
+        "functions": {
+            "vkNegotiateLoaderLayerInterfaceVersion": "KP2_present_NegotiateLoaderLayerInterfaceVersion"
+        },
+        "disable_environment": {
+            "KP2_NO_PRESENT_LAYER": "1"
+        }
+    }
+}

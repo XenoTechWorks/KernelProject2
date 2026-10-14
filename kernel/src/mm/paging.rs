@@ -10,6 +10,9 @@ pub const WRITABLE: u64 = 1 << 1;
 pub const USER: u64 = 1 << 2;
 pub const HUGE: u64 = 1 << 7;
 pub const NO_EXECUTE: u64 = 1 << 63;
+/// One of the bits the processor leaves to us: the page is held by others too (mm/shared.rs), so
+/// unmapping it lets go of it rather than freeing it.
+pub const SHARED: u64 = 1 << 9;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 
 /// Programs may use addresses below this; everything above belongs to the kernel.
@@ -61,6 +64,15 @@ pub fn map_mmio(phys: u64) -> *mut u8 {
     }
     core::mem::forget(kernel); // it's the kernel's own tables: never free them
     va as *mut u8
+}
+
+/// Gives back the page a (present) page-table entry maps: freed, or let go of if it's shared.
+fn drop_page(entry: u64) {
+    if entry & SHARED != 0 {
+        super::shared::release(entry & ADDRESS_MASK);
+    } else {
+        frame::free(entry & ADDRESS_MASK);
+    }
 }
 
 fn table(phys: u64) -> &'static mut [u64; 512] {
@@ -127,7 +139,7 @@ impl AddressSpace {
         match self.entry(va, true) {
             Some(e) => {
                 if *e & PRESENT != 0 {
-                    frame::free(*e & ADDRESS_MASK);
+                    drop_page(*e);
                 }
                 *e = phys | flags | PRESENT;
                 true
@@ -177,7 +189,7 @@ impl AddressSpace {
         while va < end {
             if let Some(e) = self.entry(va, false) {
                 if *e & PRESENT != 0 {
-                    frame::free(*e & ADDRESS_MASK);
+                    drop_page(*e);
                     *e = 0;
                 }
             }
@@ -191,7 +203,7 @@ impl AddressSpace {
         while va < end {
             if let Some(e) = self.entry(va, false) {
                 if *e & PRESENT != 0 {
-                    *e = (*e & ADDRESS_MASK) | flags | PRESENT;
+                    *e = (*e & ADDRESS_MASK) | (*e & SHARED) | flags | PRESENT;
                 }
             }
             va += PAGE_SIZE;
@@ -251,6 +263,12 @@ impl AddressSpace {
             if !ok {
                 return;
             }
+            // A shared page stays shared: the child maps the same one.
+            if e & SHARED != 0 {
+                super::shared::hold(e & ADDRESS_MASK);
+                ok = copy.map(va, e & ADDRESS_MASK, e & !ADDRESS_MASK & !PRESENT);
+                return;
+            }
             let Some(page) = frame::alloc() else {
                 ok = false;
                 return;
@@ -265,7 +283,7 @@ impl AddressSpace {
 
     /// Frees every user page and user page table.
     pub fn clear_user(&mut self) {
-        self.walk(|_, e| frame::free(e & ADDRESS_MASK));
+        self.walk(|_, e| drop_page(e));
         let l4 = table(self.pml4);
         for i4 in 0..256 {
             if l4[i4] & PRESENT == 0 {

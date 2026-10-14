@@ -9,9 +9,32 @@
 #   about     one line for the catalog
 #   category  Games or Apps
 #   files     extra files to add (path = contents), e.g. a launcher
+#   depends   packages from here it needs (installed first; they come earlier in this file)
+#   script    a build step of ours (software/...), run with the files in $TREE
+#   tools     .debs only that step uses (headers, compilers): unpacked for it, not shipped
 #   icon      a picture for it: a file from the packages, or an Oxygen icon (rootfs/usr/share/icons)
 #
 # Everything here is free software (see each package's usr/share/doc/NAME/copyright).
+
+# OpenGL and Vulkan, drawn by the processor (there's no GPU driver): Mesa's OSMesa (llvmpipe) and
+# lavapipe, with LLVM, plus our libGL.so.1, a Vulkan layer that puts pictures in windows, and two
+# cubes to try them. Our SDL 2 uses them for SDL_WINDOW_OPENGL and SDL_WINDOW_VULKAN windows.
+[mesa]
+title = "OpenGL and Vulkan (Mesa)"
+category = "System"
+debs = ["libosmesa6", "libllvm20", "mesa-vulkan-drivers", "libvulkan1", "libglu1-mesa"]
+only = [
+    "usr/lib/x86_64-linux-gnu/libOSMesa.so.8.0.0", "usr/lib/x86_64-linux-gnu/libOSMesa.so.8",
+    "usr/lib/x86_64-linux-gnu/libLLVM.so.20.1",
+    "usr/lib/x86_64-linux-gnu/libvulkan_lvp.so", "usr/share/vulkan/icd.d/lvp_icd.json",
+    "usr/lib/x86_64-linux-gnu/libvulkan.so.1.3.275", "usr/lib/x86_64-linux-gnu/libvulkan.so.1",
+    "usr/lib/x86_64-linux-gnu/libGLU.so.1.3.1", "usr/lib/x86_64-linux-gnu/libGLU.so.1",
+]
+script = "mesa/build.sh"
+tools = ["libvulkan-dev", "glslang-tools", "spirv-tools"]
+run = "/usr/bin/vkcube"
+about = "3D graphics for games: OpenGL 4.5 and Vulkan 1.4, drawn by the processor."
+icon = "oxygen:preferences-desktop"
 
 [bastet]
 title = "Bastet"
@@ -142,3 +165,41 @@ run = "/usr/bin/cmatrix"
 terminal = true
 about = "The falling green characters from The Matrix, in your terminal."
 icon = "usr/share/icons/hicolor/128x128/apps/cmatrix.png"
+
+# 3D games (OpenGL, through Mesa).
+
+[neverball]
+title = "Neverball"
+category = "Games"
+debs = ["neverball", "neverball-data", "neverball-common"]
+depends = ["mesa"]
+run = "/usr/games/neverball"
+about = "Tilt the floor to roll a ball through 3D mazes and collect the coins in time."
+icon = "usr/share/icons/hicolor/128x128/apps/neverball.png"
+
+[neverputt]
+title = "Neverputt"
+category = "Games"
+debs = ["neverputt"]
+depends = ["mesa", "neverball"]
+run = "/usr/games/neverputt"
+about = "Miniature golf in 3D, on Neverball's courses (up to four players)."
+icon = "usr/share/icons/hicolor/128x128/apps/neverputt.png"
+
+[armagetronad]
+title = "Armagetron Advanced"
+category = "Games"
+debs = ["armagetronad", "armagetronad-common"]
+depends = ["mesa"]
+run = "/usr/games/armagetronad"
+about = "Light cycles in 3D, as in Tron: make the others crash into your wall."
+icon = "usr/share/icons/hicolor/48x48/apps/armagetronad.png"
+
+[foobillardplus]
+title = "FooBillard++"
+category = "Games"
+debs = ["foobillardplus", "foobillardplus-data"]
+depends = ["mesa"]
+run = "/usr/games/foobillardplus"
+about = "Billiards in 3D: pool, carom and snooker, against a friend or the computer."
+icon = "usr/share/icons/hicolor/128x128/apps/foobillardplus.png"

@@ -1,0 +1,163 @@
+/* KernelProject2 website. Plain CSS, no build step.
+   Colors are the system's own: the console background, the prompt's
+   cyan and green, and the toolkit's blue. */
+
+body {
+  margin: 0;
+  background: #14171c;
+  font: 12px/1.6 Verdana, Geneva, Tahoma, sans-serif;
+  color: #2a2d31;
+}
+
+a { color: #1e63b0; }
+a:visited { color: #6a4fa0; }
+a:hover { color: #d0451b; }
+
+#wrap {
+  width: 880px;
+  max-width: calc(100% - 16px);
+  margin: 20px auto;
+  background: #fbfaf7;
+  border: 1px solid #000;
+  box-shadow: 0 0 0 4px #20242b;
+}
+
+/* Header: the console, with kpfetch's logo. */
+#top {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 18px 22px 14px;
+  background: #1d2129;
+}
+#top pre.logo {
+  margin: 0;
+  font: 10px/1.05 "DejaVu Sans Mono", Consolas, "Courier New", monospace;
+  color: #56c3d6;
+  white-space: pre;
+}
+#top pre.logo b { font-weight: normal; color: #4a90e2; }
+#top .name { font: bold 25px "Trebuchet MS", Arial, sans-serif; color: #eef1f5; text-decoration: none; }
+#top .tag { margin: 2px 0 0; font: 12px Consolas, "Courier New", monospace; color: #8fd16a; }
+#top .tag span { color: #8a93a0; }
+
+/* Tabs that join the page below them. */
+#menu {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin: 0;
+  padding: 0 18px;
+  list-style: none;
+  background: #1d2129;
+}
+#menu a {
+  display: block;
+  padding: 6px 13px 5px;
+  border-radius: 4px 4px 0 0;
+  background: #2c323d;
+  color: #c7ced8;
+  font: bold 12px "Trebuchet MS", Arial, sans-serif;
+  text-decoration: none;
+}
+#menu a:hover { background: #39414e; color: #fff; }
+#menu a.here { background: #fbfaf7; color: #1d2129; }
+
+#body { display: flex; flex-wrap: wrap; }
+#main { flex: 1 1 520px; min-width: 0; padding: 20px 24px 26px; }
+#side { flex: 0 0 210px; padding: 20px 20px 26px 0; }
+
+h1 { margin: 0 0 12px; font: bold 21px "Trebuchet MS", Arial, sans-serif; color: #1d2129; }
+h2 {
+  margin: 24px 0 9px;
+  padding-bottom: 3px;
+  font: bold 15px "Trebuchet MS", Arial, sans-serif;
+  color: #1d2129;
+  border-bottom: 1px solid #e2dfd6;
+}
+p { margin: 0 0 11px; }
+code, pre { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
+code { padding: 0 3px; background: #efece4; }
+pre {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  background: #1d2129;
+  color: #d6dbe2;
+  border-radius: 3px;
+  overflow-x: auto;
+}
+pre .p { color: #8fd16a; }
+
+.lead { font-size: 13px; }
+
+/* Front page thumbnails. */
+.thumbs { display: flex; gap: 10px; margin: 4px 0 6px; }
+.thumbs a { flex: 1; min-width: 0; }
+.thumbs img { display: block; width: 100%; height: 108px; object-fit: cover; object-position: center; border: 1px solid #1d2129; }
+.more { font-size: 11px; text-align: right; margin: 0; }
+
+.note {
+  margin: 14px 0 0;
+  padding: 10px 13px;
+  background: #fff7d6;
+  border: 1px solid #e8d48a;
+}
+.note b { color: #7a5a00; }
+
+/* The changelog. */
+table.log { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.log td { padding: 4px 6px; border-bottom: 1px solid #ece9e1; vertical-align: top; }
+table.log td.d { width: 72px; color: #8a8578; white-space: nowrap; }
+table.log td.h { width: 58px; font-family: Consolas, "Courier New", monospace; }
+table.log tr:hover td { background: #f3f1ea; }
+
+/* Sidebar. */
+.box { margin: 0 0 16px; font-size: 11px; }
+.box h3 {
+  margin: 0 0 5px;
+  font: bold 11px "Trebuchet MS", Arial, sans-serif;
+  color: #8a8578;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.box ul { margin: 0; padding-left: 15px; }
+.box dl { margin: 0; }
+.box dt { float: left; clear: left; width: 82px; color: #8a8578; }
+.box dd { margin: 0 0 2px 82px; }
+.button {
+  display: block;
+  padding: 8px 0;
+  text-align: center;
+  border: 1px solid #1b4f8f;
+  border-radius: 4px;
+  background: linear-gradient(#5ea2ec, #3a82d4 50%, #2e74c6 51%, #3a86da);
+  color: #fff !important;
+  font: bold 13px "Trebuchet MS", Arial, sans-serif;
+  text-decoration: none;
+  text-shadow: 0 -1px 0 rgba(0, 0, 0, .35);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35);
+}
+.button:hover { filter: brightness(1.08); }
+
+/* Screenshot page. */
+figure { margin: 0 0 22px; }
+figure img { display: block; max-width: 100%; height: auto; border: 1px solid #1d2129; }
+figcaption { margin-top: 5px; font-size: 11px; color: #5d5a52; }
+
+table.list { width: 100%; border-collapse: collapse; margin: 0 0 14px; font-size: 12px; }
+table.list th, table.list td { padding: 5px 7px; border-bottom: 1px solid #ece9e1; text-align: left; vertical-align: top; }
+table.list th { border-bottom: 2px solid #d9d5ca; }
+
+#foot {
+  padding: 10px 24px;
+  border-top: 1px solid #e2dfd6;
+  font-size: 11px;
+  color: #8a8578;
+}
+
+@media (max-width: 760px) {
+  #top pre.logo { display: none; }
+  #side { flex-basis: 100%; padding: 0 24px 20px; }
+  .thumbs { flex-direction: column; }
+  .thumbs img { height: auto; }
+}

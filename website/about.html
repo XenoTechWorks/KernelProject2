@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>About - KernelProject2</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="wrap">
+
+<div id="top">
+<pre class="logo"> ██╗  ██╗<b>██████╗ </b>
+ ██║ ██╔╝<b>╚════██╗</b>
+ █████╔╝ <b> █████╔╝</b>
+ ██╔═██╗ <b>██╔═══╝ </b>
+ ██║  ██╗<b>███████╗</b>
+ ╚═╝  ╚═╝<b>╚══════╝</b></pre>
+  <div>
+    <a class="name" href="index.html">KernelProject2</a>
+    <p class="tag">root:~# <span>a kernel that runs Linux programs as they are</span></p>
+  </div>
+</div>
+
+<ul id="menu">
+  <li><a href="index.html">Home</a></li>
+  <li><a class="here" href="about.html">About</a></li>
+  <li><a href="screenshots.html">Screenshots</a></li>
+  <li><a href="download.html">Download</a></li>
+  <li><a href="https://github.com/XenoTechWorks/KernelProject2">Source</a></li>
+</ul>
+
+<div id="body">
+<div id="main">
+
+  <h1>About</h1>
+
+  <p>A program never talks to the hardware itself. When it wants to read a file or print
+  something, it asks the kernel with a <em>system call</em>: a number plus some arguments. On
+  Linux, <code>read</code> is 0, <code>write</code> is 1 and <code>execve</code> is 59.</p>
+
+  <p>KernelProject2 answers those same numbers the same way Linux does. If it gets the answers
+  right, a Linux program can't tell it isn't on Linux. This is the trick WSL1 used. It means I
+  don't have to port anything: I take a program out of Ubuntu, copy it in, and see what breaks.
+  When a program asks for a call the kernel doesn't have yet, the kernel logs it, and that's
+  usually the next thing I write.</p>
+
+  <h2>What's in it</h2>
+
+  <table class="list">
+    <tr><th>Part</th><th>What it does</th></tr>
+    <tr><td>Processes</td><td>fork, exec, threads, futexes, signals with Linux's stack frames, job control, ptrace</td></tr>
+    <tr><td>Memory</td><td>a separate address space per program, mmap, brk, stacks that grow</td></tr>
+    <tr><td>Files</td><td>a VFS, an in-memory root, ext2 on a virtio disk, /proc, /sys, inotify</td></tr>
+    <tr><td>Terminals</td><td>Linux's line discipline, pseudo-terminals, controlling terminals</td></tr>
+    <tr><td>Events</td><td>epoll, eventfd, signalfd, timerfd, pidfd, timers</td></tr>
+    <tr><td>Network</td><td>virtio-net, ARP, IPv4, ICMP, UDP, TCP, Unix sockets</td></tr>
+    <tr><td>Graphics</td><td>a compositor for windows over the console, mouse and keyboard focus</td></tr>
+    <tr><td>Desktop</td><td>Vela: glass bar and dock, star menu, Personalize, a Welcome window, a terminal</td></tr>
+    <tr><td>CPUs</td><td>every CPU the bootloader finds, one big kernel lock</td></tr>
+    <tr><td>Install</td><td>GPT, FAT32 and ext2 written by our own installer; boots with UEFI</td></tr>
+    <tr><td>Windows</td><td>a PE loader with its own kernel32, msvcrt and UCRT, DLLs, exceptions</td></tr>
+  </table>
+
+  <p>About 150 system calls so far, out of Linux's 450 or so.</p>
+
+  <h2>Languages</h2>
+
+  <p>The kernel is Rust (nightly). The shell, the command line tools and the graphical toolkit
+  are Zig, built without a C library: they make system calls directly. The Windows layer is C++,
+  since the Windows calling conventions are easier to match there. Build scripts are shell and
+  the tests are Python.</p>
+
+  <h2>Tests</h2>
+
+  <p>Each test boots the kernel in QEMU, types into it like a person would, and checks what comes
+  back. Some click the mouse or take screenshots. The C test programs are also run on real Linux,
+  and the two outputs have to match.</p>
+
+  <h2>What it doesn't do (yet)</h2>
+
+  <ul>
+    <li>The kernel runs on one CPU at a time (programs run on all of them), and a program's
+      threads take turns on one CPU.</li>
+    <li>An installed disk boots with UEFI only, not old BIOS firmware.</li>
+    <li>It has only been run in QEMU, not on real hardware.</li>
+    <li>No graphics card drivers. It draws to the framebuffer the bootloader gives it.</li>
+  </ul>
+
+</div>
+
+<div id="side">
+  <div class="box">
+    <h3>Quick facts</h3>
+    <div>
+      <ul>
+        <li>Started October 2026</li>
+        <li>Boots with Limine</li>
+        <li>x86-64</li>
+        <li>Rust, Zig, C++</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="box">
+    <h3>See also</h3>
+    <div>
+      <a href="screenshots.html">Screenshots</a><br>
+      <a href="download.html">Building it</a>
+    </div>
+  </div>
+</div>
+</div>
+
+<div id="foot">KernelProject2 by XenoTechWorks &middot; <a href="https://github.com/XenoTechWorks/KernelProject2">GitHub</a></div>
+
+</div>
+</body>
+</html>

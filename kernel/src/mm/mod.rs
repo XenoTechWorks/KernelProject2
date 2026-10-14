@@ -2,6 +2,7 @@
 
 pub mod frame;
 pub mod paging;
+pub mod shared;
 pub mod user;
 
 use core::sync::atomic::{AtomicU64, Ordering};

@@ -199,6 +199,46 @@ pub fn alarm(secs: u64) -> SysResult {
     Ok(timer::micros_for(left).div_ceil(1_000_000))
 }
 
+/// setpriority: accepted, and does nothing (every task has the same priority; `nice` values are
+/// an illusion Mesa and others check for without needing to matter).
+pub fn setpriority() -> SysResult {
+    Ok(0)
+}
+
+/// sched_setscheduler, sched_setaffinity: accepted and ignored. There's one scheduling policy,
+/// and a task may run on any CPU, which is what asking for "any of them" would get anyway.
+pub fn sched_setscheduler() -> SysResult {
+    Ok(0)
+}
+
+pub fn sched_setaffinity(size: usize, mask: u64) -> SysResult {
+    // Only refuse a mask that excludes every CPU there is: that's a logic error worth surfacing,
+    // not pretending to grant.
+    if size < 8 {
+        return Err(EINVAL);
+    }
+    let requested: u64 = user::read_struct(proc::current().space(), mask)?;
+    let n = crate::arch::smp::count().min(64);
+    let all: u64 = if n == 64 { u64::MAX } else { (1 << n) - 1 };
+    if requested & all == 0 {
+        return Err(EINVAL);
+    }
+    Ok(0)
+}
+
+/// sched_getparam: writes a priority of 0 (every task's, since there's only one scheduling
+/// policy here) into `struct sched_param { int sched_priority; }`.
+pub fn sched_getparam(param: u64) -> SysResult {
+    let zero: i32 = 0;
+    user::write_struct(proc::current().space(), param, &zero)?;
+    Ok(0)
+}
+
+/// sched_getscheduler: always SCHED_OTHER (0), the one policy there is.
+pub fn sched_getscheduler() -> SysResult {
+    Ok(0)
+}
+
 pub fn sched_getaffinity(size: usize, mask: u64) -> SysResult {
     if size < 8 {
         return Err(EINVAL);

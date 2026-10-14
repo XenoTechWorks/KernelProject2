@@ -1011,6 +1011,7 @@ pub fn fcntl(fd: i32, cmd: u32, arg: u64) -> SysResult {
         }
         5..=7 | 36..=38 => Ok(0), // record locks: one user, nothing to lock against yet
         1031 | 1032 => Ok(0x10000), // F_SETPIPE_SZ / F_GETPIPE_SZ
+        1033 | 1034 => Ok(0),       // F_ADD_SEALS / F_GET_SEALS (memfds): seals aren't kept
         _ => Err(EINVAL),
     }
 }
@@ -1177,6 +1178,34 @@ pub fn chown(n: u64, a: [u64; 6]) -> SysResult {
     let (old_uid, old_gid) = node.owner();
     node.set_owner(if uid == u32::MAX { old_uid } else { uid }, if gid == u32::MAX { old_gid } else { gid })?;
     notify::changed(None, "", Some(&node), notify::IN_ATTRIB);
+    Ok(0)
+}
+
+/// memfd_create(name, flags): a file that's only memory pages (fs/memfile.rs), open for reading
+/// and writing. MFD_CLOEXEC is honored; sealing (MFD_ALLOW_SEALING) is accepted, with no seals.
+pub fn memfd_create(name: u64, flags: u32) -> SysResult {
+    const MFD_CLOEXEC: u32 = 1;
+    let p = proc::current();
+    let name = user::read_cstr(p.space(), name, 249)?;
+    let node = Node::new(fs::Kind::Memory(spin::Mutex::new(fs::memfile::MemFile::new())), 0o777);
+    let file = OpenFile::new(Handle::Node(node), O_RDWR, alloc::format!("/memfd:{name} (deleted)"));
+    Ok(p.files().fds.insert(file, flags & MFD_CLOEXEC != 0, 0)? as u64)
+}
+
+/// fallocate(fd, mode, offset, len): only mode 0, making the file at least offset + len long.
+pub fn fallocate(fd: i32, mode: u32, offset: u64, len: u64) -> SysResult {
+    if mode != 0 {
+        return Err(EOPNOTSUPP);
+    }
+    let file = proc::current().files().fds.get(fd)?;
+    let Handle::Node(n) = &file.handle else { return Err(ENODEV) };
+    if n.kind_of() != Type::File {
+        return Err(ENODEV);
+    }
+    let end = offset.checked_add(len).ok_or(EFBIG)?;
+    if end > n.size() {
+        n.truncate(end)?;
+    }
     Ok(0)
 }
 

@@ -64,6 +64,7 @@ gcc -O2 -Wno-unused-result -o "$stage/bin/events-test" "$root/tests/events.c"
 gcc -O2 -Wno-unused-result -o "$stage/bin/pty-test" "$root/tests/ptys.c"
 gcc -O2 -Wno-unused-result -o "$stage/bin/jail-test" "$root/tests/jail.c"
 gcc -O2 -Wno-unused-result -o "$stage/bin/trace-test" "$root/tests/trace.c"
+gcc -O2 -Wno-unused-result -o "$stage/bin/memfd-test" "$root/tests/memfd.c"
 gcc -O2 -static -o "$stage/bin/spin" "$root/tests/spin.c"
 
 step "Windows layer (winload) and Windows test programs"
@@ -307,9 +308,17 @@ chmod 1777 "$stage/tmp" 2>/dev/null || true
 step "disk"
 # The disk keeps what's saved in /root between boots, so it's only made when missing
 # (delete out/disk.img to start over).
+# 1 GiB: Software's games and OpenGL/Vulkan (Mesa, with LLVM) are kept there. A smaller disk from
+# before is grown, its files kept (a copy of it is left as out/disk-before-grow.img first).
+disk_size=1024
 if [[ ! -f "$out/disk.img" ]]; then
-    mkfs.ext2 -q -L home -d "$root/disk" "$out/disk.img" 256M
-    echo "    made out/disk.img (256 MiB ext2)"
+    mkfs.ext2 -q -L home -d "$root/disk" "$out/disk.img" ${disk_size}M
+    echo "    made out/disk.img (1 GiB ext2)"
+elif (( $(stat -c %s "$out/disk.img") < disk_size * 1024 * 1024 )); then
+    [[ -f "$out/disk-before-grow.img" ]] || cp "$out/disk.img" "$out/disk-before-grow.img"
+    e2fsck -fy "$out/disk.img" >/dev/null 2>&1 || true
+    truncate -s ${disk_size}M "$out/disk.img"
+    resize2fs -f "$out/disk.img" >/dev/null 2>&1 && echo "    grew out/disk.img to 1 GiB (the old one is out/disk-before-grow.img)"
 fi
 
 step "ISO"

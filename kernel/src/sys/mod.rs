@@ -93,6 +93,8 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         74 | 75 | 162 => Ok(0), // fsync, fdatasync, sync: everything is in memory
         76 => fs::truncate_path(a[0], a[1]),
         77 => fs::ftruncate(a[0] as i32, a[1]),
+        285 => fs::fallocate(a[0] as i32, a[1] as u32, a[2], a[3]),
+        319 => fs::memfd_create(a[0], a[1] as u32),
         79 => fs::getcwd(a[0], a[1] as usize),
         80 => fs::chdir(a[0]),
         81 => fs::fchdir(a[0] as i32),
@@ -172,6 +174,11 @@ fn call(frame: &mut TrapFrame, n: u64, a: [u64; 6]) -> SysResult {
         234 => process::tkill(a[1] as u32, a[2] as usize), // tgkill: the thread id is unique already
         201 => misc::time(a[0]),
         202 => crate::proc::futex::futex(a[0], a[1] as u32, a[2] as u32, a[3], a[4], a[5] as u32),
+        141 => misc::setpriority(),
+        143 => misc::sched_getparam(a[1]),
+        144 => misc::sched_setscheduler(),
+        145 => misc::sched_getscheduler(),
+        203 => misc::sched_setaffinity(a[1] as usize, a[2]),
         204 => misc::sched_getaffinity(a[1] as usize, a[2]),
         213 => if (a[0] as i32) > 0 { epoll::create(0) } else { Err(EINVAL) }, // epoll_create(size)
         217 => fs::getdents64(a[0] as i32, a[1], a[2] as usize),

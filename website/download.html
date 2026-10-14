@@ -1,0 +1,90 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Download - KernelProject2</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="wrap">
+
+<div id="top">
+<pre class="logo"> ██╗  ██╗<b>██████╗ </b>
+ ██║ ██╔╝<b>╚════██╗</b>
+ █████╔╝ <b> █████╔╝</b>
+ ██╔═██╗ <b>██╔═══╝ </b>
+ ██║  ██╗<b>███████╗</b>
+ ╚═╝  ╚═╝<b>╚══════╝</b></pre>
+  <div>
+    <a class="name" href="index.html">KernelProject2</a>
+    <p class="tag">root:~# <span>a kernel that runs Linux programs as they are</span></p>
+  </div>
+</div>
+
+<ul id="menu">
+  <li><a href="index.html">Home</a></li>
+  <li><a href="about.html">About</a></li>
+  <li><a href="screenshots.html">Screenshots</a></li>
+  <li><a class="here" href="download.html">Download</a></li>
+  <li><a href="https://github.com/XenoTechWorks/KernelProject2">Source</a></li>
+</ul>
+
+<div id="body">
+<div id="main">
+
+  <h1>Download</h1>
+
+  <p>There are no prebuilt images yet, so you build it from source. It runs in QEMU.</p>
+
+  <h2>What you need</h2>
+  <p>Linux, or WSL on Windows. On Ubuntu 24.04:</p>
+<pre>sudo apt install qemu-system-x86 xorriso cpio gcc g++ gcc-mingw-w64-x86-64
+rustup toolchain install nightly --component rust-src --target x86_64-unknown-none
+git clone --depth=1 --branch=v11.2.1-binary https://codeberg.org/Limine/Limine.git ~/tools/limine
+make -C ~/tools/limine</pre>
+  <p>You also need Zig 0.17, unpacked in <code>~/tools/zig-x86_64-linux-0.17.0</code> (or point
+  <code>ZIG=</code> at it).</p>
+
+  <h2>Build and run</h2>
+<pre>git clone https://github.com/XenoTechWorks/KernelProject2
+cd KernelProject2
+./build.sh
+./run.sh</pre>
+
+  <p><code>build.sh</code> builds the kernel and the tools and copies in the Linux programs it finds
+  on your machine, along with their libraries. Two programs are big, so they're optional:</p>
+<pre>WITH_PYTHON=1 ./build.sh   # Python and its standard library
+WITH_GDB=1 ./build.sh      # gdb</pre>
+
+  <p><code>./run.sh</code> starts it with 4 CPUs (<code>CPUS=2 ./run.sh</code> for fewer),
+  <code>./run.sh --text</code> without a window or the desktop, and
+  <code>./run.sh --installed disk.img</code> boots a disk you installed onto.</p>
+
+  <h2>Once it's running</h2>
+  <p>You get Vela, the desktop, with a Welcome window to start from. The Terminal in the dock is
+  the shell: try <code>help</code>, <code>ls /bin</code> or <code>fastfetch</code>. To put the
+  system on a disk, use Install in the star menu. Your files in <code>/root</code> are kept on a
+  disk image between boots.</p>
+
+  <h2>Running the tests</h2>
+<pre>python3 tests/smoke.py</pre>
+  <p>The other tests are next to it in <code>tests/</code>.</p>
+
+</div>
+
+<div id="side">
+  <div class="box">
+    <h3>Source</h3>
+    <div>
+      <a class="button" href="https://github.com/XenoTechWorks/KernelProject2">View on GitHub</a>
+    </div>
+  </div>
+</div>
+</div>
+
+<div id="foot">KernelProject2 by XenoTechWorks &middot; <a href="https://github.com/XenoTechWorks/KernelProject2">GitHub</a></div>
+
+</div>
+</body>
+</html>

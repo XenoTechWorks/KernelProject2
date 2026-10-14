@@ -225,6 +225,12 @@ fn jobLine(j: *Job, l: []const u8) void {
         var words = std.mem.tokenizeScalar(u8, l["progress ".len..], ' ');
         j.got = std.fmt.parseInt(usize, words.next() orelse "0", 10) catch j.got;
         j.total = std.fmt.parseInt(usize, words.next() orelse "0", 10) catch j.total;
+    } else if (std.mem.startsWith(u8, l, "Downloading ")) {
+        // (a package it needs, first, or the one itself)
+        j.got = 0;
+        j.total = 0;
+        j.unpacking = false;
+        setStatus("{s}", .{std.mem.trimEnd(u8, l, ".")});
     } else if (std.mem.startsWith(u8, l, "Installing ")) {
         j.unpacking = true;
         setStatus("Installing {s}…", .{items[j.item].pkg.title});

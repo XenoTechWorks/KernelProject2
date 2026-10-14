@@ -17,6 +17,7 @@ pub mod cpio;
 pub mod eventfd;
 pub mod ext2;
 pub mod lock;
+pub mod memfile;
 pub mod gpt;
 pub mod notify;
 pub mod pipe;
@@ -70,6 +71,8 @@ pub enum Kind {
     /// A read-only file whose contents are in memory for good: /boot/kernel and
     /// /boot/initramfs.cpio, what the bootloader loaded (the installer copies them).
     Static(&'static [u8]),
+    /// A file in memory pages (memfd_create; fs/memfile.rs).
+    Memory(Mutex<memfile::MemFile>),
 }
 
 /// What kind of thing a node is, whatever file system it's on.
@@ -153,7 +156,7 @@ impl Node {
             Kind::Symlink(_) => Type::Symlink,
             Kind::Device(d) => Type::Device(*d),
             Kind::Socket => Type::Socket,
-            Kind::ProcMem(_) | Kind::Static(_) => Type::File,
+            Kind::ProcMem(_) | Kind::Static(_) | Kind::Memory(_) => Type::File,
             Kind::Ext2(..) => match self.ext2_info().map_or(0, |i| i.mode as u32 & S_IFMT_MASK) {
                 S_IFDIR => Type::Dir,
                 S_IFLNK => Type::Symlink,
@@ -229,6 +232,7 @@ impl Node {
     pub fn size(&self) -> u64 {
         match &self.kind {
             Kind::File(data) => data.lock().len() as u64,
+            Kind::Memory(m) => m.lock().size(),
             Kind::Symlink(target) => target.len() as u64,
             Kind::Dir(entries) => entries.lock().len() as u64 * 32,
             Kind::Device(_) | Kind::Socket | Kind::ProcMem(_) => 0,
@@ -267,6 +271,7 @@ impl Node {
                 Ok(n)
             }
             Kind::Ext2(fs, ino) if self.kind_of() == Type::File => fs.read_at(*ino, offset, buf),
+            Kind::Memory(m) => Ok(m.lock().read_at(offset, buf)),
             Kind::ProcMem(pid) => crate::proc::ptrace::mem_read(*pid, offset, buf),
             Kind::Static(data) => {
                 let pos = (offset as usize).min(data.len());
@@ -294,6 +299,7 @@ impl Node {
                 Ok(data.len())
             }
             Kind::Ext2(fs, ino) if self.kind_of() == Type::File => fs.write_at(*ino, offset, data),
+            Kind::Memory(m) => m.lock().write_at(offset, data),
             _ if self.is_dir() => Err(EISDIR),
             _ => Err(EINVAL),
         }
@@ -306,6 +312,7 @@ impl Node {
                 self.touch();
                 Ok(())
             }
+            Kind::Memory(m) => m.lock().truncate(len),
             Kind::Ext2(fs, ino) if self.kind_of() == Type::File => fs.truncate(*ino, len),
             _ if self.is_dir() => Err(EISDIR),
             _ => Err(EINVAL),

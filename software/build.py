@@ -43,7 +43,7 @@ libdir = "lib/x86_64-linux-gnu"
 SKIP = re.compile(r"^(libc6|libgcc-s1|libstdc\+\+6|libsdl2-2\.0-0|libgl|libegl|libgles|libglx|libgbm|mesa|"
                   r"libx11|libxcb|libxext|libxrandr|libxi|libxcursor|libxfixes|libxss|libxkb|libwayland|"
                   r"libdecor|libdrm|libpulse|libasound2|libpipewire|libdbus|libsystemd|libudev|libibus|"
-                  r"libvulkan|x11-|xkb-data|libsndio|libjack|debconf|cdebconf|dpkg|perl|fonts-|libllvm|"
+                  r"libvulkan|x11-|xkb-data|libjack|debconf|cdebconf|dpkg|perl|fonts-|libllvm|"
                   r".*soundfont.*|wamerican.*|dictionaries-common|miscfiles|emacsen-common)")
 # Parts of a .deb nobody here reads.
 PRUNE = ("usr/share/man", "usr/share/bash-completion", "etc/init.d", "usr/lib/systemd", "usr/share/info", "usr/share/menu", "usr/share/lintian", "usr/share/metainfo",
@@ -120,7 +120,7 @@ def files_under(tree):
     return sorted(found)
 
 
-def build(name, spec, sdl):
+def build(name, spec, sdl, built):
     tree = f"{cache}/build/{name}"
     shutil.rmtree(tree, ignore_errors=True)
     os.makedirs(tree)
@@ -152,6 +152,30 @@ def build(name, spec, sdl):
             f.write(text)
         os.chmod(path, 0o755 if text.startswith("#!") else 0o664)
 
+    # Libraries go where the system keeps its own (/lib/x86_64-linux-gnu), which the dynamic
+    # linker searches; folders of plugins in /usr/lib/x86_64-linux-gnu stay where they are.
+    multiarch = os.path.join(tree, "usr", libdir)
+    if os.path.isdir(multiarch):
+        os.makedirs(os.path.join(tree, libdir), exist_ok=True)
+        for entry in os.listdir(multiarch):
+            here_ = os.path.join(multiarch, entry)
+            if os.path.islink(here_) or os.path.isfile(here_):
+                os.rename(here_, os.path.join(tree, libdir, entry))
+        if not os.listdir(multiarch):
+            os.removedirs(multiarch)
+
+    # Packages it depends on (built already) provide libraries for it too.
+    dep_trees = [built[d][0] for d in spec.get("depends", [])]
+
+    # Its own build step, with build-only .debs (headers, compilers) unpacked for it.
+    if "script" in spec:
+        tools = [unpacked(deb) for deb in fetch(spec.get("tools", []))]
+        env = dict(os.environ, TREE=tree, SDL_BUILD=os.path.expanduser("~/.cache/kernelproject2/sdl2/build"),
+                   TOOLS=" ".join(tools), DEP_TREES=" ".join(dep_trees))
+        result = subprocess.run(["bash", os.path.join(here, spec["script"])], env=env, capture_output=True, text=True)
+        if result.returncode != 0:
+            fail(f"{name}: {spec['script']} failed:\n{result.stdout}{result.stderr}")
+
     # The libraries its programs need that the system doesn't have, from this machine or from the
     # dependencies' .debs.
     dep_dirs = []
@@ -161,7 +185,8 @@ def build(name, spec, sdl):
             if os.path.isdir(f"{src}/{d}"):
                 dep_dirs.append(f"{src}/{d}")
     own_dirs = sorted({os.path.dirname(os.path.join(tree, r)) for r in files_under(tree) if ".so" in os.path.basename(r)})
-    env = dict(os.environ, LD_LIBRARY_PATH=":".join([sdl, *own_dirs, *dep_dirs]))
+    provided = [os.path.join(t, libdir) for t in dep_trees]
+    env = dict(os.environ, LD_LIBRARY_PATH=":".join([sdl, *own_dirs, *provided, *dep_dirs]))
     for rel in files_under(tree):
         path = os.path.join(tree, rel)
         if not is_elf(path):
@@ -174,7 +199,7 @@ def build(name, spec, sdl):
             if not m:
                 continue
             soname, lib = m.groups()
-            if lib.startswith(tree) or has_library(soname):
+            if lib.startswith(tree) or has_library(soname) or any(lib.startswith(t) for t in dep_trees):
                 continue
             dest = os.path.join(tree, libdir, soname)
             if not os.path.exists(dest):
@@ -289,7 +314,10 @@ def main():
     built = {}
     for name, spec in catalog.items():
         print(f"    {name}")
-        built[name] = build(name, spec, sdl)
+        for dep in spec.get("depends", []):
+            if dep not in built:
+                fail(f"{name} depends on {dep}, which has to come before it in packages.toml")
+        built[name] = build(name, spec, sdl, built)
     base = stage_paths()
     files = {name: files_under(tree) for name, (tree, _) in built.items()}
 
@@ -301,6 +329,8 @@ def main():
         fields = [("Package", name), ("Title", spec["title"]), ("Category", spec["category"]),
                   ("Version", version), ("Installed-Size", installed), ("Run", spec["run"]),
                   ("Terminal", "yes" if spec.get("terminal") else "no"), ("About", spec["about"])]
+        if spec.get("depends"):
+            fields.append(("Depends", ", ".join(spec["depends"])))
         pic = icon(spec, tree)
         size = write_package(name, tree, paragraph(fields), links, pic)
         shutil.copy(pic, os.path.join(out, "icons", name + ".png"))

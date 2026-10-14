@@ -3,10 +3,13 @@
 use super::SysResult;
 use super::errno::*;
 use crate::mm::PAGE_SIZE;
-use crate::mm::paging::{NO_EXECUTE, USER, USER_END, WRITABLE};
+use crate::mm::paging::{NO_EXECUTE, PRESENT, SHARED, USER, USER_END, WRITABLE};
 use crate::proc::{self, fd::Handle};
-use crate::fs::Type;
+use crate::fs::{Kind, Type};
+use crate::mm::shared;
 
+const MAP_SHARED: u32 = 0x01;
+const MAP_SHARED_VALIDATE: u32 = 0x03;
 const MAP_FIXED: u32 = 0x10;
 const MAP_ANONYMOUS: u32 = 0x20;
 const MAP_FIXED_NOREPLACE: u32 = 0x100000;
@@ -50,19 +53,12 @@ pub fn mmap(addr: u64, len: u64, prot: u32, flags: u32, fd: i32, offset: u64) ->
     let len = len.checked_next_multiple_of(PAGE_SIZE).ok_or(ENOMEM)?;
     let p = proc::current();
 
-    // The file contents, read up front (mappings are private copies for now).
-    let file_data = if flags & MAP_ANONYMOUS == 0 {
+    // The file to map.
+    let file_node = if flags & MAP_ANONYMOUS == 0 {
         let file = p.files().fds.get(fd)?;
         let Handle::Node(node) = &file.handle else { return Err(EACCES) };
         match node.kind_of() {
-            Type::File => {
-                let size = node.size();
-                let want = len.min(size.saturating_sub(offset));
-                let mut data = alloc::vec![0u8; want as usize];
-                let n = node.read_at(offset, &mut data)?;
-                data.truncate(n);
-                Some(data)
-            }
+            Type::File => Some(node.clone()),
             Type::Device(_) => None, // /dev/zero
             _ => return Err(EACCES),
         }
@@ -90,12 +86,63 @@ pub fn mmap(addr: u64, len: u64, prot: u32, flags: u32, fd: i32, offset: u64) ->
 
     let space = p.space_mut();
     space.unmap_range(start, end);
+
+    // MAP_SHARED (or MAP_SHARED_VALIDATE): the same pages as the file's (a memory file), or new
+    // ones children made by fork keep sharing (anonymous). Other files are still copied in.
+    if matches!(flags & 0xF, MAP_SHARED | MAP_SHARED_VALIDATE) {
+        let memory = match &file_node {
+            Some(node) => match &node.kind {
+                Kind::Memory(m) => Some(m),
+                _ => None,
+            },
+            None => None,
+        };
+        if memory.is_some() || flags & MAP_ANONYMOUS != 0 {
+            let mut va = start;
+            while va < end {
+                let page = match memory {
+                    Some(m) => match m.lock().page(offset + (va - start)) {
+                        Some(page) => {
+                            shared::hold(page);
+                            Some(page)
+                        }
+                        None => None, // past the file's end: a page of zeros, its own
+                    },
+                    None => Some(shared::alloc().ok_or(ENOMEM)?),
+                };
+                let ok = match page {
+                    Some(page) => space.map(va, page, page_flags(prot) | SHARED),
+                    None => space.map_zeroed(va, va + PAGE_SIZE, page_flags(prot)),
+                };
+                if !ok {
+                    space.unmap_range(start, end);
+                    return Err(ENOMEM);
+                }
+                va += PAGE_SIZE;
+            }
+            return Ok(start);
+        }
+    }
+
     if !space.map_zeroed(start, end, page_flags(prot)) {
         space.unmap_range(start, end);
         return Err(ENOMEM);
     }
-    if let Some(data) = file_data {
-        crate::mm::user::poke(space, start, &data)?;
+    if let Some(node) = file_node {
+        // A piece at a time, straight into the new pages: a big library (LLVM is 140 MB) never
+        // has to fit in the kernel's heap.
+        let want = len.min(node.size().saturating_sub(offset)) as usize;
+        let mut chunk = alloc::vec![0u8; want.min(128 << 10)];
+        let mut done = 0;
+        while done < want {
+            let n = (want - done).min(chunk.len());
+            let got = node.read_at(offset + done as u64, &mut chunk[..n])?;
+            if got == 0 {
+                break;
+            }
+            crate::mm::user::poke(space, start + done as u64, &chunk[..got])?;
+            done += got;
+        }
     }
     Ok(start)
 }
@@ -133,10 +180,16 @@ pub fn mremap(addr: u64, old_len: u64, new_len: u64, flags: u64) -> SysResult {
     }
     let mut at = 0;
     while at < old_len {
-        if let (Some((from, _)), Some((to, _))) = (space.translate(addr + at), space.translate(start + at)) {
-            unsafe {
-                core::ptr::copy_nonoverlapping(crate::mm::phys_to_virt(from), crate::mm::phys_to_virt(to), PAGE_SIZE as usize)
-            };
+        if let (Some((from, flags)), Some((to, _))) = (space.translate(addr + at), space.translate(start + at)) {
+            if flags & SHARED != 0 {
+                // Still the same page others hold, not a copy of it.
+                crate::mm::shared::hold(from);
+                space.map(start + at, from, flags & !PRESENT);
+            } else {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(crate::mm::phys_to_virt(from), crate::mm::phys_to_virt(to), PAGE_SIZE as usize)
+                };
+            }
         }
         at += PAGE_SIZE;
     }

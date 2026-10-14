@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KernelProject2</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="wrap">
+
+<div id="top">
+<pre class="logo"> ██╗  ██╗<b>██████╗ </b>
+ ██║ ██╔╝<b>╚════██╗</b>
+ █████╔╝ <b> █████╔╝</b>
+ ██╔═██╗ <b>██╔═══╝ </b>
+ ██║  ██╗<b>███████╗</b>
+ ╚═╝  ╚═╝<b>╚══════╝</b></pre>
+  <div>
+    <a class="name" href="index.html">KernelProject2</a>
+    <p class="tag">root:~# <span>a kernel that runs Linux programs as they are</span></p>
+  </div>
+</div>
+
+<ul id="menu">
+  <li><a class="here" href="index.html">Home</a></li>
+  <li><a href="about.html">About</a></li>
+  <li><a href="screenshots.html">Screenshots</a></li>
+  <li><a href="download.html">Download</a></li>
+  <li><a href="https://github.com/XenoTechWorks/KernelProject2">Source</a></li>
+</ul>
+
+<div id="body">
+<div id="main">
+
+  <p class="lead">KernelProject2 is a kernel written from scratch in Rust. It answers Linux's
+  system calls the way Linux does, so you can take a program out of Ubuntu, copy it in, and run
+  it. <a href="about.html">How it works</a></p>
+
+  <div class="thumbs">
+    <a href="screenshots.html#vela"><img src="images/vela.jpg" alt="The Vela desktop with a terminal open"></a>
+    <a href="screenshots.html#welcome"><img src="images/welcome.jpg" alt="Vela's Welcome window"></a>
+    <a href="screenshots.html#splash"><img src="images/splash.jpg" alt="The boot splash"></a>
+  </div>
+  <p class="more"><a href="screenshots.html">More screenshots</a></p>
+
+  <div class="note">
+    <b>New this week:</b> it boots straight into Vela, the desktop, now after Windows Vista: glass,
+    KDE's Oxygen icons, photo wallpapers and a Personalize window. There's a boot splash (any key
+    shows the <code>[&nbsp;&nbsp;OK&nbsp;&nbsp;]</code> lines), a Welcome window, an installer
+    that puts the system on a disk, and it runs on more than one CPU.
+    <a href="screenshots.html">See it</a>
+  </div>
+
+  <div class="post">
+    <h2>An installer, and more than one CPU</h2>
+    <p class="date">October 13, 2026</p>
+    <p><code>install</code> puts KernelProject2 on a hard disk so it starts without the ISO: a
+    GPT partition table, a FAT32 boot partition with the kernel, and an ext2 home that becomes
+    <code>/root</code>. All three are written by our own code, and the test checks the result
+    with Linux's own tools before booting it with UEFI firmware.</p>
+    <p>The kernel also starts every CPU now. Four busy programs on four CPUs finish in about the
+    time one takes alone. The kernel itself still runs on one CPU at a time, under one lock, which
+    is how Linux started out too.</p>
+  </div>
+
+  <h2>Recent changes</h2>
+  <table class="log">
+    <tr><td class="d">Oct 13</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/5957ffe">5957ffe</a></td><td>More than one CPU</td></tr>
+    <tr><td class="d">Oct 13</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/7184800">7184800</a></td><td>An installer: KernelProject2 on a disk, booting with UEFI</td></tr>
+    <tr><td class="d">Oct 13</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/e2c83be">e2c83be</a></td><td>Vela: a Welcome window, after Vista&rsquo;s Welcome Center</td></tr>
+    <tr><td class="d">Oct 13</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/559f370">559f370</a></td><td>A boot splash: Vela&rsquo;s orb, the name, a progress bar and the current step</td></tr>
+    <tr><td class="d">Oct 13</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/ff03817">ff03817</a></td><td>Boot messages like Linux&rsquo;s, Vela at boot, Personalize, dock tooltips</td></tr>
+    <tr><td class="d">Oct 13</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/efc3d8b">efc3d8b</a></td><td>Window frames after Windows Vista, with smooth titles</td></tr>
+    <tr><td class="d">Oct 13</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/a7a1cd3">a7a1cd3</a></td><td>Vela: Oxygen icons, Vista-style glass, and our own PNG decoder</td></tr>
+    <tr><td class="d">Oct 13</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/c35dcd8">c35dcd8</a></td><td>Vela: 15 photo wallpapers, a picker, and our own JPEG decoder</td></tr>
+    <tr><td class="d">Oct 13</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/b3af1f2">b3af1f2</a></td><td>Vela: a photo of the Vela supernova remnant as the wallpaper</td></tr>
+    <tr><td class="d">Oct 13</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/24e5bb4">24e5bb4</a></td><td>Vela: a desktop, and a terminal in a window</td></tr>
+    <tr><td class="d">Oct 12</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/d6da97b">d6da97b</a></td><td>Run Ubuntu's gdb: breakpoints, single steps, attaching</td></tr>
+    <tr><td class="d">Oct 12</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/c9f7686">c9f7686</a></td><td>Add inotify</td></tr>
+    <tr><td class="d">Oct 12</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/6957475">6957475</a></td><td>Add ptrace; run Ubuntu's strace</td></tr>
+    <tr><td class="d">Oct 12</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/4a82267">4a82267</a></td><td>Add job control: stopping, continuing, Ctrl+Z, jobs, fg and bg</td></tr>
+    <tr><td class="d">Oct 12</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/53b3f6f">53b3f6f</a></td><td>Add timerfd, pidfd and waitid</td></tr>
+    <tr><td class="d">Oct 12</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/d559135">d559135</a></td><td>Add chroot; run Ubuntu's sshd inside</td></tr>
+    <tr><td class="d">Oct 12</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/0fc5528">0fc5528</a></td><td>Add pseudo-terminals; run script and tmux</td></tr>
+    <tr><td class="d">Oct 11</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/3ab9708">3ab9708</a></td><td>Add epoll, eventfd, Unix sockets and real timers; run OpenSSH's client</td></tr>
+    <tr><td class="d">Oct 11</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/529aea9">529aea9</a></td><td>Run Chocolate Doom, through our own SDL 2 video driver</td></tr>
+    <tr><td class="d">Oct 11</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/91b6168">91b6168</a></td><td>TCP, and Ubuntu's own curl over it (HTTPS too)</td></tr>
+    <tr><td class="d">Oct 11</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/93f0d33">93f0d33</a></td><td>Python, with its standard library</td></tr>
+    <tr><td class="d">Oct 11</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/1b9a009">1b9a009</a></td><td>Accounts: real users, passwords and permissions</td></tr>
+    <tr><td class="d">Oct 8</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/fe21bc1">fe21bc1</a></td><td>A graphical toolkit: pixel windows, smooth fonts and widgets</td></tr>
+    <tr><td class="d">Oct 8</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/690fb61">690fb61</a></td><td>Windows: run BusyBox for Windows unchanged</td></tr>
+    <tr><td class="d">Oct 8</td><td class="h"><a href="https://github.com/XenoTechWorks/KernelProject2/commit/96c5150">96c5150</a></td><td>Run fastfetch: /proc, /sys, SMBIOS, and an 8x16 UTF-8 console</td></tr>
+  </table>
+  <p class="more"><a href="https://github.com/XenoTechWorks/KernelProject2/commits/main">Full history</a></p>
+
+</div>
+
+<div id="side">
+  <div class="box">
+    <a class="button" href="download.html">Download</a>
+  </div>
+
+  <div class="box">
+    <h3>Status</h3>
+    <dl>
+      <dt>Version</dt><dd>0.1.0</dd>
+      <dt>Syscalls</dt><dd>about 150</dd>
+      <dt>Runs in</dt><dd>QEMU</dd>
+      <dt>CPUs</dt><dd>up to 16</dd>
+      <dt>Installs</dt><dd>to disk (UEFI)</dd>
+      <dt>Desktop</dt><dd>Vela</dd>
+      <dt>Written in</dt><dd>Rust, Zig, C++</dd>
+    </dl>
+  </div>
+
+  <div class="box">
+    <h3>Runs unchanged</h3>
+    <ul>
+      <li>fastfetch</li>
+      <li>git</li>
+      <li>curl</li>
+      <li>ssh, sshd</li>
+      <li>tmux</li>
+      <li>Python</li>
+      <li>strace, gdb</li>
+      <li>Chocolate Doom</li>
+      <li>BusyBox for Windows</li>
+    </ul>
+  </div>
+</div>
+</div>
+
+<div id="foot">KernelProject2 by XenoTechWorks &middot; <a href="https://github.com/XenoTechWorks/KernelProject2">GitHub</a></div>
+
+</div>
+</body>
+</html>

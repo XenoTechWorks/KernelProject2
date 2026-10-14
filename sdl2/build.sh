@@ -54,7 +54,9 @@ patch("src/audio/dummy/SDL_dummyaudio.c",
 PATCH
 
     options=(-DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=ON -DSDL_DUMMYVIDEO=ON -DSDL_DUMMYAUDIO=ON -DSDL_DISKAUDIO=ON)
-    for off in X11 WAYLAND KMSDRM OPENGL OPENGLES VULKAN RPI VIVANTE DIRECTFB OFFSCREEN \
+    # OpenGL and Vulkan on: our driver provides them, through Mesa (Software's "mesa" package).
+    options+=(-DSDL_OPENGL=ON -DSDL_VULKAN=ON)
+    for off in X11 WAYLAND KMSDRM OPENGLES RPI VIVANTE DIRECTFB OFFSCREEN \
         PULSEAUDIO PIPEWIRE ALSA JACK SNDIO OSS LIBSAMPLERATE DBUS IBUS FCITX HIDAPI LIBUDEV \
         TEST STATIC; do
         options+=("-DSDL_$off=OFF")

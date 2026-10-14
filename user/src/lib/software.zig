@@ -35,6 +35,8 @@ pub const Package = struct {
     /// Download, and unpacked, in bytes.
     size: usize = 0,
     installed_size: usize = 0,
+    /// Other packages it needs, comma-separated ("mesa, neverball").
+    depends: []const u8 = "",
 };
 
 /// One paragraph of an index (or a package's .package/info).
@@ -54,6 +56,7 @@ pub fn parseOne(paragraph: []const u8) Package {
         if (std.mem.eql(u8, key, "Terminal")) p.terminal = std.mem.eql(u8, value, "yes");
         if (std.mem.eql(u8, key, "Size")) p.size = std.fmt.parseInt(usize, value, 10) catch 0;
         if (std.mem.eql(u8, key, "Installed-Size")) p.installed_size = std.fmt.parseInt(usize, value, 10) catch 0;
+        if (std.mem.eql(u8, key, "Depends")) p.depends = value;
     }
     return p;
 }
@@ -71,6 +74,31 @@ pub fn parseIndex(text: []const u8, out: []Package) usize {
         }
     }
     return n;
+}
+
+/// The names in a Depends list, one at a time.
+pub fn dependencies(p: Package) std.mem.TokenIterator(u8, .any) {
+    return std.mem.tokenizeAny(u8, p.depends, ", ");
+}
+
+/// An installed package that needs `name`, if there is one (its name into `buf`).
+pub fn neededBy(name: []const u8, buf: []u8) ?[]const u8 {
+    var names_buf: [8192]u8 = undefined;
+    var names: [256][]const u8 = undefined;
+    const n = installedNames(&names_buf, &names);
+    for (names[0..n]) |other| {
+        const info = installedInfo(other) orelse continue;
+        defer std.heap.page_allocator.free(info);
+        var deps = dependencies(parseOne(info));
+        while (deps.next()) |d| {
+            if (std.mem.eql(u8, d, name)) {
+                const len = @min(other.len, buf.len);
+                @memcpy(buf[0..len], other[0..len]);
+                return buf[0..len];
+            }
+        }
+    }
+    return null;
 }
 
 /// Names go into paths: lowercase letters, digits and - . + only.
