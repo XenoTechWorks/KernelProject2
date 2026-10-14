@@ -142,14 +142,14 @@ with Machine() as m:
     time.sleep(2)
     check("Escape closes it", screen(m)[spot[1]][spot[0]] == closed)
 
-    # Personalize: the star menu's row after the apps (nine of them: Doom and the installer are in the image).
+    # Personalize: the star menu's row after the apps (ten of them: Doom and the installer are in the image).
     PZ_W, PZ_H = 470, 414
     pzx, pzy = (W - PZ_W) // 2, (H - PZ_H) // 2 - 20
 
     def open_personalize():
         click(m, *ORB)
         time.sleep(3)
-        click(m, 6 + 8 + 100, BAR_H + 6 + 70 + 13 + 9 * 42 + 19)
+        click(m, 6 + 8 + 100, BAR_H + 6 + 70 + 13 + 10 * 42 + 19)
         time.sleep(4)
 
     header = (W // 2, BAR_H + 10)  # the maximized terminal's header, while it has the keyboard

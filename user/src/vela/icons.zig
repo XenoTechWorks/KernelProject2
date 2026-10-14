@@ -23,7 +23,8 @@ pub fn fileName(which: Which) []const u8 {
             .widgets => "preferences-desktop",
             .eyes => "applications-toys",
             .doom => "applications-games",
-            .installer => "system-software-install",
+            .software => "system-software-install",
+            .installer => "drive-harddisk",
         },
         .extra => |e| switch (e) {
             .wallpaper => "preferences-desktop-wallpaper",

@@ -13,6 +13,7 @@
 
 #ifdef SDL_VIDEO_DRIVER_DUMMY
 
+#include "SDL_hints.h"
 #include "SDL_video.h"
 #include "../SDL_sysvideo.h"
 #include "../../events/SDL_events_c.h"
@@ -151,6 +152,23 @@ static void KP2_SetWindowSize(_THIS, SDL_Window *window)
     }
     size[0] = window->w;
     size[1] = window->h;
+    if (ioctl(data->fd, WINDOW_PIXELS, size) == 0) {
+        window->w = (int)size[0];
+        window->h = (int)size[1];
+    }
+}
+
+/* "Fullscreen" is a window as big as a window can be (the display's size, see KP2_VideoInit):
+   there's no taking the screen from the desktop. Leaving it goes back to the size before. */
+static void KP2_SetWindowFullscreen(_THIS, SDL_Window *window, SDL_VideoDisplay *display, SDL_bool fullscreen)
+{
+    KP2_Window *data = (KP2_Window *)window->driverdata;
+    Uint32 size[2];
+    if (!data) {
+        return;
+    }
+    size[0] = fullscreen ? display->desktop_mode.w : window->windowed.w;
+    size[1] = fullscreen ? display->desktop_mode.h : window->windowed.h;
     if (ioctl(data->fd, WINDOW_PIXELS, size) == 0) {
         window->w = (int)size[0];
         window->h = (int)size[1];
@@ -319,16 +337,34 @@ static void KP2_PumpEvents(_THIS)
 static int KP2_VideoInit(_THIS)
 {
     SDL_DisplayMode mode;
+    Uint32 size[2] = { 65535, 65535 };
+    int fd;
 
     SDL_zero(mode);
     mode.format = SDL_PIXELFORMAT_RGB888;
+    /* The display is the biggest window there can be (the screen less a window's frame), so
+       programs that size themselves to the display, or go fullscreen, fit in a window exactly.
+       The kernel makes the size asked for fit; a window isn't shown until something is drawn in
+       it, so this one never appears. */
     mode.w = 1280;
     mode.h = 800;
+    fd = open("/dev/window", O_RDWR | O_CLOEXEC);
+    if (fd >= 0) {
+        if (ioctl(fd, WINDOW_PIXELS, size) == 0) {
+            mode.w = (int)size[0];
+            mode.h = (int)size[1];
+        }
+        close(fd);
+    }
     mode.refresh_rate = 60;
     if (SDL_AddBasicVideoDisplay(&mode) < 0) {
         return -1;
     }
     SDL_AddDisplayMode(&_this->displays[0], &mode);
+    /* There's no GPU: the software renderer is the only one. Games that ask SDL_CreateRenderer
+       for an accelerated renderer would otherwise get none at all, so have them use it (unless
+       told otherwise with SDL_RENDER_DRIVER). Naming a driver this way skips the flags check. */
+    SDL_SetHintWithPriority(SDL_HINT_RENDER_DRIVER, "software", SDL_HINT_DEFAULT);
     return 0;
 }
 
@@ -360,6 +396,7 @@ static SDL_VideoDevice *KP2_CreateDevice(void)
     device->CreateSDLWindow = KP2_CreateWindow;
     device->SetWindowTitle = KP2_SetWindowTitle;
     device->SetWindowSize = KP2_SetWindowSize;
+    device->SetWindowFullscreen = KP2_SetWindowFullscreen;
     device->DestroyWindow = KP2_DestroyWindow;
     device->CreateWindowFramebuffer = KP2_CreateWindowFramebuffer;
     device->UpdateWindowFramebuffer = KP2_UpdateWindowFramebuffer;

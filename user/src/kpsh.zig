@@ -412,9 +412,12 @@ fn setSignal(sig: usize, handler: usize) void {
 fn runInChild(cmd: *const Command, background: bool, pgid: usize) noreturn {
     // Its own process group, so Ctrl+C and Ctrl+Z reach the job and not the shell. A job in front
     // takes the terminal itself too: the shell does the same, but the child may run first, and
-    // reading the terminal before it has it would stop it (SIGTTIN).
-    _ = sys.syscall2(sys.nr.setpgid, 0, pgid);
-    if (!background) giveTerminal(if (pgid == 0) sys.syscall0(sys.nr.getpid) else pgid);
+    // reading the terminal before it has it would stop it (SIGTTIN). Only with job control: in
+    // a script or `kpsh -c` it stays in the shell's group, which has the terminal (if anyone).
+    if (job_control) {
+        _ = sys.syscall2(sys.nr.setpgid, 0, pgid);
+        if (!background) giveTerminal(if (pgid == 0) sys.syscall0(sys.nr.getpid) else pgid);
+    }
     if (background) {
         // A background job doesn't read the terminal: its input is /dev/null unless redirected.
         switch (sys.open("/dev/null", sys.O_RDONLY, 0)) {
@@ -537,8 +540,11 @@ fn waitJob(job: Job) u8 {
     var status: u8 = 0;
     while (true) {
         var raw: u32 = 0;
+        // The job's process group; without job control there isn't one (its processes are in
+        // the shell's), so any child, until the job's last has ended.
         const minus_pgid: usize = @bitCast(-@as(isize, @intCast(job.pgid)));
-        const r = sys.check(sys.syscall4(sys.nr.wait4, minus_pgid, @intFromPtr(&raw), WUNTRACED, 0));
+        const which: usize = if (job_control) minus_pgid else @bitCast(@as(isize, -1));
+        const r = sys.check(sys.syscall4(sys.nr.wait4, which, @intFromPtr(&raw), WUNTRACED, 0));
         const pid = switch (r) {
             .ok => |pid| pid,
             .err => |e| if (e == sys.EINTR) continue else break, // ECHILD: all done
@@ -562,6 +568,7 @@ fn waitJob(job: Job) u8 {
             status = @intCast(128 + sig);
             if (describeSignal(sig)) |text| rt.err.print("{s}\n", .{text});
         }
+        if (!job_control) break; // (the rest of a pipeline ended before its last, or will be collected later)
     }
     forgetJob(job.pgid);
     return status;
@@ -671,6 +678,65 @@ fn waitJobs(cmd: *const Command) u8 {
     return status;
 }
 
+/// A signal by number ("9") or name ("KILL", "SIGKILL").
+fn signalNumber(s: []const u8) ?usize {
+    if (std.fmt.parseInt(usize, s, 10)) |n| return if (n < 65) n else null else |_| {}
+    const name = if (std.mem.startsWith(u8, s, "SIG")) s[3..] else s;
+    const names = [_]struct { []const u8, usize }{
+        .{ "HUP", 1 },   .{ "INT", 2 },   .{ "QUIT", 3 },  .{ "KILL", 9 },  .{ "USR1", 10 },
+        .{ "USR2", 12 }, .{ "TERM", 15 }, .{ "CONT", 18 }, .{ "STOP", 19 }, .{ "TSTP", 20 },
+    };
+    for (names) |n| {
+        if (std.ascii.eqlIgnoreCase(name, n[0])) return n[1];
+    }
+    return null;
+}
+
+/// `kill [-SIGNAL] PID|%n...`: sends a signal (TERM unless another is named) to a process, or to
+/// every process in a job.
+fn killCommand(cmd: *const Command) u8 {
+    var sig: usize = 15;
+    var i: usize = 1;
+    if (cmd.arg(1)) |a| if (a.len > 1 and a[0] == '-') {
+        sig = signalNumber(a[1..]) orelse {
+            rt.err.print("kpsh: kill: {s}: no such signal\n", .{a[1..]});
+            return 1;
+        };
+        i = 2;
+    };
+    if (cmd.arg(i) == null) {
+        rt.err.write("usage: kill [-SIGNAL] PID|%JOB...\n");
+        return 2;
+    }
+    var status: u8 = 0;
+    while (cmd.arg(i)) |target| : (i += 1) {
+        // A job is its process group: a negative pid reaches all of it. (Without job control
+        // there's no group of its own: its last process, then.)
+        const pid: isize = if (target.len > 0 and target[0] == '%') blk: {
+            const number = std.fmt.parseInt(usize, target[1..], 10) catch 0;
+            for (&jobs) |*slot| {
+                if (slot.*) |*j| if (j.number == number)
+                    break :blk if (job_control) -@as(isize, @intCast(j.pgid)) else @as(isize, @intCast(j.last));
+            }
+            rt.err.print("kpsh: kill: {s}: no such job\n", .{target});
+            status = 1;
+            continue;
+        } else std.fmt.parseInt(isize, target, 10) catch {
+            rt.err.print("kpsh: kill: {s}: not a process id or %job\n", .{target});
+            status = 1;
+            continue;
+        };
+        switch (sys.check(sys.syscall2(sys.nr.kill, @bitCast(pid), sig))) {
+            .ok => {},
+            .err => |e| {
+                rt.complain("kill", target, e);
+                status = 1;
+            },
+        }
+    }
+    return status;
+}
+
 /// `bg`: a stopped job goes on, in the background.
 fn bgJob(cmd: *const Command) u8 {
     const job = pickJob(cmd) orelse return 1;
@@ -713,7 +779,7 @@ fn runPipeline(commands: []Command, in_background: bool, label: []const u8) u8 {
         // The first process starts the job's group; the shell sets it too, so it's in place
         // whichever of the two runs first.
         if (pgid == 0) pgid = pid;
-        _ = sys.syscall2(sys.nr.setpgid, pid, pgid);
+        if (job_control) _ = sys.syscall2(sys.nr.setpgid, pid, pgid);
         if (i == 0 and !in_background) giveTerminal(pgid);
         last = pid;
         if (prev_read) |r| sys.close(r);
@@ -746,6 +812,7 @@ const help_text =
     \\  fg [%n]           bring a job back to the foreground
     \\  bg [%n]           let a stopped job go on in the background
     \\  wait [%n]         wait for background jobs to finish
+    \\  kill [-SIG] PID|%n  stop a process or a job (TERM, or -KILL, -INT, -9...)
     \\  exec PROG [ARGS]  become PROG (the shell is replaced by it)
     \\  exit [code]       leave the shell
     \\  help              this text
@@ -775,6 +842,7 @@ fn builtin(cmd: *const Command) ?u8 {
     if (eql(u8, name, "jobs")) return listJobs();
     if (eql(u8, name, "fg")) return fgJob(cmd);
     if (eql(u8, name, "bg")) return bgJob(cmd);
+    if (eql(u8, name, "kill")) return killCommand(cmd);
     if (eql(u8, name, "wait")) return waitJobs(cmd);
     if (eql(u8, name, "cd")) {
         var target = cmd.arg(1) orelse (getVar("HOME") orelse "/");

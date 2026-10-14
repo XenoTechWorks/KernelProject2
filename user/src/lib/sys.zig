@@ -138,6 +138,7 @@ pub fn errorText(e: u16) []const u8 {
     return switch (e) {
         1 => "Operation not permitted",
         2 => "No such file or directory",
+        3 => "No such process",
         4 => "Interrupted",
         8 => "Exec format error",
         9 => "Bad file descriptor",

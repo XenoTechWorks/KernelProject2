@@ -16,6 +16,8 @@ const wallpaper = @import("vela/wallpaper.zig");
 const glass = @import("vela/glass.zig");
 const settings = @import("vela/settings.zig");
 const welcome = @import("vela/welcome.zig");
+const installed = @import("vela/installed.zig");
+const icon = @import("lib/gui/icon.zig");
 const jpeg = @import("lib/jpeg.zig");
 const sys = rt.sys;
 pub const _start = rt._start;
@@ -345,6 +347,8 @@ fn showTooltip(slot: ?usize) void {
 // ---- the star menu ----
 
 const menu_w = 280;
+/// The second column, as in Vista's Start menu: the games and apps Software installed.
+const games_w = 250;
 const menu_head = 70;
 const menu_row = 42;
 
@@ -353,20 +357,50 @@ var menu_hover: ?usize = null;
 const menu_x = 6;
 const menu_y = bar_h + 6;
 
-/// Rows: each app, then "Personalize…" and "Leave Vela".
+/// Rows in the first column: each app, then "Personalize…" and "Leave Vela".
 fn menuRows() usize {
     return apps.count + 2;
 }
 
-fn menuRow(i: usize) Rect {
+/// Rows in the second column: what Software installed, as many as fit above the last row, which
+/// is "Get more in Software…".
+fn gameRows() usize {
+    const bottom = leftRow(menuRows() - 1).y - 10; // the line above the last row
+    const room: usize = @intCast(@divTrunc(bottom - menu_head + 4, menu_row));
+    return @min(installed.count, room) + 1;
+}
+
+fn moreRow() usize {
+    return menuRows() + gameRows() - 1;
+}
+
+fn allRows() usize {
+    return menuRows() + gameRows();
+}
+
+fn menuWidth() u32 {
+    return menu_w + games_w;
+}
+
+/// A row of the first column.
+fn leftRow(i: usize) Rect {
     const extra: i32 = if (i >= apps.count) 13 else 0; // below the line before the last two
     return .{ .x = 8, .y = menu_head + extra + @as(i32, @intCast(i)) * menu_row, .w = menu_w - 16, .h = menu_row - 4 };
 }
 
+fn menuRow(i: usize) Rect {
+    if (i < menuRows()) return leftRow(i);
+    // "Get more in Software…" at the bottom, level with "Leave Vela"; the games from the top.
+    const y = if (i == moreRow()) leftRow(menuRows() - 1).y else menu_head + @as(i32, @intCast(i - menuRows())) * menu_row;
+    return .{ .x = menu_w + 2, .y = y, .w = games_w - 12, .h = menu_row - 4 };
+}
+
 fn openMenu() void {
+    installed.scan();
     const h: u32 = @intCast(menuRow(menuRows() - 1).bottom() + 10);
-    var m = gui.Window.open("Vela", menu_w, h) orelse return;
-    if (!m.setRole(.popup, menu_x, menu_y, menu_w, h, 14)) {
+    const w = menuWidth();
+    var m = gui.Window.open("Vela", w, h) orelse return;
+    if (!m.setRole(.popup, menu_x, menu_y, w, h, 14)) {
         m.close();
         return;
     }
@@ -390,13 +424,37 @@ fn drawMenu() void {
     glass.orb(c, 33, 35, 15, false, icons.star);
     shadowText(c, 19, 58, 33, "Vela", text);
     shadowText(c, 12, 58, 51, "KernelProject2", dim);
-    for (0..menuRows()) |i| {
+    {
+        // The second column: a little darker, with a line between.
+        const col = Rect{ .x = menu_w - 4, .y = 10, .w = games_w - 6, .h = @as(i32, @intCast(c.h)) - 20 };
+        glass.tint(c, col, 9, 0x000000, 45);
+        glass.tint(c, .{ .x = menu_w - 5, .y = 18, .w = 1, .h = col.h - 16 }, 0, 0xffffff, 35);
+        shadowText(c, 15, @floatFromInt(menu_w + 10), 40, "Games & apps", text);
+        shadowText(c, 12, @floatFromInt(menu_w + 10), 57, "Installed with Software", dim);
+        const more = menuRow(moreRow());
+        glass.tint(c, .{ .x = more.x + 8, .y = more.y - 8, .w = more.w - 16, .h = 1 }, 0, 0xffffff, 40);
+        if (installed.count == 0) {
+            shadowText(c, 13, @floatFromInt(menu_w + 10), menu_head + 22, "Nothing yet: the games and", dim);
+            shadowText(c, 13, @floatFromInt(menu_w + 10), menu_head + 40, "apps you install show up here.", dim);
+        }
+    }
+    for (0..allRows()) |i| {
         const r = menuRow(i);
         if (menu_hover == i) {
             glass.tint(c, r, 5, 0x9cc8ff, 55);
             glass.outline(c, r, 5, 0xcfe4ff, 110);
         }
-        if (i < apps.count) {
+        if (i >= menuRows()) {
+            var buf: [64]u8 = undefined;
+            if (moreRow() == i) {
+                _ = icon.draw(c, "system-software-install", r.x + 6, r.y + 3, 32);
+                shadowText(c, 14, @floatFromInt(r.x + 48), r.y + 24, "Get more in Software…", text);
+            } else {
+                const g = installed.list()[i - menuRows()];
+                if (g.picture) |pic| icon.image(c, pic, r.x + 6, r.y + 3, 32) else _ = icon.draw(c, "applications-games", r.x + 6, r.y + 3, 32);
+                shadowText(c, 14, @floatFromInt(r.x + 48), r.y + 24, shell.fit(&buf, g.title, 14, @floatFromInt(r.w - 54)), text);
+            }
+        } else if (i < apps.count) {
             const app = apps.list()[i];
             icons.draw(c, app.icon, r.x + 6, r.y + 3, 32);
             shadowText(c, 14, @floatFromInt(r.x + 48), r.y + 24, app.name, text);
@@ -419,8 +477,8 @@ fn menuEvent(e: gui.Event) void {
         .key => |k| switch (k.code) {
             27 => closeMenu(),
             13 => if (menu_hover) |i| choose(i),
-            gui.Key.down => setMenuHover(if (menu_hover) |i| (i + 1) % menuRows() else 0),
-            gui.Key.up => setMenuHover(if (menu_hover) |i| (i + menuRows() - 1) % menuRows() else menuRows() - 1),
+            gui.Key.down => setMenuHover(if (menu_hover) |i| (i + 1) % allRows() else 0),
+            gui.Key.up => setMenuHover(if (menu_hover) |i| (i + allRows() - 1) % allRows() else allRows() - 1),
             else => {},
         },
         // Clicking anywhere else takes the keyboard away from the menu: it closes.
@@ -431,7 +489,7 @@ fn menuEvent(e: gui.Event) void {
 }
 
 fn menuAt(x: i32, y: i32) ?usize {
-    for (0..menuRows()) |i| {
+    for (0..allRows()) |i| {
         if (menuRow(i).contains(x, y)) return i;
     }
     return null;
@@ -447,7 +505,12 @@ var leaving = false;
 
 fn choose(i: usize) void {
     closeMenu();
-    if (i < apps.count) {
+    if (moreRow() == i) {
+        shell.launch("/bin/software");
+    } else if (i >= menuRows()) {
+        const g = installed.list()[i - menuRows()];
+        shell.run(g.run, g.terminal);
+    } else if (i < apps.count) {
         shell.launch(apps.list()[i].path);
     } else if (i == apps.count) {
         openPersonalize();

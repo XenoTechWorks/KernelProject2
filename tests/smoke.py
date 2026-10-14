@@ -25,6 +25,8 @@ CHECKS = [
     ("kpsh -c 'echo $# $1 $0' name one two", "2 one name"),
     # "$@": each argument one word, even with a space in it.
     ("kpsh -c 'hello-static \"$@\"' name 'a b' c", "argument 2: c"),
+    ("kill 99999", "No such process"),
+    ("kill -NOPE 1", "no such signal"),
     ("cat /proc/meminfo", "MemTotal:"),
     ("ls /proc/self/", "cmdline"),
     ("fastfetch", "Kernel: Linux 6.12.0-kp2"),

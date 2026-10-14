@@ -31,7 +31,7 @@ find "$stage" -type f -exec chmod 644 {} +
 mkdir -p "$stage/usr"
 ln -s ../bin "$stage/usr/bin"
 ln -s ../sbin "$stage/usr/sbin"
-for program in init kpsh ls cat echo uname fileops kpfetch clock textclock widgets calc files edit textedit eyes gzip tar zip pkg users ping ifconfig host nc doom terminal vela install pictures; do
+for program in init kpsh ls cat echo uname fileops kpfetch clock textclock widgets calc files edit textedit eyes gzip tar zip pkg users ping ifconfig host nc doom terminal vela install pictures software; do
     dest="$stage/bin/$program"
     [[ $program == init ]] && dest="$stage/sbin/init"
     "$zig" build-exe "$root/user/src/$program.zig" -target x86_64-linux-none -O ${ZIG_MODE:-ReleaseSmall} -fstrip \

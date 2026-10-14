@@ -26,7 +26,7 @@ kernel answers those calls the way Linux does, the program can't tell the differ
   The disk is made by the real `mkfs.ext2`, and Linux's `e2fsck` checks it stays consistent.
 - Terminals: Linux's line discipline (editing, echo, Ctrl+C/D/U/W, raw mode via `termios`) on the
   screen and on the serial port, and pseudo-terminals for programs that run others (see The
-  command line). The screen understands the usual escape codes and 16 colors.
+  command line). The screen understands the usual escape codes, 16 colors and line drawing.
 - What event loops and servers are built on: `epoll` (level- and edge-triggered, one-shot),
   `eventfd`, `signalfd`, `timerfd`, `pidfd` (with `waitid`), Unix sockets (see Networking), timers
   that really go off (`alarm`, `setitimer`, and the timeouts of `poll`, `ppoll` and `epoll_wait`,
@@ -284,10 +284,12 @@ The same layout as Linux:
 
 - `init` (pid 1) shows the welcome text, starts the shell, and starts a new one if it exits.
 - `kpsh` is the shell (working name): pipes, `> >> < 2> 2>&1`, `; && ||`, quotes, `$VAR`, `$?`, `~`,
-  `cd`/`pwd`/`export`/`unset`/`env`/`exit`/`help`, scripts and `kpsh -c`, and job control: each
-  command line is a job in its own process group, Ctrl+Z stops the one in front, `jobs` lists
-  them, `fg` and `bg` carry them on, and `&` starts one in the background (which is stopped,
-  as on Linux, if it tries to read the terminal).
+  `cd`/`pwd`/`export`/`unset`/`env`/`exit`/`help`, scripts and `kpsh -c` (with arguments: `$1`,
+  `$#`, `$*`, `"$@"`), and job control: each command line is a job in its own process group,
+  Ctrl+Z stops the one in front, `jobs` lists them, `fg` and `bg` carry them on, `kill` signals
+  them (`kill %1`, `kill -KILL 42`), and `&` starts one in the background (which is stopped, as
+  on Linux, if it tries to read the terminal). Scripts and `kpsh -c` don't do job control, as
+  other shells don't: what they run stays in their process group, with their terminal.
 - Commands are separate programs, like coreutils: `ls` (with `-l -a -1`, colors, columns), `cat`,
   `echo`, `uname`, `mkdir -p`, `rm -r`, `touch`, `clear`.
 
@@ -422,7 +424,7 @@ shell), and you get:
 - glass, after Windows Vista: the bar, the dock and the menus show the wallpaper behind them,
   blurred and tinted, with a shine; the apps' icons are KDE's Oxygen icons;
 - a bar along the top: the orb with the star menu (every app, "Personalize…", and "Leave Vela" to
-  go back to the command line),
+  go back to the command line; beside them, the games and apps installed with Software),
   a button for each open window (click to bring it forward, again to minimize it), and the clock
   (UTC);
 - a dock of favorite apps at the bottom, with a dot under the ones that are running and each
@@ -475,6 +477,49 @@ built for Ubuntu load it instead. `build.sh` adds Doom when the build machine ha
 sudo apt install chocolate-doom freedoom cmake make gcc
 ./build.sh
 ```
+
+## Software: games and apps
+
+Software (in the star menu, or `software &`) installs games and apps: pick one, press Install,
+and Play or Open starts it. Text-mode ones open in a Terminal window. What's installed shows up
+in the star menu's second column too, and stays installed after a restart.
+
+| Games | |
+|---|---|
+| Crispy Doom | Doom in 3D at a higher resolution, playing Freedoom |
+| Freedoom: Phase 2 | 32 more levels, for Doom II's engine (`doom -iwad …/freedoom2.wad`) |
+| LBreakoutHD | bricks, paddle and ball, with bonuses and a hundred levels |
+| Kobo Deluxe | fly round space stations and blow them up from the inside |
+| NetHack | the Dungeons of Doom, in a terminal |
+| Bastet, nSnake, Moon Buggy, nInvaders, Greed | falling blocks, snake, a moon buggy, space invaders, a numbers maze |
+| BSD Games | Tetris, Robots, Worm, Backgammon, Trek and twenty more |
+
+and two apps, nano (a text editor) and CMatrix. From the shell:
+
+```sh
+pkg available           # what there is
+pkg get nethack         # download and install it
+nethack                 # (games go in /usr/games, which is on PATH)
+pkg remove nethack
+```
+
+They're Ubuntu 24.04's own packages, unchanged. `software/build.py` (run by `build.sh`) downloads
+the .debs named in `software/packages.toml` (never installing them on the build machine), keeps
+their files, adds the libraries their programs need that the system doesn't have, and writes one
+`.tar.gz` per game into `out/software` with an index and icons. `run.sh` serves that folder on
+port 8086, which QEMU's network shows the guest as `10.0.2.2:8086` (`server=URL` in
+`/root/.config/software.conf` points elsewhere).
+
+An installed package is unpacked onto the disk, into `/root/.local/software/NAME`, and the paths it
+names become symlinks into it (`/usr/games/nethack`, its folder in `/usr/lib/games`, ...). The root
+file system is rebuilt from the boot archive every boot, so init links them in again then. A file
+two packages both have (ncurses, which neither the system nor most games bring) comes from
+whichever was installed first, and passes to the other when that one is removed.
+
+The SDL games draw through our SDL 2 (see Doom). Games that ask for a fullscreen window get the
+biggest window there can be, and there is no sound yet: SDL's silent audio driver stands in, so
+games that need audio to start still do. Games that need OpenGL (SuperTux, Neverball, Xonotic) or
+X11 don't run yet, and neither does Steam (it's 32-bit, X11 and OpenGL/Vulkan underneath).
 
 ## Layout
 
@@ -539,6 +584,8 @@ python3 tests/boot.py     # the boot messages, the splash, starting Vela at boot
 python3 tests/install.py  # install onto a blank disk, check it from outside, boot it with UEFI
 python3 tests/files.py    # the file explorer: new folder, copy and paste, delete, details, pictures
 python3 tests/smp.py      # 4 CPUs: started, counted, and four programs at once in the time of one
+python3 tests/software.py # pkg get, run, still there after a restart, remove (serves out/software)
+python3 tests/software_app.py # Software: Install, Play, and the star menu's games column
 ```
 
 ## Roadmap
@@ -549,8 +596,8 @@ Roughly in order; each step is checked by running a real program.
    More CPUs work under one kernel lock; next, finer locks so the kernel itself runs in parallel,
    threads of one program on several CPUs (TLB shootdowns), and device interrupts through the
    I/O APIC.
-2. **More disk**: install programs onto the disk (a root file system on ext2 instead of the boot
-   archive), interrupt-driven I/O, and AHCI for real PCs.
+2. **More disk**: Software's packages already live on the disk; next, the whole root file system
+   on ext2 instead of the boot archive, interrupt-driven I/O, and AHCI for real PCs. And sound.
 3. **Run the targets**: fastfetch and git run; next then coreutils as a compatibility test.
 4. **More Windows**: BusyBox for Windows runs. Next: more real console programs (7-Zip), then
    windows and graphics.

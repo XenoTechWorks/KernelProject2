@@ -50,6 +50,23 @@ pub fn launch(path: [*:0]const u8) void {
     sys.exit(127);
 }
 
+/// Starts a command line (a program and its arguments, as Software's packages give it) through
+/// the shell, or in a Terminal window when it's a text-mode program.
+pub fn run(command: []const u8, in_terminal: bool) void {
+    var buf: [400]u8 = undefined;
+    const line = std.fmt.bufPrintSentinel(&buf, "{s}", .{command}, 0) catch return;
+    const pid = sys.syscall0(sys.nr.fork);
+    if (pid != 0) return;
+    _ = sys.syscall0(112); // setsid
+    _ = sys.syscall1(sys.nr.chdir, @intFromPtr("/root"));
+    const terminal = [_:null]?[*:0]const u8{ "terminal", "-e", line, null };
+    const shell = [_:null]?[*:0]const u8{ "kpsh", "-c", line, null };
+    const path: [*:0]const u8 = if (in_terminal) "/bin/terminal" else "/bin/kpsh";
+    const argv: [*:null]const ?[*:0]const u8 = if (in_terminal) &terminal else &shell;
+    _ = sys.syscall3(sys.nr.execve, @intFromPtr(path), @intFromPtr(argv), @intFromPtr(&env));
+    sys.exit(127);
+}
+
 /// Collects apps that have ended, so they don't stay around as zombies.
 pub fn reap() void {
     while (true) {

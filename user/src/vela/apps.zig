@@ -3,7 +3,7 @@
 
 const sys = @import("../lib/sys.zig");
 
-pub const Icon = enum { terminal, files, editor, calculator, clock, widgets, eyes, doom, installer };
+pub const Icon = enum { terminal, files, editor, calculator, clock, widgets, eyes, doom, software, installer };
 
 pub const App = struct {
     name: []const u8,
@@ -26,6 +26,7 @@ const catalog = [_]App{
     .{ .name = "Widgets", .path = "/bin/widgets", .icon = .widgets, .title = "Widgets" },
     .{ .name = "Eyes", .path = "/bin/eyes", .icon = .eyes, .title = "Eyes" },
     .{ .name = "Doom", .path = "/bin/doom", .icon = .doom, .title = "Doom", .needs = "/bin/chocolate-doom" },
+    .{ .name = "Software", .path = "/bin/software", .icon = .software, .title = "Software" },
     .{ .name = "Install", .path = "/bin/install", .icon = .installer, .title = "Install KernelProject2" },
 };
 

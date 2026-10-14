@@ -45,6 +45,12 @@ patch("src/video/SDL_video.c", "    &DUMMY_bootstrap,\n#ifdef SDL_INPUT_LINUXEV"
 patch("CMakeLists.txt",
       "file(GLOB VIDEO_DUMMY_SOURCES ${SDL2_SOURCE_DIR}/src/video/dummy/*.c)\n    list(APPEND SOURCE_FILES ${VIDEO_DUMMY_SOURCES})",
       "file(GLOB VIDEO_DUMMY_SOURCES ${SDL2_SOURCE_DIR}/src/video/dummy/*.c ${SDL2_SOURCE_DIR}/src/video/kernelproject2/*.c)\n    list(APPEND SOURCE_FILES ${VIDEO_DUMMY_SOURCES})")
+# There's no sound driver yet. SDL's silent one is normally used only when asked for by name, so
+# programs that start SDL's audio and video together (SDL_Init(VIDEO | AUDIO)) would fail
+# outright, video and all. Let it be picked like any other: they play, silently.
+patch("src/audio/dummy/SDL_dummyaudio.c",
+      '"dummy", "SDL dummy audio driver", DUMMYAUDIO_Init, SDL_TRUE',
+      '"dummy", "SDL dummy audio driver", DUMMYAUDIO_Init, SDL_FALSE')
 PATCH
 
     options=(-DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=ON -DSDL_DUMMYVIDEO=ON -DSDL_DUMMYAUDIO=ON -DSDL_DISKAUDIO=ON)

@@ -20,6 +20,8 @@ pub const DEFAULT_FG: u8 = 7;
 enum Escape {
     None,
     Esc,
+    /// ESC ( or ESC ): which character set G0 (0) or G1 (1) is to be.
+    Charset(u8),
     Csi { params: [u16; 8], count: usize, private: bool },
     /// Operating system command (ESC ] number ; text BEL), used for the window title.
     Osc(String),
@@ -52,6 +54,31 @@ pub struct Term {
     saved: (usize, usize),
     /// A UTF-8 character in progress: (bytes still expected, bits so far).
     utf8: (u8, u32),
+    /// Whether character sets G0 and G1 are the DEC line-drawing one (ESC ( 0, ESC ) 0), and
+    /// whether G1 is in use (Shift Out, ^N; Shift In, ^O, goes back to G0). Text-mode programs
+    /// draw boxes this way (ncurses' "alternate character set").
+    graphics: [bool; 2],
+    shifted: bool,
+}
+
+/// The DEC special graphics characters, from '_' up, as Unicode; and the few more the Linux
+/// console's set has below that (arrows and a block, for its terminfo entry).
+fn line_drawing(c: u32) -> u32 {
+    const SET: [u32; 32] = [
+        0x20, 0x25C6, 0x2592, 0x2409, 0x240C, 0x240D, 0x240A, 0xB0, // _ ` a b c d e f
+        0xB1, 0x2424, 0x240B, 0x2518, 0x2510, 0x250C, 0x2514, 0x253C, // g h i j k l m n
+        0x23BA, 0x23BB, 0x2500, 0x23BC, 0x23BD, 0x251C, 0x2524, 0x2534, // o p q r s t u v
+        0x252C, 0x2502, 0x2264, 0x2265, 0x3C0, 0x2260, 0xA3, 0xB7, // w x y z { | } ~
+    ];
+    match c {
+        0x5F..=0x7E => SET[(c - 0x5F) as usize],
+        0x2B => 0x2192, // + →
+        0x2C => 0x2190, // , ←
+        0x2D => 0x2191, // - ↑
+        0x2E => 0x2193, // . ↓
+        0x30 => 0x2588, // 0 █
+        _ => c,
+    }
 }
 
 impl Term {
@@ -77,6 +104,8 @@ impl Term {
             escape: Escape::None,
             saved: (0, 0),
             utf8: (0, 0),
+            graphics: [false; 2],
+            shifted: false,
         }
     }
 
@@ -123,8 +152,12 @@ impl Term {
                 b'7' => self.saved = (self.x, self.y),
                 b'8' => (self.x, self.y) = self.saved,
                 b'c' => self.reset(),
+                b'(' => self.escape = Escape::Charset(0),
+                b')' => self.escape = Escape::Charset(1),
                 _ => {}
             },
+            // '0' is the line-drawing set; anything else ('B', ASCII; 'U', the PC's) ordinary text.
+            Escape::Charset(g) => self.graphics[g as usize] = b == b'0',
             Escape::Osc(mut text) => match b {
                 0x07 => self.osc(&text),
                 0x1b => self.escape = Escape::OscEsc(text),
@@ -220,6 +253,8 @@ impl Term {
             b'\r' => self.move_to(0, self.y),
             0x08 => self.move_to(self.x.saturating_sub(1), self.y),
             b'\t' => self.move_to(((self.x / 8 + 1) * 8).min(self.cols - 1), self.y),
+            0x0E => self.shifted = true,  // Shift Out: G1
+            0x0F => self.shifted = false, // Shift In: G0
             0x07 => {}
             b if b >= 0x20 => self.printable(b as u32),
             _ => {}
@@ -230,6 +265,7 @@ impl Term {
         if self.x >= self.cols {
             self.newline();
         }
+        let c = if self.graphics[self.shifted as usize] { line_drawing(c) } else { c };
         let fg = if self.bold && self.fg < 8 { self.fg + 8 } else { self.fg };
         self.put(self.x, self.y, Cell { ch: c, fg, bg: self.bg });
         self.x += 1;
@@ -319,6 +355,7 @@ impl Term {
 
     fn reset(&mut self) {
         (self.fg, self.bg, self.bold) = (DEFAULT_FG, self.default_bg, false);
+        (self.graphics, self.shifted) = ([false; 2], false);
         self.move_to(0, 0);
         let len = self.cells.len();
         self.clear(0..len);
