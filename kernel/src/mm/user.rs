@@ -33,7 +33,7 @@ fn each_chunk(
         // The stack grows when a program touches it, and also when a system call does (a buffer
         // on the stack below what the program has used so far).
         use crate::proc::{STACK_LIMIT, STACK_TOP};
-        if va < STACK_TOP && va >= STACK_TOP - STACK_LIMIT && space.translate(va).is_none() {
+        if va < STACK_TOP && va >= STACK_TOP - STACK_LIMIT && !space.is_mapped(va) {
             space.map_new_page(va, USER | WRITABLE | NO_EXECUTE);
         }
         let (page, flags) = space.translate(va).ok_or(EFAULT)?;

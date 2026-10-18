@@ -10,11 +10,12 @@ Needs out/software (python3 software/build.py).
 """
 
 import os
+import re
 import sys
 import tempfile
 import time
 
-from machine import Machine, read_png
+from machine import Machine, ROOT, read_png
 
 W, H = 1280, 800
 WIN_W, WIN_H = 860, 600
@@ -52,8 +53,27 @@ def running(m, program):
 default_fw = 40 * 8 + 2 * 6 + 2
 wx = (W - default_fw) // 2 + (default_fw - (WIN_W + 2)) // 2
 cx, cy = wx + 1, 64 + 34  # the contents' top-left
-row0 = (cx + MARGIN, cy + TOOLBAR_H + 10)  # the first package's card
-button0 = (row0[0] + (WIN_W - 2 * MARGIN) - 16 - 48, row0[1] + (ROW_H - 10) // 2)  # its main button
+
+
+def row_xy(k):
+    """The k-th package's card, in the "All" tab's declaration order (software.zig's filter()
+    keeps packages.toml's order)."""
+    return (cx + MARGIN, cy + TOOLBAR_H + 10 + k * ROW_H)
+
+
+def button_xy(row):
+    return (row[0] + (WIN_W - 2 * MARGIN) - 16 - 48, row[1] + (ROW_H - 10) // 2)
+
+
+# Bastet's position among all the packages: wherever it falls in packages.toml, not necessarily
+# first (mesa, which the 3D games depend on, comes before it).
+with open(os.path.join(ROOT, "software/packages.toml")) as f:
+    names = [n for n in re.findall(r"^\[(\w[\w.-]*)\]", f.read(), re.MULTILINE) if not n.endswith(".files")]
+bastet_index = names.index("bastet")
+row0 = row_xy(0)
+button0 = button_xy(row0)
+bastet_row = row_xy(bastet_index)
+bastet_button = button_xy(bastet_row)
 
 with Machine(software=True) as m:
     m.run("software &")
@@ -64,7 +84,7 @@ with Machine(software=True) as m:
     blue = rows[button0[1]][button0[0]]
     check("the first one has an Install button", blue[2] > blue[0] + 60, blue)
 
-    click(m, *button0)
+    click(m, *bastet_button)  # a small, fast package, wherever it falls in the catalog
     installed = False
     for _ in range(60):
         time.sleep(2)
@@ -77,7 +97,7 @@ with Machine(software=True) as m:
     check("Install downloads and installs it", installed, m.run("ls /root/.local/software"))
     check("its program is in place", "bastet" in (m.run("ls /usr/games") or ""))
 
-    click(m, *button0)  # now Play
+    click(m, *bastet_button)  # now Play
     time.sleep(6)
     shot(m, "software-3.png")
     check("Play starts it, in a Terminal window", running(m, "bastet") and running(m, "terminal"))

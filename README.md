@@ -486,6 +486,9 @@ in the star menu's second column too, and stays installed after a restart.
 
 | Games | |
 |---|---|
+| Neverball, Neverputt | tilt the floor to roll a ball through 3D mazes; miniature golf on its courses |
+| Armagetron Advanced | light cycles in 3D, as in *Tron*: make the others crash into your wall |
+| FooBillard++ | pool, carom and snooker in 3D, against a friend or the computer |
 | Crispy Doom | Doom in 3D at a higher resolution, playing Freedoom |
 | Freedoom: Phase 2 | 32 more levels, for Doom II's engine (`doom -iwad …/freedoom2.wad`) |
 | LBreakoutHD | bricks, paddle and ball, with bonuses and a hundred levels |
@@ -498,9 +501,9 @@ and two apps, nano (a text editor) and CMatrix. From the shell:
 
 ```sh
 pkg available           # what there is
-pkg get nethack         # download and install it
-nethack                 # (games go in /usr/games, which is on PATH)
-pkg remove nethack
+pkg get neverball       # download and install it (and whatever it depends on)
+neverball               # (games go in /usr/games, which is on PATH)
+pkg remove neverball
 ```
 
 They're Ubuntu 24.04's own packages, unchanged. `software/build.py` (run by `build.sh`) downloads
@@ -510,16 +513,53 @@ their files, adds the libraries their programs need that the system doesn't have
 port 8086, which QEMU's network shows the guest as `10.0.2.2:8086` (`server=URL` in
 `/root/.config/software.conf` points elsewhere).
 
+A package can `depend` on another (the 3D games all depend on `mesa`, below): `pkg get` installs
+whatever's missing first, and `pkg remove` refuses to take away one that something else still
+needs.
+
 An installed package is unpacked onto the disk, into `/root/.local/software/NAME`, and the paths it
 names become symlinks into it (`/usr/games/nethack`, its folder in `/usr/lib/games`, ...). The root
 file system is rebuilt from the boot archive every boot, so init links them in again then. A file
 two packages both have (ncurses, which neither the system nor most games bring) comes from
 whichever was installed first, and passes to the other when that one is removed.
 
-The SDL games draw through our SDL 2 (see Doom). Games that ask for a fullscreen window get the
-biggest window there can be, and there is no sound yet: SDL's silent audio driver stands in, so
-games that need audio to start still do. Games that need OpenGL (SuperTux, Neverball, Xonotic) or
-X11 don't run yet, and neither does Steam (it's 32-bit, X11 and OpenGL/Vulkan underneath).
+The SDL games draw through our SDL 2 (see Doom); there is no sound yet, so SDL's silent audio
+driver stands in and games that need audio to start still do. Steam doesn't run (it's 32-bit, and
+needs X11 underneath).
+
+### OpenGL and Vulkan
+
+The 3D games draw with real OpenGL and Vulkan — there's no GPU, so both are the processor doing
+the work, through Mesa: **llvmpipe** for OpenGL, **lavapipe** for Vulkan, both using LLVM to turn
+shaders into machine code at run time. They're in the `mesa` package (installed automatically by
+anything that needs it), along with `libGL.so.1` (so programs built for Ubuntu link straight to
+it) and two small demos:
+
+```sh
+pkg get mesa
+glcube    # a lit, spinning cube with OpenGL
+vkcube    # the same with Vulkan
+```
+
+Our SDL video driver (`sdl2/SDL_kp2video.c`) supplies both. For OpenGL, an `SDL_GLContext` is an
+OSMesa context bound to a buffer the size of the window, and swapping sends that buffer to the
+window like any other picture. Vulkan is trickier: lavapipe can draw, but it only *presents* to
+X11, Wayland or nowhere (a "headless" surface, which is what our driver asks for) — so a Vulkan
+layer, `VK_LAYER_KP2_present` (`software/mesa/present_layer.c`), sits in front of every Vulkan
+program, copies each presented picture out of its swapchain image, and sends that to the window
+instead.
+
+A window that asks to go fullscreen gets the biggest window there can be (there's no taking the
+screen from the desktop), which is also what the display reports its size as — so a program that
+sizes itself to the display fits in a window exactly.
+
+Games with real OpenGL needed two more kernel pieces: `memfd_create` and `MAP_SHARED` (lavapipe
+keeps buffers this way, mapped more than once, and a child can see a parent's write to one
+instantly — `fs/memfile.rs`, `mm/shared.rs`), and a fix to a bug the games found: a thread's own
+`PROT_NONE` reservation (glibc gives each one a guard region for its stack and arena before it
+asks for real memory) was getting mistaken for an unmapped stack page and silently "fixed" with a
+spare one, corrupting it. Reservations now carry their own mark in the page table
+(`mm/paging.rs`'s `RESERVED` bit) so the two are never confused (`tests/anonmem.c`).
 
 ## Layout
 
@@ -601,7 +641,9 @@ Roughly in order; each step is checked by running a real program.
 3. **Run the targets**: fastfetch and git run; next then coreutils as a compatibility test.
 4. **More Windows**: BusyBox for Windows runs. Next: more real console programs (7-Zip), then
    windows and graphics.
-5. Later: a real login, and running make/gcc/cmake on the system itself.
+5. **Games**: real OpenGL and Vulkan run (Mesa's llvmpipe and lavapipe), with 3D games to prove
+   it. Next: sound, so games stop running silently.
+6. Later: a real login, and running make/gcc/cmake on the system itself.
 
 ## Licenses of what's used
 

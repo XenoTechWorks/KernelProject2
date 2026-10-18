@@ -58,6 +58,21 @@ int main(void) {
     check("an untouched reservation remains inaccessible", child > 0 && waitpid(child, &status, 0) == child
           && WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV);
 
+    // A PROT_NONE reservation within the kernel's potential stack-growth area must
+    // not be mistaken for a missing stack page and silently made writable.
+    char *stack_slot = (char *)(0x00007ffffffff000ULL - (6ULL << 20));
+    char *stack_reserved = mmap(stack_slot, page, PROT_NONE,
+                                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    int blocked = 0;
+    if (stack_reserved == stack_slot) {
+        child = fork();
+        if (child == 0) { *(volatile char *)stack_reserved = 1; _exit(1); }
+        blocked = child > 0 && waitpid(child, &status, 0) == child
+                  && WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV;
+        munmap(stack_reserved, page);
+    }
+    check("PROT_NONE reservation cannot auto-grow into a stack page", blocked);
+
     munmap(p, 3 * page);
     p = mmap(NULL, 3 * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     char *moved = mremap(p, 3 * page, 5 * page, MREMAP_MAYMOVE);

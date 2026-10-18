@@ -99,7 +99,9 @@ with Machine(software=True) as m:
     time.sleep(40)
     rows = shot(m, "graphics-vk.png")
     check("and its window shows the cube (through the present layer)", colorful(rows, *box) > 50, colorful(rows, *box))
-    m.run("kill %2")
+    # kpsh gives a new job the lowest free number, so this is "%1" again (glcube's [1] already
+    # ended): leaving it running would starve Neverball of memory for its own llvmpipe context.
+    m.run("kill %1")
     time.sleep(3)
 
     m.run("neverball > /tmp/nb.log 2>&1 &")

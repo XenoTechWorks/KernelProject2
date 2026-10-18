@@ -156,6 +156,10 @@ impl AddressSpace {
     /// Maps a fresh zeroed page at `va` if nothing is mapped there. Takes `&self` like `entry`: the
     /// page tables live outside this struct (for growing a stack while a system call reads it).
     pub fn map_new_page(&self, va: u64, flags: u64) -> bool {
+        // A PROT_NONE reservation is occupied virtual space, not a free stack page.
+        if self.is_reserved(va) {
+            return false;
+        }
         if self.translate(va).is_some() {
             return true;
         }
