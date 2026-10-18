@@ -904,7 +904,7 @@ pub fn user_fault(frame: &mut TrapFrame, name: &str) {
         let addr = cpu::read_cr2();
         let page = addr & !0xfff;
         let not_present = frame.error & 1 == 0;
-        if not_present && page < STACK_TOP && page >= STACK_TOP - STACK_LIMIT {
+        if not_present && page < STACK_TOP && page >= STACK_TOP - STACK_LIMIT && !p.space().is_mapped(page) {
             use crate::mm::paging::{NO_EXECUTE, USER, WRITABLE};
             if p.space_mut().map_zeroed(page, page + 4096, USER | WRITABLE | NO_EXECUTE) {
                 return;

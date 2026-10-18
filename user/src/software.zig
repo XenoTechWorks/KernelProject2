@@ -41,6 +41,7 @@ const toolbar_h = 46;
 const status_h = 26;
 const row_h = 84;
 const margin = 14;
+const scrollbar_gutter = 22;
 
 // ---- the packages ----
 
@@ -69,6 +70,9 @@ var shown: [256]usize = undefined;
 var shown_count: usize = 0;
 var chosen: ?usize = null; // into `items`
 var scroll: i32 = 0;
+var scrollbar_drag = false;
+var scrollbar_grab_y: i32 = 0;
+var hover_scrollbar = false;
 
 fn keepText(t: []u8) void {
     if (text_count < texts.len) {
@@ -318,16 +322,49 @@ fn listRect() Rect {
 
 fn rowRect(k: usize) Rect {
     const l = listRect();
-    return .{ .x = margin, .y = l.y + 10 + @as(i32, @intCast(k)) * row_h - scroll, .w = l.w - 2 * margin, .h = row_h - 10 };
+    const gutter: i32 = if (scrollbarTrack() != null) scrollbar_gutter else 0;
+    return .{ .x = margin, .y = l.y + 10 + @as(i32, @intCast(k)) * row_h - scroll, .w = l.w - 2 * margin - gutter, .h = row_h - 10 };
 }
 
 fn contentHeight() i32 {
     return 10 + @as(i32, @intCast(shown_count)) * row_h;
 }
 
+fn maxScroll() i32 {
+    return @max(0, contentHeight() - @max(0, listRect().h));
+}
+
+/// The track is shown only when the current category does not fit in the window.
+fn scrollbarTrack() ?Rect {
+    const l = listRect();
+    if (maxScroll() == 0 or l.h <= 24) return null;
+    return .{ .x = l.right() - 15, .y = l.y + 8, .w = 9, .h = l.h - 16 };
+}
+
+fn scrollbarThumb() ?Rect {
+    const track = scrollbarTrack() orelse return null;
+    const height = @min(track.h, @max(28, @divTrunc(track.h * track.h, contentHeight())));
+    const travel = track.h - height;
+    return .{ .x = track.x, .y = track.y + @divTrunc(scroll * travel, maxScroll()), .w = track.w, .h = height };
+}
+
+fn scrollbarHit(x: i32, y: i32) bool {
+    const track = scrollbarTrack() orelse return false;
+    return y >= track.y and y < track.bottom() and x >= track.x - 6 and x < track.right() + 6;
+}
+
+fn dragScrollbar(y: i32) void {
+    const track = scrollbarTrack() orelse return;
+    const thumb = scrollbarThumb() orelse return;
+    const travel = track.h - thumb.h;
+    if (travel > 0) {
+        scroll = @divTrunc((y - scrollbar_grab_y - track.y) * maxScroll(), travel);
+        clampScroll();
+    }
+}
+
 fn clampScroll() void {
-    const room = listRect().h;
-    scroll = @max(0, @min(scroll, contentHeight() - room));
+    scroll = @max(0, @min(scroll, maxScroll()));
 }
 
 fn ensureVisible(k: usize) void {
@@ -354,7 +391,7 @@ fn removeButton(r: Rect) Rect {
 }
 
 fn rowAt(x: i32, y: i32) ?usize {
-    if (!listRect().contains(x, y)) return null;
+    if (!listRect().contains(x, y) or scrollbarHit(x, y)) return null;
     for (0..shown_count) |k| {
         if (rowRect(k).contains(x, y)) return k;
     }
@@ -451,6 +488,13 @@ fn draw() void {
         const msg: []const u8 = if (tab == .installed) "Nothing installed yet. Pick something from All, Games or Apps." else if (offline != null) "Software's server can't be reached, so there's nothing to show." else "Nothing here.";
         _ = c.text(font, 15, @floatFromInt(l.x + 24), l.y + 44, msg, dim);
     }
+    if (scrollbarTrack()) |track| {
+        c.roundRect(track, 4, 0x171b22);
+        if (scrollbarThumb()) |thumb| {
+            c.roundRect(thumb, 4, if (scrollbar_drag or hover_scrollbar) 0x91a8c7 else 0x657c9d);
+            c.roundRectOutline(thumb, 4, 1, 0xa7b6ce);
+        }
+    }
     c.clip = c.bounds();
 
     // The status line.
@@ -529,8 +573,10 @@ fn drawRow(c: *Canvas, i: usize, k: usize, r: Rect) void {
 // ---- events ----
 
 fn motion(x: i32, y: i32) bool {
-    const before = .{ hover_row, hover_tab, hover_main, hover_remove };
-    hover_row = rowAt(x, y);
+    const before = .{ hover_row, hover_tab, hover_main, hover_remove, hover_scrollbar, scroll };
+    if (scrollbar_drag) dragScrollbar(y);
+    hover_scrollbar = scrollbarHit(x, y);
+    hover_row = if (scrollbar_drag or hover_scrollbar) null else rowAt(x, y);
     hover_tab = null;
     for (0..tab_names.len) |t| {
         if (tabRect(t).contains(x, y)) hover_tab = t;
@@ -541,12 +587,14 @@ fn motion(x: i32, y: i32) bool {
         hover_main = mainButton(rowRect(k)).contains(x, y);
         hover_remove = items[shown[k]].installed and removeButton(rowRect(k)).contains(x, y);
     }
-    return !std.meta.eql(before, .{ hover_row, hover_tab, hover_main, hover_remove });
+    return !std.meta.eql(before, .{ hover_row, hover_tab, hover_main, hover_remove, hover_scrollbar, scroll });
 }
 
 fn setTab(t: Tab) void {
     tab = t;
     scroll = 0;
+    scrollbar_drag = false;
+    hover_scrollbar = false;
     filter();
 }
 
@@ -555,6 +603,17 @@ fn act(i: usize) void {
 }
 
 fn press(x: i32, y: i32) void {
+    if (scrollbarHit(x, y)) {
+        const thumb = scrollbarThumb() orelse return;
+        scrollbar_drag = true;
+        if (y >= thumb.y and y < thumb.bottom()) {
+            scrollbar_grab_y = y - thumb.y;
+        } else {
+            scrollbar_grab_y = @divTrunc(thumb.h, 2);
+            dragScrollbar(y); // Clicking the track jumps toward that position.
+        }
+        return;
+    }
     for (0..tab_names.len) |t| {
         if (tabRect(t).contains(x, y)) return setTab(@enumFromInt(t));
     }
@@ -592,49 +651,87 @@ fn key(k: gui.Key) void {
     }
 }
 
+
 pub fn main(_: rt.Args) u8 {
     font = gui.Font.load(gui.theme.font_path) orelse {
         rt.err.write("software: no font in /usr/share/fonts\n");
         return 1;
     };
+
     win = gui.Window.open("Software", 860, 600) orelse {
         rt.err.write("software: can't open a window (no /dev/window?)\n");
         return 1;
     };
+
     setStatus("Asking Software's server what it has…", .{});
     draw();
+
     status_len = 0;
     load();
     draw();
+
     while (true) {
-        // Quick turns while there's work going on (pictures to fetch, pkg running).
+        // Quick turns while there's work going on.
         const busy = job != null;
         const e = win.next(if (busy) 100 else 250) orelse break;
         var redraw = true;
+
         switch (e) {
-            .motion => |m| redraw = motion(m.x, m.y),
+            .motion => |m| {
+                redraw = motion(m.x, m.y);
+            },
+
+            .release => |p| {
+                if (p.button == 1) {
+                    scrollbar_drag = false;
+                }
+            },
+
             .leave => {
+                hover_scrollbar = false;
                 hover_row = null;
                 hover_tab = null;
                 hover_main = false;
                 hover_remove = false;
             },
-            .press => |p| if (p.button == 1) press(p.x, p.y),
+
+            .press => |p| {
+                if (p.button == 1) {
+                    press(p.x, p.y);
+                }
+            },
+
             .key => |k| key(k),
+
             .scroll => |s| {
                 scroll += s.steps * 48;
                 clampScroll();
             },
-            .resize => clampScroll(),
+
+            .resize => {
+                scrollbar_drag = false;
+                clampScroll();
+            },
+
             .tick => {
                 redraw = pollJob();
-                if (fetchOnePicture()) redraw = true;
+                if (fetchOnePicture()) {
+                    redraw = true;
+                }
             },
+
             else => redraw = false,
         }
-        if (job != null and e != .tick) _ = pollJob();
-        if (redraw and !win.pending()) draw();
+
+        if (job != null and e != .tick) {
+            _ = pollJob();
+        }
+
+        if (redraw and !win.pending()) {
+            draw();
+        }
     }
+
     win.close();
     return 0;
 }

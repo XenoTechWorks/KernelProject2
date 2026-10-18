@@ -171,7 +171,12 @@ icon = "usr/share/icons/hicolor/128x128/apps/cmatrix.png"
 [neverball]
 title = "Neverball"
 category = "Games"
-debs = ["neverball", "neverball-data", "neverball-common"]
+debs = [
+    "neverball",
+    "neverball-data",
+    "neverball-common",
+    "fonts-dejavu-core", # neverball-common's ttf symlink points into this package
+]
 depends = ["mesa"]
 run = "/usr/games/neverball"
 about = "Tilt the floor to roll a ball through 3D mazes and collect the coins in time."

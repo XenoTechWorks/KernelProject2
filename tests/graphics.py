@@ -49,15 +49,43 @@ def colorful(rows, x0, y0, x1, y1):
 middle = (W // 2, 64 + 34 + 5 * 16 + 6)
 box = (middle[0] - 120, middle[1] - 100, middle[0] + 120, middle[1] + 100)
 
+
 with Machine(software=True) as m:
     out = m.run("pkg get neverball", timeout=1800)
-    check("a game brings Mesa along: it's installed first",
-          out is not None and "neverball needs mesa first" in out and "Installed mesa" in out and "Installed neverball" in out, out)
-    out = m.run("pkg remove mesa")
-    check("Mesa can't be removed while a game needs it", out is not None and "needed by neverball" in out, out)
+    check(
+        "a game brings Mesa along: it's installed first",
+        out is not None
+        and "neverball needs mesa first" in out
+        and "Installed mesa" in out
+        and "Installed neverball" in out,
+        out
+    )
 
+    out = m.run("pkg remove mesa")
+    check(
+        "Mesa can't be removed while a game needs it",
+        out is not None and "needed by neverball" in out,
+        out
+    )
+
+    # The font package and the game's symlink must both survive installation.
+    for path in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                 "/usr/share/games/neverball/ttf/DejaVuSans-Bold.ttf"):
+        out = m.run(f"cat {path} > /dev/null; echo FONT_EXIT=$?")
+        check(f"Neverball's font is readable at {path}",
+              out is not None and "FONT_EXIT=0" in out, out)
+
+    # Test OpenGL rendering.
     out = m.run("glcube --frames 10 2>&1", timeout=600)
-    check("glcube gets OpenGL from llvmpipe and draws", out is not None and "llvmpipe" in out and "10 frames" in out, out)
+    check(
+        "glcube gets OpenGL from llvmpipe and draws",
+        out is not None
+        and "llvmpipe" in out
+        and "10 frames" in out,
+        out
+    )
+
+
     m.run("glcube > /tmp/gl.log 2>&1 &")
     time.sleep(40)
     rows = shot(m, "graphics-gl.png")
@@ -71,13 +99,19 @@ with Machine(software=True) as m:
     time.sleep(40)
     rows = shot(m, "graphics-vk.png")
     check("and its window shows the cube (through the present layer)", colorful(rows, *box) > 50, colorful(rows, *box))
-    m.run("kill %2")
+    # kpsh gives a new job the lowest free number, so this is "%1" again (glcube's [1] already
+    # ended): leaving it running would starve Neverball of memory for its own llvmpipe context.
+    m.run("kill %1")
     time.sleep(3)
 
     m.run("neverball > /tmp/nb.log 2>&1 &")
     time.sleep(90)
     rows = shot(m, "graphics-neverball.png")
     log = m.run("cat /tmp/nb.log")
+    jobs = m.run("jobs")
+    check("Neverball stays running with Mesa's default worker settings",
+          jobs is not None and "Running" in jobs and "neverball" in jobs
+          and log is not None and "GL renderer: llvmpipe" in log, (jobs, log))
     check("Neverball starts and draws", colorful(rows, 0, 0, W, H) > 500, (colorful(rows, 0, 0, W, H), log))
 
 print(f"{sum(results)}/{len(results)} passed")
